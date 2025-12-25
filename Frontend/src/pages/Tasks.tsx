@@ -14,11 +14,18 @@ export default function Tasks() {
   useEffect(() => {
     if (isAuthenticated && user) {
       loadTasks()
+      
+      // Auto-refresh every 30 seconds
+      const refreshInterval = setInterval(() => {
+        loadTasks()
+      }, 30000)
+      
+      return () => clearInterval(refreshInterval)
     }
   }, [isAuthenticated, user])
 
-  const loadTasks = async () => {
-    setLoading(true)
+  const loadTasks = async (silent = false) => {
+    if (!silent) setLoading(true)
     setError(null)
     try {
       // Filter tasks by the current user's ID
@@ -31,9 +38,11 @@ export default function Tasks() {
       }
     } catch (err: any) {
       console.error('Failed to load tasks:', err)
-      setError('Failed to load tasks from server. Please make sure the backend is running.')
+      if (!silent) {
+        setError('Failed to load tasks from server. Please make sure the backend is running.')
+      }
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }
 

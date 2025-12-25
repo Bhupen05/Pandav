@@ -31,16 +31,25 @@ function Attendance() {
 
   useEffect(() => {
     loadAttendance()
+    
+    // Auto-refresh every 30 seconds
+    const refreshInterval = setInterval(() => {
+      loadAttendance(true)
+    }, 30000)
+    
+    return () => clearInterval(refreshInterval)
   }, [])
 
-  const loadAttendance = async () => {
+  const loadAttendance = async (silent = false) => {
     try {
       const response = await attendanceAPI.getAttendance()
       if (response.success) {
         setRecords(response.data)
       }
     } catch (err) {
-      console.error('Failed to load attendance:', err)
+      if (!silent) {
+        console.error('Failed to load attendance:', err)
+      }
     }
   }
 

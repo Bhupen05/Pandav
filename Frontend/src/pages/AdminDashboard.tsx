@@ -169,11 +169,20 @@ export default function AdminDashboard() {
       loadTasks()
       loadAttendance()
       loadUsers()
+      
+      // Auto-refresh every 30 seconds
+      const refreshInterval = setInterval(() => {
+        loadTasks(true)
+        loadAttendance(true)
+        loadUsers(true)
+      }, 30000)
+      
+      return () => clearInterval(refreshInterval)
     }
   }, [isAuthenticated, isAdmin])
 
-  const loadTasks = async () => {
-    setIsLoadingTasks(true)
+  const loadTasks = async (silent = false) => {
+    if (!silent) setIsLoadingTasks(true)
     try {
       const response = await taskAPI.getTasks()
       console.log('Admin - Tasks API Response:', response)
@@ -187,12 +196,12 @@ export default function AdminDashboard() {
     } catch (error) {
       console.error('Error loading tasks:', error)
     } finally {
-      setIsLoadingTasks(false)
+      if (!silent) setIsLoadingTasks(false)
     }
   }
 
-  const loadAttendance = async () => {
-    setIsLoadingAttendance(true)
+  const loadAttendance = async (silent = false) => {
+    if (!silent) setIsLoadingAttendance(true)
     try {
       const response = await attendanceAPI.getAttendance()
       if (response.success && Array.isArray(response.data)) {
@@ -201,12 +210,12 @@ export default function AdminDashboard() {
     } catch (error) {
       console.error('Error loading attendance:', error)
     } finally {
-      setIsLoadingAttendance(false)
+      if (!silent) setIsLoadingAttendance(false)
     }
   }
 
-  const loadUsers = async () => {
-    setIsLoadingUsers(true)
+  const loadUsers = async (silent = false) => {
+    if (!silent) setIsLoadingUsers(true)
     try {
       const response = await userAPI.getUsers({ isActive: true })
       if (response.success && Array.isArray(response.data)) {
@@ -215,7 +224,7 @@ export default function AdminDashboard() {
     } catch (error) {
       console.error('Error loading users:', error)
     } finally {
-      setIsLoadingUsers(false)
+      if (!silent) setIsLoadingUsers(false)
     }
   }
 
