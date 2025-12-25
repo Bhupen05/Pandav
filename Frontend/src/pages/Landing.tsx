@@ -1,5 +1,3 @@
-import Navbar from "../components/Navbar";
-
 export default function Landing() {
   return (
       <div className="min-h-screen bg-linear-to-b from-neutral-50 to-white">
