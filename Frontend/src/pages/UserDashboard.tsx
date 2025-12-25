@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
 import { attendanceAPI } from '../api/attendanceAPI'
@@ -50,13 +50,7 @@ export default function UserDashboard() {
     setCheckingSession(false)
   }, [isAuthenticated, user?.role, navigate])
 
-  useEffect(() => {
-    if (!checkingSession && isAuthenticated && user?._id) {
-      loadData()
-    }
-  }, [checkingSession, isAuthenticated, user?._id])
-
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setIsLoading(true)
     try {
       const [taskRes, attendanceRes] = await Promise.all([
@@ -82,7 +76,7 @@ export default function UserDashboard() {
       setTasks(myTasks)
       setAttendanceHistory(
         myAttendance.sort(
-          (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
+          (a: AttendanceRecord, b: AttendanceRecord) => new Date(b.date).getTime() - new Date(a.date).getTime(),
         ),
       )
     } catch (error) {
@@ -90,7 +84,13 @@ export default function UserDashboard() {
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [user?._id])
+
+  useEffect(() => {
+    if (!checkingSession && isAuthenticated && user?._id) {
+      loadData()
+    }
+  }, [checkingSession, isAuthenticated, user?._id, loadData])
 
   const pendingTasks = tasks.filter((task) => task.status !== 'completed')
   const todayKey = new Date().toISOString().split('T')[0]

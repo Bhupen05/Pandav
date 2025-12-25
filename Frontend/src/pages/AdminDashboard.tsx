@@ -70,7 +70,7 @@ export default function AdminDashboard() {
       ])
       setTasks(Array.isArray(taskRes?.data) ? taskRes.data : [])
       const requested = Array.isArray(attendanceRes?.data)
-        ? attendanceRes.data.filter((item) => item.status === 'requested')
+        ? attendanceRes.data.filter((item: AttendanceRequest) => item.status === 'requested')
         : []
       setAttendanceRequests(requested)
       setUsers(Array.isArray(userRes?.data) ? userRes.data : [])
@@ -145,7 +145,7 @@ export default function AdminDashboard() {
 
   const handleToggleUser = async (user: DashboardUser) => {
     try {
-      await userAPI.updateUser(user._id, { isActive: !user.isActive })
+      await userAPI.updateUser(user._id, { isActive: !user.isActive } as Partial<DashboardUser>)
       setUsers((prev) =>
         prev.map((item) => (item._id === user._id ? { ...item, isActive: !item.isActive } : item)),
       )
