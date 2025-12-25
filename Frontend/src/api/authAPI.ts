@@ -12,6 +12,7 @@ interface RegisterData {
   phone?: string;
   department?: string;
   role?: string;
+  profileImage?: string;
 }
 
 interface UpdatePasswordData {

@@ -23,7 +23,7 @@ export const getAttendance = async (req, res) => {
     }
 
     const attendance = await Attendance.find(filter)
-      .populate('user', 'name email department')
+      .populate('user', 'name email department profileImage')
       .populate('approvedBy', 'name email')
       .sort('-date');
 
@@ -46,7 +46,7 @@ export const getAttendance = async (req, res) => {
 export const getAttendanceById = async (req, res) => {
   try {
     const attendance = await Attendance.findById(req.params.id)
-      .populate('user', 'name email department')
+      .populate('user', 'name email department profileImage')
       .populate('approvedBy', 'name email');
 
     if (!attendance) {
@@ -89,7 +89,7 @@ export const createAttendance = async (req, res) => {
     const attendance = await Attendance.create(req.body);
 
     const populatedAttendance = await Attendance.findById(attendance._id)
-      .populate('user', 'name email department');
+      .populate('user', 'name email department profileImage');
 
     res.status(201).json({
       success: true,
@@ -140,7 +140,7 @@ export const updateAttendance = async (req, res) => {
       new: true,
       runValidators: true,
     })
-      .populate('user', 'name email department')
+      .populate('user', 'name email department profileImage')
       .populate('approvedBy', 'name email');
 
     res.json({
@@ -212,7 +212,7 @@ export const checkIn = async (req, res) => {
     });
 
     const populatedAttendance = await Attendance.findById(attendance._id)
-      .populate('user', 'name email department');
+      .populate('user', 'name email department profileImage');
 
     res.status(201).json({
       success: true,
@@ -257,7 +257,7 @@ export const checkOut = async (req, res) => {
     await attendance.save();
 
     const populatedAttendance = await Attendance.findById(attendance._id)
-      .populate('user', 'name email department');
+      .populate('user', 'name email department profileImage');
 
     res.json({
       success: true,

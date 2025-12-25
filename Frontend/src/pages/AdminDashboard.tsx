@@ -13,6 +13,9 @@ type User = {
   name: string
   email: string
   role?: string
+  profileImage?: string
+  phone?: string
+  department?: string
 }
 
 type EmployeeRanking = {
@@ -124,7 +127,10 @@ export default function AdminDashboard() {
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isPerformanceModalOpen, setIsPerformanceModalOpen] = useState(false)
   const [isUserModalOpen, setIsUserModalOpen] = useState(false)
+  const [isEditUserModalOpen, setIsEditUserModalOpen] = useState(false)
   const [selectedEmployee, setSelectedEmployee] = useState<EmployeeRanking | null>(null)
+  const [selectedUser, setSelectedUser] = useState<User | null>(null)
+  const [uploadingUserImage, setUploadingUserImage] = useState(false)
   const [performanceInput, setPerformanceInput] = useState({
     tasksCompleted: 0,
     attendanceRate: 0,
@@ -135,6 +141,7 @@ export default function AdminDashboard() {
   const [taskPage, setTaskPage] = useState(1)
   const [attendancePage, setAttendancePage] = useState(1)
   const [rankingPage, setRankingPage] = useState(1)
+  const [userPage, setUserPage] = useState(1)
   const itemsPerPage = 5
   const [newTask, setNewTask] = useState({
     title: '',
@@ -150,8 +157,12 @@ export default function AdminDashboard() {
     name: '',
     email: '',
     password: '',
-    role: 'user' as 'user' | 'admin',
+    role: 'employee' as 'employee' | 'admin',
+    profileImage: '',
+    department: '',
+    phone: '',
   })
+  const [uploadingNewUserImage, setUploadingNewUserImage] = useState(false)
 
   // Check if modal should be opened from URL parameter
   useEffect(() => {
@@ -322,6 +333,9 @@ export default function AdminDashboard() {
         email: newUser.email.trim(),
         password: newUser.password,
         role: newUser.role,
+        profileImage: newUser.profileImage || undefined,
+        department: newUser.department.trim() || undefined,
+        phone: newUser.phone.trim() || undefined,
       })
 
       if (response.success) {
@@ -331,8 +345,12 @@ export default function AdminDashboard() {
           name: '',
           email: '',
           password: '',
-          role: 'user',
+          role: 'employee',
+          profileImage: '',
+          department: '',
+          phone: '',
         })
+        loadUsers() // Reload users to show the new user
       } else {
         alert(response.message || 'Failed to register user')
       }
@@ -341,6 +359,38 @@ export default function AdminDashboard() {
       alert(error.response?.data?.message || 'Failed to register user. Please check if the backend is running.')
     } finally {
       setIsAddingUser(false)
+    }
+  }
+
+  const handleNewUserImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || !e.target.files[0]) return
+    
+    const file = e.target.files[0]
+    
+    // Validate file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Image size must be less than 5MB')
+      return
+    }
+
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      alert('Please select a valid image file')
+      return
+    }
+
+    setUploadingNewUserImage(true)
+    try {
+      const reader = new FileReader()
+      reader.onloadend = () => {
+        const base64String = reader.result as string
+        setNewUser({ ...newUser, profileImage: base64String })
+        setUploadingNewUserImage(false)
+      }
+      reader.readAsDataURL(file)
+    } catch (error) {
+      setUploadingNewUserImage(false)
+      alert('Failed to process image')
     }
   }
 
@@ -363,6 +413,7 @@ export default function AdminDashboard() {
   const paginatedTasks = filteredTasks.slice((taskPage - 1) * itemsPerPage, taskPage * itemsPerPage)
   const paginatedAttendance = filteredAttendance.slice((attendancePage - 1) * itemsPerPage, attendancePage * itemsPerPage)
   const paginatedRankings = sortedRankings.slice((rankingPage - 1) * itemsPerPage, rankingPage * itemsPerPage)
+  const paginatedUsers = users.slice((userPage - 1) * itemsPerPage, userPage * itemsPerPage)
 
   console.log('Admin - Tasks state:', tasks.length, 'tasks')
   console.log('Admin - Task filter:', taskFilter)
@@ -389,6 +440,65 @@ export default function AdminDashboard() {
     ))
     setIsPerformanceModalOpen(false)
     setSelectedEmployee(null)
+  }
+
+  const handleEditUser = (user: User) => {
+    setSelectedUser(user)
+    setIsEditUserModalOpen(true)
+  }
+
+  const handleUserImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!selectedUser || !e.target.files || !e.target.files[0]) return
+    
+    const file = e.target.files[0]
+    
+    // Validate file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Image size must be less than 5MB')
+      return
+    }
+
+    // Validate file type
+    if (!file.type.startsWith('image/')) {
+      alert('Please select a valid image file')
+      return
+    }
+
+    setUploadingUserImage(true)
+    try {
+      const reader = new FileReader()
+      reader.onloadend = async () => {
+        const base64String = reader.result as string
+
+        try {
+          const response = await userAPI.updateUser(selectedUser._id, {
+            profileImage: base64String,
+          })
+
+          if (response.success) {
+            // Update the user in the list
+            setUsers(users.map(u => 
+              u._id === selectedUser._id 
+                ? { ...u, profileImage: base64String }
+                : u
+            ))
+            setSelectedUser({ ...selectedUser, profileImage: base64String })
+            alert('Profile picture updated successfully!')
+          } else {
+            alert(response.message || 'Failed to update profile picture')
+          }
+        } catch (error: any) {
+          console.error('Error uploading image:', error)
+          alert(error.response?.data?.message || 'Failed to upload image')
+        } finally {
+          setUploadingUserImage(false)
+        }
+      }
+      reader.readAsDataURL(file)
+    } catch (error) {
+      setUploadingUserImage(false)
+      alert('Failed to process image')
+    }
   }
 
   // Analytics calculations
@@ -437,7 +547,7 @@ export default function AdminDashboard() {
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
                 </svg>
-                Add User
+                Add Employee
               </span>
             </button>
           </div>
@@ -819,6 +929,84 @@ export default function AdminDashboard() {
           </div>
         </section>
 
+        {/* Employee Management */}
+        <section className="mb-8 rounded-xl border bg-white p-6 shadow-sm">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-neutral-900">Employee Management</h2>
+            <button 
+              onClick={() => setIsUserModalOpen(true)}
+              className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-emerald-700 transition-colors"
+            >
+              Add Employee
+            </button>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="border-b bg-neutral-50">
+                <tr>
+                  <th className="px-4 py-3 text-left font-medium text-neutral-800">Employee</th>
+                  <th className="px-4 py-3 text-left font-medium text-neutral-800">Email</th>
+                  <th className="px-4 py-3 text-left font-medium text-neutral-800">Role</th>
+                  <th className="px-4 py-3 text-left font-medium text-neutral-800">Department</th>
+                  <th className="px-4 py-3 text-right font-medium text-neutral-800">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {paginatedUsers.map((user) => (
+                  <tr key={user._id} className="hover:bg-neutral-50">
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-3">
+                        {user.profileImage ? (
+                          <img
+                            src={user.profileImage}
+                            alt={user.name}
+                            className="h-10 w-10 rounded-full object-cover"
+                            onError={(e) => {
+                              e.currentTarget.style.display = 'none'
+                              const fallback = e.currentTarget.nextElementSibling
+                              if (fallback) fallback.classList.remove('hidden')
+                            }}
+                          />
+                        ) : null}
+                        <div className={`flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700 ${user.profileImage ? 'hidden' : ''}`}>
+                          {user.name.split(' ').map(n => n[0]).join('')}
+                        </div>
+                        <span className="font-medium text-neutral-900">{user.name}</span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-neutral-700">{user.email}</td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                        user.role === 'admin' 
+                          ? 'bg-purple-100 text-purple-800' 
+                          : 'bg-blue-100 text-blue-800'
+                      }`}>
+                        {user.role === 'admin' ? 'admin' : 'employee'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-neutral-700">{user.department || '-'}</td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        onClick={() => handleEditUser(user)}
+                        className="text-sm text-emerald-600 hover:text-emerald-800 font-medium"
+                      >
+                        Edit Profile
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <Pagination
+            currentPage={userPage}
+            totalItems={users.length}
+            itemsPerPage={itemsPerPage}
+            onPageChange={setUserPage}
+          />
+        </section>
+
         {/* Add Task Modal */}
         {isModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setIsModalOpen(false)}>
@@ -1059,12 +1247,124 @@ export default function AdminDashboard() {
           </div>
         )}
 
+        {/* Edit User Modal */}
+        {isEditUserModalOpen && selectedUser && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setIsEditUserModalOpen(false)}>
+            <div className="w-full max-w-md rounded-xl border bg-white p-6 shadow-lg" onClick={(e) => e.stopPropagation()}>
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-xl font-semibold text-neutral-900">Edit Employee Profile</h2>
+                <button
+                  onClick={() => setIsEditUserModalOpen(false)}
+                  className="rounded-lg p-1 hover:bg-neutral-100"
+                  aria-label="Close modal"
+                >
+                  <svg className="h-5 w-5 text-neutral-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              <div className="mb-6">
+                <label className="mb-2 block text-sm font-medium text-neutral-800">Profile Picture</label>
+                <div className="flex items-center gap-4">
+                  <div className="relative">
+                    {selectedUser.profileImage ? (
+                      <img
+                        src={selectedUser.profileImage}
+                        alt={selectedUser.name}
+                        className="h-20 w-20 rounded-full object-cover"
+                        onError={(e) => {
+                          e.currentTarget.style.display = 'none'
+                          const fallback = e.currentTarget.nextElementSibling
+                          if (fallback) fallback.classList.remove('hidden')
+                        }}
+                      />
+                    ) : null}
+                    <div className={`flex h-20 w-20 items-center justify-center rounded-full bg-emerald-100 text-2xl font-bold text-emerald-700 ${selectedUser.profileImage ? 'hidden' : ''}`}>
+                      {selectedUser.name.split(' ').map(n => n[0]).join('')}
+                    </div>
+                    <label
+                      htmlFor="user-profile-image"
+                      className="absolute bottom-0 right-0 flex h-7 w-7 cursor-pointer items-center justify-center rounded-full bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
+                      title="Change profile picture"
+                    >
+                      {uploadingUserImage ? (
+                        <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"></div>
+                      ) : (
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                      )}
+                    </label>
+                    <input
+                      id="user-profile-image"
+                      type="file"
+                      accept="image/*"
+                      onChange={handleUserImageUpload}
+                      disabled={uploadingUserImage}
+                      className="hidden"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-neutral-900">{selectedUser.name}</p>
+                    <p className="text-xs text-neutral-600">{selectedUser.email}</p>
+                    <p className="mt-1 text-xs text-neutral-500">Click the camera icon to upload a new image</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-neutral-800">Name</label>
+                  <p className="text-sm text-neutral-900">{selectedUser.name}</p>
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-neutral-800">Email</label>
+                  <p className="text-sm text-neutral-900">{selectedUser.email}</p>
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-neutral-800">Role</label>
+                  <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                    selectedUser.role === 'admin' 
+                      ? 'bg-purple-100 text-purple-800' 
+                      : 'bg-blue-100 text-blue-800'
+                  }`}>
+                    {selectedUser.role === 'admin' ? 'admin' : 'employee'}
+                  </span>
+                </div>
+                {selectedUser.department && (
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-neutral-800">Department</label>
+                    <p className="text-sm text-neutral-900">{selectedUser.department}</p>
+                  </div>
+                )}
+                {selectedUser.phone && (
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-neutral-800">Phone</label>
+                    <p className="text-sm text-neutral-900">{selectedUser.phone}</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-6 flex justify-end">
+                <button
+                  onClick={() => setIsEditUserModalOpen(false)}
+                  className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Add User Modal */}
         {isUserModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setIsUserModalOpen(false)}>
             <div className="w-full max-w-md rounded-xl border bg-white p-6 shadow-lg" onClick={(e) => e.stopPropagation()}>
               <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-xl font-semibold text-neutral-900">Register New User</h2>
+                <h2 className="text-xl font-semibold text-neutral-900">Register New Employee</h2>
                 <button
                   onClick={() => setIsUserModalOpen(false)}
                   className="rounded-lg p-1 hover:bg-neutral-100"
@@ -1077,6 +1377,64 @@ export default function AdminDashboard() {
               </div>
 
               <form onSubmit={(e) => { e.preventDefault(); handleAddUser(); }} className="space-y-4">
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-neutral-800">Profile Picture (Optional)</label>
+                  <div className="flex items-center gap-4">
+                    <div className="relative">
+                      {newUser.profileImage ? (
+                        <img
+                          src={newUser.profileImage}
+                          alt="Profile preview"
+                          className="h-20 w-20 rounded-full object-cover"
+                          onError={(e) => {
+                            e.currentTarget.style.display = 'none'
+                            const fallback = e.currentTarget.nextElementSibling
+                            if (fallback) fallback.classList.remove('hidden')
+                          }}
+                        />
+                      ) : null}
+                      <div className={`flex h-20 w-20 items-center justify-center rounded-full bg-emerald-100 text-2xl font-bold text-emerald-700 ${newUser.profileImage ? 'hidden' : ''}`}>
+                        {newUser.name ? newUser.name.split(' ').map(n => n[0]).join('').toUpperCase() : '?'}
+                      </div>
+                      <label
+                        htmlFor="new-user-profile-image"
+                        className="absolute bottom-0 right-0 flex h-7 w-7 cursor-pointer items-center justify-center rounded-full bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
+                        title="Upload profile picture"
+                      >
+                        {uploadingNewUserImage ? (
+                          <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"></div>
+                        ) : (
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                          </svg>
+                        )}
+                      </label>
+                      <input
+                        id="new-user-profile-image"
+                        type="file"
+                        accept="image/*"
+                        onChange={handleNewUserImageUpload}
+                        disabled={uploadingNewUserImage}
+                        className="hidden"
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-sm text-neutral-700">Add a profile picture</p>
+                      <p className="mt-1 text-xs text-neutral-500">Click the camera icon to upload (max 5MB)</p>
+                      {newUser.profileImage && (
+                        <button
+                          type="button"
+                          onClick={() => setNewUser({ ...newUser, profileImage: '' })}
+                          className="mt-2 text-xs text-red-600 hover:text-red-800"
+                        >
+                          Remove image
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
                 <div>
                   <label htmlFor="user-name" className="mb-1 block text-sm font-medium text-neutral-800">
                     Full Name <span className="text-red-500">*</span>
@@ -1125,17 +1483,59 @@ export default function AdminDashboard() {
                 </div>
 
                 <div>
+                  <label htmlFor="user-department" className="mb-1 block text-sm font-medium text-neutral-800">
+                    Department
+                  </label>
+                  <select
+                    id="user-department"
+                    value={newUser.department}
+                    onChange={(e) => setNewUser({ ...newUser, department: e.target.value })}
+                    className="block w-full rounded-md border px-3 py-2 text-sm outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600"
+                  >
+                    <option value="">Select Department</option>
+                    <option value="Frontend Developer">Frontend Developer</option>
+                    <option value="Backend Developer">Backend Developer</option>
+                    <option value="Full Stack Developer">Full Stack Developer</option>
+                    <option value="UI/UX Designer">UI/UX Designer</option>
+                    <option value="Digital Marketing">Digital Marketing</option>
+                    <option value="DevOps">DevOps</option>
+                    <option value="Quality Assurance">Quality Assurance</option>
+                    <option value="Product Manager">Product Manager</option>
+                    <option value="Data Science">Data Science</option>
+                    <option value="Human Resources">Human Resources</option>
+                    <option value="Sales">Sales</option>
+                    <option value="Finance">Finance</option>
+                    <option value="Operations">Operations</option>
+                    <option value="Customer Support">Customer Support</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label htmlFor="user-phone" className="mb-1 block text-sm font-medium text-neutral-800">
+                    Phone Number
+                  </label>
+                  <input
+                    id="user-phone"
+                    type="tel"
+                    value={newUser.phone}
+                    onChange={(e) => setNewUser({ ...newUser, phone: e.target.value })}
+                    placeholder="e.g., +1234567890"
+                    className="block w-full rounded-md border px-3 py-2 text-sm outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600"
+                  />
+                </div>
+
+                <div>
                   <label htmlFor="user-role" className="mb-1 block text-sm font-medium text-neutral-800">
                     Role <span className="text-red-500">*</span>
                   </label>
                   <select
                     id="user-role"
                     value={newUser.role}
-                    onChange={(e) => setNewUser({ ...newUser, role: e.target.value as 'user' | 'admin' })}
+                    onChange={(e) => setNewUser({ ...newUser, role: e.target.value as 'employee' | 'admin' })}
                     className="block w-full rounded-md border px-3 py-2 text-sm outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600"
                     required
                   >
-                    <option value="user">User</option>
+                    <option value="employee">Employee</option>
                     <option value="admin">Admin</option>
                   </select>
                   <p className="mt-1 text-xs text-neutral-600">Admins have full access to dashboard and management features</p>
@@ -1155,7 +1555,7 @@ export default function AdminDashboard() {
                     disabled={isAddingUser}
                     className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {isAddingUser ? 'Registering...' : 'Register User'}
+                    {isAddingUser ? 'Registering...' : 'Register Employee'}
                   </button>
                 </div>
               </form>

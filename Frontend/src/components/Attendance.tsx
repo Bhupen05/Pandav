@@ -8,6 +8,7 @@ export type AttendanceRecord = {
     _id: string
     name: string
     email: string
+    profileImage?: string
   }
   date: string
   status: 'present' | 'absent' | 'late' | 'half-day' | 'leave'
@@ -291,7 +292,7 @@ function Attendance() {
             <table className="w-full text-left text-sm">
               <thead className="border-b bg-neutral-50">
                 <tr>
-                  <th className="px-4 py-3 font-medium text-neutral-900">Name</th>
+                  <th className="px-4 py-3 font-medium text-neutral-900">Employee</th>
                   <th className="px-4 py-3 font-medium text-neutral-900">Date</th>
                   <th className="px-4 py-3 font-medium text-neutral-900">Status</th>
                   <th className="px-4 py-3 font-medium text-neutral-900">Check In</th>
@@ -304,7 +305,26 @@ function Attendance() {
               <tbody className="divide-y">
                 {filteredRecords.map((record) => (
                   <tr key={record._id} className="hover:bg-neutral-50">
-                    <td className="px-4 py-3 text-neutral-900">{record.user.name}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-3">
+                        {record.user.profileImage ? (
+                          <img
+                            src={record.user.profileImage}
+                            alt={record.user.name}
+                            className="h-8 w-8 rounded-full object-cover"
+                            onError={(e) => {
+                              e.currentTarget.style.display = 'none'
+                              const fallback = e.currentTarget.nextElementSibling
+                              if (fallback) fallback.classList.remove('hidden')
+                            }}
+                          />
+                        ) : null}
+                        <div className={`flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700 ${record.user.profileImage ? 'hidden' : ''}`}>
+                          {record.user.name.split(' ').map(n => n[0]).join('')}
+                        </div>
+                        <span className="text-neutral-900">{record.user.name}</span>
+                      </div>
+                    </td>
                     <td className="px-4 py-3 text-neutral-700">{formatDate(record.date)}</td>
                     <td className="px-4 py-3">
                       <span
