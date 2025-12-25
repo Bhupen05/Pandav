@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useAuth } from '../context/AuthContext'
 import { userAPI } from '../api/userAPI'
+import { taskAPI } from '../api/taskAPI'
 
 type DayEntry = {
   date: string // ISO yyyy-mm-dd
@@ -9,9 +10,9 @@ type DayEntry = {
 
 const COLOR_SCALE = [
   'bg-neutral-200',
-  'bg-emerald-100',
-  'bg-emerald-200',
-  'bg-emerald-300',
+  // 'bg-emerald-100',
+  // 'bg-emerald-200',  
+  // 'bg-emerald-300',
   'bg-emerald-400',
   'bg-emerald-500',
 ]
@@ -90,10 +91,11 @@ type UserProfile = {
 
 export default function Profile() {
   const { user, updateUser } = useAuth()
-  const data = generateMockData(140)
-  const { weeks, today } = buildCalendar(data)
-  const { current, best } = streaks(data)
-  const total = data.reduce((sum, d) => sum + d.count, 0)
+  const [activityData, setActivityData] = useState<DayEntry[]>([])
+  const [loadingActivity, setLoadingActivity] = useState(true)
+  const { weeks, today } = buildCalendar(activityData)
+  const { current, best } = streaks(activityData)
+  const total = activityData.reduce((sum, d) => sum + d.count, 0)
 
   const [isEditing, setIsEditing] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -109,6 +111,7 @@ export default function Profile() {
 
   const [editedProfile, setEditedProfile] = useState<UserProfile>(profile)
 
+  // Load user profile and activity data
   useEffect(() => {
     if (user) {
       const userProfile: UserProfile = {
@@ -121,8 +124,53 @@ export default function Profile() {
       }
       setProfile(userProfile)
       setEditedProfile(userProfile)
+      loadActivityData()
     }
   }, [user])
+
+  // Load activity data from tasks
+  const loadActivityData = async () => {
+    if (!user?._id) return
+    
+    setLoadingActivity(true)
+    try {
+      const filters = { assignedTo: user._id }
+      const response = await taskAPI.getTasks(filters)
+      
+      if (response.success && Array.isArray(response.data)) {
+        // Generate activity data from completed tasks
+        const activityMap = new Map<string, number>()
+        
+        response.data.forEach((task: any) => {
+          if (task.status === 'completed' && task.updatedAt) {
+            const date = new Date(task.updatedAt).toISOString().slice(0, 10)
+            activityMap.set(date, (activityMap.get(date) || 0) + 1)
+          }
+        })
+        
+        // Fill in the last 140 days with activity data
+        const today = new Date()
+        const entries: DayEntry[] = []
+        for (let i = 140; i >= 0; i--) {
+          const d = new Date(today)
+          d.setDate(today.getDate() - i)
+          const iso = d.toISOString().slice(0, 10)
+          entries.push({ date: iso, count: activityMap.get(iso) || 0 })
+        }
+        
+        setActivityData(entries)
+      } else {
+        // Fallback to empty data if no tasks
+        setActivityData(generateMockData(140).map(d => ({ ...d, count: 0 })))
+      }
+    } catch (error) {
+      console.error('Failed to load activity data:', error)
+      // Fallback to empty data on error
+      setActivityData(generateMockData(140).map(d => ({ ...d, count: 0 })))
+    } finally {
+      setLoadingActivity(false)
+    }
+  }
 
   const handleEdit = () => {
     setEditedProfile(profile)
@@ -137,6 +185,8 @@ export default function Profile() {
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
+
+    console.log('Image file selected:', file.name, 'Size:', file.size, 'bytes');
 
     // Validate file type
     if (!file.type.startsWith('image/')) {
@@ -156,13 +206,17 @@ export default function Profile() {
       const reader = new FileReader()
       reader.onloadend = async () => {
         const base64String = reader.result as string
+        console.log('Image converted to base64, length:', base64String.length);
         
         if (!user?._id) return
 
         try {
+          console.log('Uploading image to backend...');
           const response = await userAPI.updateUser(user._id, {
             profileImage: base64String,
           })
+
+          console.log('Upload response:', response);
 
           if (response.success) {
             const updatedProfile = { ...profile, profileImage: base64String }
@@ -273,12 +327,17 @@ export default function Profile() {
                     src={profile.profileImage}
                     alt={profile.name}
                     className="h-20 w-20 rounded-full object-cover"
+                    onError={(e) => {
+                      console.error('Failed to load profile image');
+                      e.currentTarget.style.display = 'none';
+                      const fallback = e.currentTarget.nextElementSibling;
+                      if (fallback) fallback.classList.remove('hidden');
+                    }}
                   />
-                ) : (
-                  <div className="flex h-20 w-20 items-center justify-center rounded-full bg-emerald-100 text-2xl font-bold text-emerald-700">
-                    {profile.name.split(' ').map(n => n[0]).join('')}
-                  </div>
-                )}
+                ) : null}
+                <div className={`flex h-20 w-20 items-center justify-center rounded-full bg-emerald-100 text-2xl font-bold text-emerald-700 ${profile.profileImage ? 'hidden' : ''}`}>
+                  {profile.name.split(' ').map(n => n[0]).join('')}
+                </div>
                 <label
                   htmlFor="profile-image"
                   className="absolute bottom-0 right-0 flex h-7 w-7 cursor-pointer items-center justify-center rounded-full bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
@@ -386,57 +445,65 @@ export default function Profile() {
         <p className="text-sm text-neutral-600">Track your contributions and engagement.</p>
       </div>
 
-      <section className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
-          <p className="text-xs text-neutral-600">Total entries</p>
-          <p className="text-xl font-semibold text-neutral-900">{total}</p>
+      {loadingActivity ? (
+        <div className="flex justify-center py-12">
+          <div className="h-8 w-8 animate-spin rounded-full border-4 border-emerald-600 border-t-transparent"></div>
         </div>
-        <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
-          <p className="text-xs text-neutral-600">Current streak</p>
-          <p className="text-xl font-semibold text-neutral-900">{current} days</p>
-        </div>
-        <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
-          <p className="text-xs text-neutral-600">Best streak</p>
-          <p className="text-xl font-semibold text-neutral-900">{best} days</p>
-        </div>
-      </section>
+      ) : (
+        <>
+          <section className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
+              <p className="text-xs text-neutral-600">Total entries</p>
+              <p className="text-xl font-semibold text-neutral-900">{total}</p>
+            </div>
+            <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
+              <p className="text-xs text-neutral-600">Current streak</p>
+              <p className="text-xl font-semibold text-neutral-900">{current} days</p>
+            </div>
+            <div className="rounded-xl border bg-white px-4 py-3 shadow-sm">
+              <p className="text-xs text-neutral-600">Best streak</p>
+              <p className="text-xl font-semibold text-neutral-900">{best} days</p>
+            </div>
+          </section>
 
-      <section className="rounded-xl border bg-white p-4 shadow-sm">
-        <div className="mb-3 flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-neutral-900">Contributions</h2>
-            <p className="text-xs text-neutral-500">Last updated {today.toLocaleDateString()}</p>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-neutral-600">
-            <span>Less</span>
-            {COLOR_SCALE.map((c, idx) => (
-              <span key={idx} className={`h-3 w-3 rounded-sm ${c}`}></span>
-            ))}
-            <span>More</span>
-          </div>
-        </div>
+          <section className="rounded-xl border bg-white p-4 shadow-sm">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-neutral-900">Contributions</h2>
+                <p className="text-xs text-neutral-500">Last updated {today.toLocaleDateString()}</p>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-neutral-600">
+                <span>Less</span>
+                {COLOR_SCALE.map((c, idx) => (
+                  <span key={idx} className={`h-3 w-3 rounded-sm ${c}`}></span>
+                ))}
+                <span>More</span>
+              </div>
+            </div>
 
-        <div className="flex gap-2 overflow-x-auto pb-2">
-          <div className="mt-5 flex w-10 flex-col gap-6 text-[11px] text-neutral-500">
-            {dayLabels.map((d) => (
-              <span key={d}>{d}</span>
-            ))}
-          </div>
-          <div className="flex gap-1">
-            {weeks.map((week, i) => (
-              <div key={i} className="flex flex-col gap-1">
-                {week.map((day) => (
-                  <div
-                    key={day.date}
-                    className={`h-3.5 w-3.5 rounded-sm ${colorForCount(day.count)} border border-neutral-200/60`}
-                    title={`${day.date}: ${day.count} entries`}
-                  ></div>
+            <div className="flex gap-2 overflow-x-auto pb-2">
+              <div className="mt-5 flex w-10 flex-col gap-6 text-[11px] text-neutral-500">
+                {dayLabels.map((d) => (
+                  <span key={d}>{d}</span>
                 ))}
               </div>
-            ))}
-          </div>
-        </div>
-      </section>
+              <div className="flex gap-1">
+                {weeks.map((week, i) => (
+                  <div key={i} className="flex flex-col gap-1">
+                    {week.map((day) => (
+                      <div
+                        key={day.date}
+                        className={`h-3.5 w-3.5 rounded-sm ${colorForCount(day.count)} border border-neutral-200/60`}
+                        title={`${day.date}: ${day.count} entries`}
+                      ></div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+        </>
+      )}
     </main>
   )
 }

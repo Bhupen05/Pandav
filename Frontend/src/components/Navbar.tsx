@@ -92,12 +92,17 @@ function Navbar() {
                     src={user.profileImage}
                     alt={user.name}
                     className="h-8 w-8 rounded-full object-cover"
+                    onError={(e) => {
+                      console.error('Failed to load navbar profile image');
+                      e.currentTarget.style.display = 'none';
+                      const fallback = e.currentTarget.nextElementSibling;
+                      if (fallback) fallback.classList.remove('hidden');
+                    }}
                   />
-                ) : (
-                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700">
-                    {user?.name?.split(' ').map(n => n[0]).join('') || 'U'}
-                  </div>
-                )}
+                ) : null}
+                <div className={`flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700 ${user?.profileImage ? 'hidden' : ''}`}>
+                  {user?.name?.split(' ').map(n => n[0]).join('') || 'U'}
+                </div>
                 <span className="hidden text-sm font-medium text-neutral-900 md:block">
                   {user?.name || 'User'}
                 </span>
