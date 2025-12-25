@@ -18,8 +18,29 @@ connectDB();
 
 // Middleware
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'https://pandav.onrender.com/',
-  credentials: true
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or Postman/Thunder Client)
+    if (!origin) return callback(null, true);
+    
+    // List of allowed origins
+    const allowedOrigins = [
+      'http://localhost:5173',
+      'http://localhost:5174',
+      'http://localhost:3000',
+      'https://pandav.onrender.com',
+      'https://pandav.onrender.com/',
+      process.env.CLIENT_URL
+    ].filter(Boolean);
+    
+    if (allowedOrigins.indexOf(origin) !== -1 || origin.includes('localhost')) {
+      callback(null, true);
+    } else {
+      callback(null, true); // Allow all origins for now (change to false in production if needed)
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));

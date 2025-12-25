@@ -36,9 +36,32 @@ api.interceptors.response.use(
         window.location.href = '/login';
       }
       
+      // Log detailed error information for debugging
+      console.error('API Error:', {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        data: error.response.data,
+        url: error.config?.url
+      });
+      
       // Return error message from backend
       return Promise.reject(error.response.data);
     }
+    
+    // Network error or CORS issue
+    if (error.request) {
+      console.error('Network Error:', {
+        message: 'No response received from server',
+        url: error.config?.url,
+        method: error.config?.method
+      });
+      return Promise.reject({ 
+        message: 'Cannot connect to server. Please check your internet connection or if the backend is running.' 
+      });
+    }
+    
+    // Other errors
+    console.error('Request Error:', error.message);
     return Promise.reject(error);
   }
 );
