@@ -29,12 +29,33 @@ export const authAPI = {
 
   // Login user
   login: async (credentials: LoginCredentials) => {
-    const response = await api.post('/auth/login', credentials);
-    if (response.data.success && response.data.data.token) {
-      localStorage.setItem('token', response.data.data.token);
-      localStorage.setItem('user', JSON.stringify(response.data.data));
+    const trimmedCredentials = {
+      email: credentials.email.trim(),
+      password: credentials.password
+    };
+    
+    const response = await api.post('/auth/login', trimmedCredentials);
+    
+    const { success, data, message } = response.data;
+    
+    const token = data?.token;
+    const user = data ? { 
+      _id: data._id, 
+      name: data.name, 
+      email: data.email, 
+      role: data.role,
+      phone: data.phone,
+      department: data.department,
+      profileImage: data.profileImage,
+      createdAt: data.createdAt
+    } : null;
+    
+    if (success && token) {
+      localStorage.setItem('token', token);
+      localStorage.setItem('user', JSON.stringify(user));
     }
-    return response.data;
+    
+    return { success, token, user, message };
   },
 
   // Get current user

@@ -30,10 +30,17 @@ api.interceptors.response.use(
   (error) => {
     if (error.response) {
       // Handle 401 Unauthorized - token expired or invalid
+      // BUT skip redirect for auth endpoints (login/register) so error can be shown
       if (error.response.status === 401) {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        window.location.href = '/login';
+        const isAuthEndpoint = error.config?.url?.includes('/auth/login') || 
+                               error.config?.url?.includes('/auth/register');
+        
+        if (!isAuthEndpoint) {
+          localStorage.removeItem('token');
+          localStorage.removeItem('user');
+          window.location.href = '/login';
+          return Promise.reject(error.response.data);
+        }
       }
       
       // Log detailed error information for debugging
@@ -44,8 +51,15 @@ api.interceptors.response.use(
         url: error.config?.url
       });
       
-      // Return error message from backend
-      return Promise.reject(error.response.data);
+      // Log the actual error message from backend
+      console.error('Backend error message:', error.response.data?.message);
+      
+      // Return error with proper message
+      const errorData = error.response.data;
+      return Promise.reject({
+        message: errorData?.message || errorData?.error || `Request failed with status ${error.response.status}`,
+        ...errorData
+      });
     }
     
     // Network error or CORS issue

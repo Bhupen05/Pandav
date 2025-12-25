@@ -19,7 +19,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isAdmin: boolean;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<User>;  // Changed from Promise<void>
   register: (userData: any) => Promise<void>;
   logout: () => void;
   updateUser: (user: User) => void;
@@ -31,52 +31,64 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   // Load user from localStorage on mount
   useEffect(() => {
-    const storedToken = localStorage.getItem('token');
-    const storedUser = localStorage.getItem('user');
+    const storedUser = localStorage.getItem('user')
+    const storedToken = localStorage.getItem('token')
 
-    if (storedToken && storedUser) {
-      setToken(storedToken);
-      setUser(JSON.parse(storedUser));
+    if (storedUser && storedToken) {
+      const parsedUser = JSON.parse(storedUser)
+      hydrateSession(parsedUser, storedToken)
+    } else {
+      setLoading(false)
     }
-    setLoading(false);
-  }, []);
+  }, [])
+
+  const hydrateSession = (authUser: User, authToken: string) => {
+    setUser(authUser)
+    setToken(authToken)
+    setIsAuthenticated(true)
+    setIsAdmin(authUser.role === 'admin')
+    localStorage.setItem('user', JSON.stringify(authUser))
+    localStorage.setItem('token', authToken)
+    setLoading(false)
+  }
 
   const login = async (email: string, password: string) => {
-    try {
-      const response = await authAPI.login({ email, password });
-      if (response.success) {
-        setUser(response.data);
-        setToken(response.data.token);
-      }
-    } catch (error: any) {
-      console.error('Login error:', error);
-      // Provide more helpful error message
-      if (error.code === 'ERR_NETWORK' || error.message?.includes('Network Error')) {
-        throw new Error('Cannot connect to server. Please ensure the backend is running on http://localhost:5000');
-      }
-      throw new Error(error.message || 'Login failed');
+    const response = await authAPI.login({ email, password })
+    
+    console.log('Login API response:', response)  // Add this to debug
+    
+    const { success, token: authToken, user: authUser, message } = response
+
+    if (!success || !authToken || !authUser) {
+      console.log('Login failed - success:', success, 'token:', !!authToken, 'user:', authUser)
+      throw new Error(message || 'Invalid credentials')
     }
-  };
+
+    console.log('User role:', authUser.role)  // Check the role value
+    
+    hydrateSession(authUser, authToken)
+    return authUser
+  }
 
   const register = async (userData: any) => {
-    try {
-      const response = await authAPI.register(userData);
-      if (response.success) {
-        setUser(response.data);
-        setToken(response.data.token);
-      }
-    } catch (error: any) {
-      throw new Error(error.message || 'Registration failed');
+    const { success, token: authToken, user: authUser, message } = await authAPI.register(userData)
+    if (!success || !authToken || !authUser) {
+      throw new Error(message || 'Registration failed')
     }
-  };
+    hydrateSession(authUser, authToken)
+  }
 
   const logout = () => {
-    authAPI.logout();
-    setUser(null);
-    setToken(null);
+    authAPI.logout()
+    setUser(null)
+    setToken(null)
+    setIsAuthenticated(false)
+    setIsAdmin(false)
   };
 
   const updateUser = (updatedUser: User) => {
@@ -91,8 +103,8 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const value = {
     user,
     token,
-    isAuthenticated: !!token && !!user,
-    isAdmin: user?.role === 'admin',
+    isAuthenticated,
+    isAdmin,
     loading,
     login,
     register,

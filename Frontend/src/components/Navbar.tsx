@@ -44,7 +44,7 @@ function Navbar() {
           className={`${open ? 'flex' : 'hidden'} absolute left-0 right-0 top-16 flex-col gap-1 border-b bg-white px-4 py-4 shadow-md md:static md:flex md:h-auto md:flex-row md:items-center md:gap-1 md:border-0 md:bg-transparent md:p-0 md:shadow-none`}
           aria-label="Primary"
         >
-          {!isAuthenticated && (
+          {/* {!isAuthenticated && (
             <>
               <NavLink to="/" className={linkClass} onClick={close}>
                 Home
@@ -59,7 +59,7 @@ function Navbar() {
                 Contact
               </NavLink>
             </>
-          )}
+          )} */}
           
           {isAuthenticated && !isAdmin && (
             <>

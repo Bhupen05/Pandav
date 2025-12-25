@@ -15,32 +15,25 @@ function Login() {
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    setError(null)
+    
     if (!email || !password) {
       setError('Please enter your email and password.')
       return
     }
     
+    setError(null)
     setLoading(true)
+    
     try {
-      await login(email, password)
+      const user = await login(email.trim(), password)
       
-      // Get the updated user from localStorage to check role
-      const userData = localStorage.getItem('user')
-      if (userData) {
-        const user = JSON.parse(userData)
-        // Redirect based on user role
-        if (user.role === 'admin') {
-          navigate('/admin')
-        } else {
-          navigate('/')
-        }
+      if (user.role === 'admin') {
+        navigate('/admin')
       } else {
-        navigate('/')
+        navigate('/user')
       }
     } catch (err: any) {
       setError(err.message || 'Login failed. Please check your credentials and try again.')
-    } finally {
       setLoading(false)
     }
   }
@@ -53,7 +46,7 @@ function Login() {
 
         {error && (
           <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-            {error}
+            <strong>Error:</strong> {error}
           </div>
         )}
 
