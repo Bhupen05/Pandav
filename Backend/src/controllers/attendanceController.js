@@ -131,15 +131,36 @@ export const updateAttendance = async (req, res) => {
       });
     }
 
+    // Restrict what regular users can update
+    if (req.user.role !== 'admin') {
+      // Regular users can only update status and remarks, not dates/times
+      const allowedUpdates = ['status', 'remarks'];
+      const updateData = {};
+      
+      Object.keys(req.body).forEach(key => {
+        if (allowedUpdates.includes(key)) {
+          updateData[key] = req.body[key];
+        }
+      });
+      
+      req.body = updateData;
+    }
+
     // If admin is updating, set approvedBy
     if (req.user.role === 'admin') {
       req.body.approvedBy = req.user.id;
     }
 
-    attendance = await Attendance.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true,
-    })
+    console.log('Updating attendance with:', req.body); // Debug log
+
+    attendance = await Attendance.findByIdAndUpdate(
+      req.params.id, 
+      req.body, 
+      {
+        new: true,
+        runValidators: true,
+      }
+    )
       .populate('user', 'name email department profileImage')
       .populate('approvedBy', 'name email');
 
@@ -148,6 +169,7 @@ export const updateAttendance = async (req, res) => {
       data: attendance,
     });
   } catch (error) {
+    console.error('Update attendance error:', error); // Debug log
     res.status(400).json({ 
       success: false, 
       message: error.message 
@@ -265,6 +287,104 @@ export const checkOut = async (req, res) => {
     });
   } catch (error) {
     res.status(400).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+};
+
+// @desc    Approve attendance record
+// @route   PUT /api/attendance/:id/approve
+// @access  Private (Admin only)
+export const approveAttendance = async (req, res) => {
+  try {
+    const attendance = await Attendance.findById(req.params.id);
+
+    if (!attendance) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Attendance record not found' 
+      });
+    }
+
+    // Update attendance with approval
+    attendance.approvedBy = req.user.id;
+    attendance.remarks = req.body.remarks || attendance.remarks;
+    
+    await attendance.save();
+
+    const populatedAttendance = await Attendance.findById(attendance._id)
+      .populate('user', 'name email department profileImage')
+      .populate('approvedBy', 'name email');
+
+    res.json({
+      success: true,
+      message: 'Attendance approved successfully',
+      data: populatedAttendance,
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+};
+
+// @desc    Disapprove attendance record
+// @route   PUT /api/attendance/:id/disapprove
+// @access  Private (Admin only)
+export const disapproveAttendance = async (req, res) => {
+  try {
+    const attendance = await Attendance.findById(req.params.id);
+
+    if (!attendance) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Attendance record not found' 
+      });
+    }
+
+    // Update attendance with disapproval
+    attendance.status = 'absent'; // or keep original status
+    attendance.approvedBy = null; // Remove approval
+    attendance.remarks = req.body.remarks || 'Disapproved by admin';
+    
+    await attendance.save();
+
+    const populatedAttendance = await Attendance.findById(attendance._id)
+      .populate('user', 'name email department profileImage');
+
+    res.json({
+      success: true,
+      message: 'Attendance disapproved successfully',
+      data: populatedAttendance,
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+};
+
+// @desc    Get pending attendance records (for admin approval)
+// @route   GET /api/attendance/pending
+// @access  Private (Admin only)
+export const getPendingAttendance = async (req, res) => {
+  try {
+    const pendingAttendance = await Attendance.find({
+      approvedBy: { $exists: false }
+    })
+      .populate('user', 'name email department profileImage')
+      .sort('-date');
+
+    res.json({
+      success: true,
+      count: pendingAttendance.length,
+      data: pendingAttendance,
+    });
+  } catch (error) {
+    res.status(500).json({ 
       success: false, 
       message: error.message 
     });

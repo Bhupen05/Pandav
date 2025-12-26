@@ -1,4 +1,4 @@
-import { createContext, useState, useContext, useEffect, type FC, type ReactNode } from 'react';
+import { createContext, useState, useContext, type FC, type ReactNode } from 'react';
 import { authAPI } from '../api/authAPI';
 
 interface User {
@@ -27,25 +27,33 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
+const getInitialAuthState = () => {
+  const storedUser = localStorage.getItem('user');
+  const storedToken = localStorage.getItem('token');
 
-  // Load user from localStorage on mount
-  useEffect(() => {
-    const storedUser = localStorage.getItem('user')
-    const storedToken = localStorage.getItem('token')
-
-    if (storedUser && storedToken) {
-      const parsedUser = JSON.parse(storedUser)
-      hydrateSession(parsedUser, storedToken)
-    } else {
-      setLoading(false)
+  if (storedUser && storedToken) {
+    try {
+      const parsedUser = JSON.parse(storedUser) as User;
+      return {
+        user: parsedUser,
+        token: storedToken,
+        isAuthenticated: true,
+        isAdmin: parsedUser.role === 'admin',
+        loading: false,
+      };
+    } catch {
+      return null;
     }
-  }, [])
+  }
+  return null;
+};
+
+export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<User | null>(() => getInitialAuthState()?.user ?? null);
+  const [token, setToken] = useState<string | null>(() => getInitialAuthState()?.token ?? null);
+  const [loading, setLoading] = useState(() => getInitialAuthState()?.loading ?? false);
+  const [isAuthenticated, setIsAuthenticated] = useState(() => getInitialAuthState()?.isAuthenticated ?? false);
+  const [isAdmin, setIsAdmin] = useState(() => getInitialAuthState()?.isAdmin ?? false);
 
   const hydrateSession = (authUser: User, authToken: string) => {
     setUser(authUser)
