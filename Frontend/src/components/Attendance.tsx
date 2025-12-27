@@ -63,7 +63,7 @@ function Attendance() {
       const response = await attendanceAPI.checkIn()
       console.log('Check-in response:', response)
       if (response.success) {
-        setSuccess('Checked in successfully!')
+        setSuccess('Checked in successfully!Checked in successfully! Your attendance is pending admin approval.')
         loadAttendance()
       } else {
         setError(response.message || 'Failed to check in')
@@ -76,7 +76,7 @@ function Attendance() {
       setLoading(false)
     }
   }
-
+  
   const handleCheckOut = async () => {
     setError(null)
     setSuccess(null)
@@ -86,7 +86,7 @@ function Attendance() {
       const response = await attendanceAPI.checkOut()
       console.log('Check-out response:', response)
       if (response.success) {
-        setSuccess('Checked out successfully!')
+        setSuccess(' Checked in successfully! Your attendance is pending admin approval.')
         loadAttendance()
       } else {
         setError(response.message || 'Failed to check out')

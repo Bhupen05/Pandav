@@ -83,31 +83,54 @@ export const createAttendance = async (req, res) => {
   try {
     // Set user from logged in user if not admin
     if (req.user.role !== 'admin') {
-      req.body.user = req.user.id;
+      req.body.user = req.user.id
     }
 
-    const attendance = await Attendance.create(req.body);
+    // Check if record already exists for today
+    const today = new Date().toISOString().split('T')[0]
+    const existingRecord = await Attendance.findOne({
+      user: req.body.user,
+      date: { 
+        $gte: new Date(today), 
+        $lt: new Date(new Date(today).getTime() + 24 * 60 * 60 * 1000) 
+      }
+    })
+
+    if (existingRecord) {
+      return res.status(400).json({
+        success: false,
+        message: 'Attendance already recorded for this user today'
+      })
+    }
+
+    // If status is provided, use it. Otherwise default to 'present'
+    // This allows users to request with status 'requested'
+    if (!req.body.status) {
+      req.body.status = 'requested'
+    }
+
+    const attendance = await Attendance.create(req.body)
 
     const populatedAttendance = await Attendance.findById(attendance._id)
-      .populate('user', 'name email department profileImage');
+      .populate('user', 'name email profileImage')
 
     res.status(201).json({
       success: true,
-      data: populatedAttendance,
-    });
+      data: populatedAttendance
+    })
   } catch (error) {
     if (error.code === 11000) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Attendance already recorded for this user today' 
-      });
+      return res.status(400).json({
+        success: false,
+        message: 'Attendance already recorded for this user today'
+      })
     }
-    res.status(400).json({ 
-      success: false, 
-      message: error.message 
-    });
+    res.status(400).json({
+      success: false,
+      message: error.message
+    })
   }
-};
+}
 
 // @desc    Update attendance record
 // @route   PUT /api/attendance/:id
@@ -230,7 +253,7 @@ export const checkIn = async (req, res) => {
       user: req.user.id,
       date: new Date(),
       checkInTime: new Date(),
-      status: 'present',
+      status: 'requested',
     });
 
     const populatedAttendance = await Attendance.findById(attendance._id)

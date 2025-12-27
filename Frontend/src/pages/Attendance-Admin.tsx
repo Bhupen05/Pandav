@@ -38,6 +38,16 @@ export default function AttendanceAdmin() {
   const [filterUser, setFilterUser] = useState<string>('all')
   const [filterStatus, setFilterStatus] = useState<string>('all')
   const [dateRange, setDateRange] = useState<{ start: string; end: string }>({ start: '', end: '' })
+  const [showRejectModal, setShowRejectModal] = useState(false)
+  const [rejectRemark, setRejectRemark] = useState('')
+  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+
+  // New state variables for editing
+  const [showEditModal, setShowEditModal] = useState(false)
+  const [editingRecord, setEditingRecord] = useState<AttendanceRecord | null>(null)
+  const [editStatus, setEditStatus] = useState<string>('present')
+  const [editRemarks, setEditRemarks] = useState<string>('')
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -78,12 +88,76 @@ export default function AttendanceAdmin() {
     }
   }
 
-  const handleReject = async (id: string) => {
+  const openRejectModal = (recordId: string) => {
+    setSelectedRecordId(recordId)
+    setRejectRemark('')
+    setShowRejectModal(true)
+  }
+
+  const closeRejectModal = () => {
+    setShowRejectModal(false)
+    setSelectedRecordId(null)
+    setRejectRemark('')
+  }
+
+  const handleRejectWithRemark = async () => {
+    if (!selectedRecordId) return
+
+    setIsSubmitting(true)
     try {
-      await attendanceAPI.updateAttendance(id, { status: 'rejected' })
-      setRecords(prev => prev.map(r => r._id === id ? { ...r, status: 'rejected' as const } : r))
+      await attendanceAPI.updateAttendance(selectedRecordId, { 
+        status: 'rejected',
+        remarks: rejectRemark.trim() || undefined
+      })
+      setRecords(prev => prev.map(r => 
+        r._id === selectedRecordId 
+          ? { ...r, status: 'rejected' as const, remarks: rejectRemark.trim() || r.remarks } 
+          : r
+      ))
+      closeRejectModal()
     } catch (error) {
       console.error('Failed to reject:', error)
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  // New handler functions for editing
+  const openEditModal = (record: AttendanceRecord) => {
+    setEditingRecord(record)
+    setEditStatus(record.status)
+    setEditRemarks(record.remarks || '')
+    setShowEditModal(true)
+  }
+
+  const closeEditModal = () => {
+    setShowEditModal(false)
+    setEditingRecord(null)
+    setEditStatus('present')
+    setEditRemarks('')
+  }
+
+  const handleSaveEdit = async () => {
+    if (!editingRecord) return
+
+    setIsSubmitting(true)
+    try {
+      await attendanceAPI.updateAttendance(editingRecord._id, {
+        status: editStatus,
+        remarks: editRemarks.trim() || undefined,
+      })
+      setRecords(prev =>
+        prev.map(r =>
+          r._id === editingRecord._id
+            ? { ...r, status: editStatus as any, remarks: editRemarks.trim() }
+            : r
+        )
+      )
+      closeEditModal()
+    } catch (error) {
+      console.error('Failed to update record:', error)
+    } finally {
+      setIsSubmitting(false)
     }
   }
 
@@ -282,7 +356,7 @@ export default function AttendanceAdmin() {
                       Approve
                     </button>
                     <button
-                      onClick={() => handleReject(record._id)}
+                      onClick={() => openRejectModal(record._id)}
                       className="inline-flex items-center gap-1 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 transition-colors"
                     >
                       <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -454,22 +528,31 @@ export default function AttendanceAdmin() {
                       </td>
                       <td className="px-4 py-3 text-neutral-600 max-w-37.5 truncate">{record.remarks || '—'}</td>
                       <td className="px-4 py-3 text-right">
-                        {record.status === 'requested' && (
-                          <div className="flex justify-end gap-1">
+                        <div className="flex justify-end gap-1">
+                          {record.status === 'requested' ? (
+                            <>
+                              <button
+                                onClick={() => handleApprove(record._id)}
+                                className="rounded-lg bg-emerald-100 px-2 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-200 transition-colors"
+                              >
+                                Approve
+                              </button>
+                              <button
+                                onClick={() => openRejectModal(record._id)}
+                                className="rounded-lg bg-red-100 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-200 transition-colors"
+                              >
+                                Reject
+                              </button>
+                            </>
+                          ) : (
                             <button
-                              onClick={() => handleApprove(record._id)}
-                              className="rounded-lg bg-emerald-100 px-2 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-200 transition-colors"
+                              onClick={() => openEditModal(record)}
+                              className="rounded-lg bg-blue-100 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-200 transition-colors"
                             >
-                              Approve
+                              Edit
                             </button>
-                            <button
-                              onClick={() => handleReject(record._id)}
-                              className="rounded-lg bg-red-100 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-200 transition-colors"
-                            >
-                              Reject
-                            </button>
-                          </div>
-                        )}
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -479,6 +562,137 @@ export default function AttendanceAdmin() {
           </div>
         </div>
       </div>
+
+      {/* Reject Modal */}
+      {showRejectModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="mb-4">
+              <h3 className="text-lg font-bold text-neutral-900">Reject Attendance Request</h3>
+              <p className="mt-1 text-sm text-neutral-600">Provide a reason for rejecting this attendance request.</p>
+            </div>
+
+            <div className="mb-6">
+              <label className="mb-2 block text-sm font-medium text-neutral-700">Remark / Reason</label>
+              <textarea
+                value={rejectRemark}
+                onChange={(e) => setRejectRemark(e.target.value)}
+                placeholder="e.g., Insufficient documentation, Conflicting information, etc."
+                className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-3 text-sm outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/10 resize-none"
+                rows={4}
+              />
+              <p className="mt-1 text-xs text-neutral-500">
+                {rejectRemark.length}/500 characters
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={closeRejectModal}
+                disabled={isSubmitting}
+                className="flex-1 rounded-lg border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRejectWithRemark}
+                disabled={isSubmitting}
+                className="flex-1 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50 transition-colors inline-flex items-center justify-center gap-2"
+              >
+                {isSubmitting ? (
+                  <>
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"></div>
+                    Rejecting...
+                  </>
+                ) : (
+                  'Reject Request'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Modal */}
+      {showEditModal && editingRecord && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="mb-4">
+              <h3 className="text-lg font-bold text-neutral-900">Edit Attendance Record</h3>
+              <p className="mt-1 text-sm text-neutral-600">
+                {editingRecord.user?.name} - {formatDate(editingRecord.date)}
+              </p>
+            </div>
+
+            <div className="mb-6 space-y-4">
+              <div>
+                <label className="mb-2 block text-sm font-medium text-neutral-700">Status</label>
+                <select
+                  value={editStatus}
+                  onChange={(e) => setEditStatus(e.target.value)}
+                  className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10"
+                >
+                  <option value="present">Present</option>
+                  <option value="absent">Absent</option>
+                  <option value="late">Late</option>
+                  <option value="half-day">Half Day</option>
+                  <option value="leave">Leave</option>
+                  <option value="requested">Requested</option>
+                  <option value="approved">Approved</option>
+                  <option value="rejected">Rejected</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-medium text-neutral-700">Remarks</label>
+                <textarea
+                  value={editRemarks}
+                  onChange={(e) => setEditRemarks(e.target.value)}
+                  placeholder="Add any remarks or notes..."
+                  className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10 resize-none"
+                  rows={4}
+                />
+                <p className="mt-1 text-xs text-neutral-500">
+                  {editRemarks.length}/500 characters
+                </p>
+              </div>
+
+              <div className="rounded-lg bg-neutral-50 p-3">
+                <p className="text-xs font-medium text-neutral-600">Current Info</p>
+                <div className="mt-2 space-y-1 text-xs text-neutral-700">
+                  <p>Check In: {formatTime(editingRecord.checkInTime)}</p>
+                  <p>Check Out: {formatTime(editingRecord.checkOutTime)}</p>
+                  <p>Work Hours: {editingRecord.workHours ? `${editingRecord.workHours.toFixed(2)} hrs` : '—'}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={closeEditModal}
+                disabled={isSubmitting}
+                className="flex-1 rounded-lg border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveEdit}
+                disabled={isSubmitting}
+                className="flex-1 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors inline-flex items-center justify-center gap-2"
+              >
+                {isSubmitting ? (
+                  <>
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"></div>
+                    Saving...
+                  </>
+                ) : (
+                  'Save Changes'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

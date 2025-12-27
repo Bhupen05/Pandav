@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
 import { attendanceAPI } from '../api/attendanceAPI'
-import { userAPI } from '../api/userAPI'
 import { useAuth } from '../context/AuthContext'
 
 type Task = {
@@ -53,10 +52,9 @@ export default function UserDashboard() {
   const navigate = useNavigate()
   const { isAuthenticated, user } = useAuth()
   const [tasks, setTasks] = useState<Task[]>([])
-  const [attendanceHistory, setAttendanceHistory] = useState<AttendanceRecord[]>([])
+  const [, setAttendanceHistory] = useState<AttendanceRecord[]>([])
   const [leaderboard, setLeaderboard] = useState<LeaderboardUser[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const [isRequestingAttendance, setIsRequestingAttendance] = useState(false)
   const [checkingSession, setCheckingSession] = useState(true)
 
   useEffect(() => {
@@ -74,14 +72,12 @@ export default function UserDashboard() {
   const loadData = useCallback(async () => {
     setIsLoading(true)
     try {
-      const [taskRes, attendanceRes, usersRes, allTasksRes] = await Promise.all([
+      const [taskRes, attendanceRes, allTasksRes] = await Promise.all([
         taskAPI.getTasks(),
         attendanceAPI.getAttendance(),
-        userAPI.getUsers({ role: 'user' }).catch(() => ({ data: [] })),
         taskAPI.getTasks().catch(() => ({ data: [] })),
       ])
 
-      // Backend already filters tasks for the current user if not admin
       const myTasks = Array.isArray(taskRes?.data) ? taskRes.data : []
 
       const myAttendance = Array.isArray(attendanceRes?.data)
@@ -97,11 +93,21 @@ export default function UserDashboard() {
         ),
       )
 
-      // Build leaderboard from users and tasks
-      const allUsers = Array.isArray(usersRes?.data) ? usersRes.data : []
+      // Build leaderboard from tasks only (don't fetch users)
       const allTasks = Array.isArray(allTasksRes?.data) ? allTasksRes.data : []
       
-      const leaderboardData: LeaderboardUser[] = allUsers.map((u: any) => {
+      // Get unique user IDs from tasks
+      const userMap = new Map()
+      allTasks.forEach((task: any) => {
+        const assignees = task.assignedTo || []
+        assignees.forEach((assignee: any) => {
+          const userId = typeof assignee === 'string' ? assignee : assignee._id
+          const userData = typeof assignee === 'string' ? { _id: userId, name: 'Unknown' } : assignee
+          userMap.set(userId, userData)
+        })
+      })
+
+      const leaderboardData: LeaderboardUser[] = Array.from(userMap.values()).map((u: any) => {
         const userTasks = allTasks.filter((t: any) => {
           const assignees = t.assignedTo || []
           return assignees.some((a: any) => 
@@ -138,13 +144,8 @@ export default function UserDashboard() {
   const pendingTasks = tasks.filter((task) => task.status === 'pending')
   const inProgressTasks = tasks.filter((task) => task.status === 'in-progress')
   const completedTasks = tasks.filter((task) => task.status === 'completed')
-  const completionRequestedTasks = tasks.filter((task) => task.status === 'completion-requested')
-  const todayKey = new Date().toISOString().split('T')[0]
-  const todaysAttendance = attendanceHistory.find((entry) =>
-    entry.date.startsWith(todayKey),
-  )
-  const todayStatus = todaysAttendance?.status ?? 'Not Requested'
-  const hasRequestedToday = todayStatus !== 'Not Requested'
+
+
   
   // Calculate completion rate
   const completionRate = tasks.length > 0 ? Math.round((completedTasks.length / tasks.length) * 100) : 0
@@ -198,21 +199,7 @@ export default function UserDashboard() {
     }
   }
 
-  const handleRequestAttendance = async () => {
-    if (hasRequestedToday) return
-    setIsRequestingAttendance(true)
-    try {
-      await attendanceAPI.createAttendance({
-        date: new Date().toISOString(),
-        status: 'requested',
-      })
-      await loadData()
-    } catch (error) {
-      console.error('Unable to request attendance', error)
-    } finally {
-      setIsRequestingAttendance(false)
-    }
-  }
+
 
   if (!isAuthenticated) {
     return (
@@ -255,73 +242,11 @@ export default function UserDashboard() {
             <span className="text-sm opacity-90">Completion Rate</span>
             <span className="ml-2 text-lg font-bold">{completionRate}%</span>
           </div>
-          <div className="rounded-lg bg-white/20 px-4 py-2">
-            <span className="text-sm opacity-90">Today's Attendance</span>
-            <span className="ml-2 text-lg font-bold capitalize">{todayStatus}</span>
-          </div>
+
         </div>
       </div>
 
       {/* Quick Actions */}
-      <div className="grid gap-4 md:grid-cols-2">
-        {/* Attendance Card */}
-        <div className="rounded-xl border bg-white p-5 shadow-sm">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="font-semibold text-neutral-900">Today's Attendance</h3>
-              <p className="mt-1 text-sm text-neutral-500">
-                {hasRequestedToday 
-                  ? `Status: ${todayStatus.charAt(0).toUpperCase() + todayStatus.slice(1)}`
-                  : "Don't forget to mark your attendance"
-                }
-              </p>
-            </div>
-            <div className={`flex h-12 w-12 items-center justify-center rounded-full text-2xl ${
-              todayStatus === 'approved' ? 'bg-emerald-100' : 
-              todayStatus === 'requested' ? 'bg-amber-100' : 
-              todayStatus === 'rejected' ? 'bg-red-100' : 'bg-neutral-100'
-            }`}>
-              {todayStatus === 'approved' ? '✅' : 
-               todayStatus === 'requested' ? '⏳' : 
-               todayStatus === 'rejected' ? '❌' : '📅'}
-            </div>
-          </div>
-          <button
-            onClick={handleRequestAttendance}
-            disabled={hasRequestedToday || isRequestingAttendance}
-            className={`mt-4 w-full rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors ${
-              hasRequestedToday 
-                ? 'bg-neutral-100 text-neutral-500 cursor-not-allowed'
-                : 'bg-emerald-600 text-white hover:bg-emerald-700'
-            }`}
-          >
-            {hasRequestedToday ? 'Already Requested' : isRequestingAttendance ? 'Requesting...' : 'Request Attendance'}
-          </button>
-        </div>
-
-        {/* Progress Card */}
-        <div className="rounded-xl border bg-white p-5 shadow-sm">
-          <h3 className="font-semibold text-neutral-900">Task Progress</h3>
-          <div className="mt-4">
-            <div className="mb-2 flex justify-between text-sm">
-              <span className="text-neutral-600">Overall Progress</span>
-              <span className="font-medium text-neutral-900">{completionRate}%</span>
-            </div>
-            <div className="h-3 overflow-hidden rounded-full bg-neutral-100">
-              <div className="flex h-full">
-                <div className="bg-emerald-500 transition-all" style={{ width: `${tasks.length > 0 ? (completedTasks.length / tasks.length) * 100 : 0}%` }}></div>
-                <div className="bg-purple-500 transition-all" style={{ width: `${tasks.length > 0 ? (completionRequestedTasks.length / tasks.length) * 100 : 0}%` }}></div>
-                <div className="bg-blue-500 transition-all" style={{ width: `${tasks.length > 0 ? (inProgressTasks.length / tasks.length) * 100 : 0}%` }}></div>
-              </div>
-            </div>
-            <div className="mt-3 flex flex-wrap gap-3 text-xs">
-              <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-emerald-500"></span> Completed ({completedTasks.length})</span>
-              <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-purple-500"></span> Awaiting ({completionRequestedTasks.length})</span>
-              <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-blue-500"></span> In Progress ({inProgressTasks.length})</span>
-            </div>
-          </div>
-        </div>
-      </div>
 
       {/* Stats Grid */}
       <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
