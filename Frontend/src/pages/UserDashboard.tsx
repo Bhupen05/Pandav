@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
 import { attendanceAPI } from '../api/attendanceAPI'
+import { userAPI } from '../api/userAPI'
 import { useAuth } from '../context/AuthContext'
 
 type Task = {
@@ -21,6 +22,16 @@ type AttendanceRecord = {
   date: string
   status: 'requested' | 'approved' | 'rejected'
   user?: { _id: string }
+}
+
+type LeaderboardUser = {
+  _id: string
+  name: string
+  email: string
+  profileImage?: string
+  completedTasks: number
+  totalTasks: number
+  completionRate: number
 }
 
 const priorityConfig = {
@@ -43,6 +54,7 @@ export default function UserDashboard() {
   const { isAuthenticated, user } = useAuth()
   const [tasks, setTasks] = useState<Task[]>([])
   const [attendanceHistory, setAttendanceHistory] = useState<AttendanceRecord[]>([])
+  const [leaderboard, setLeaderboard] = useState<LeaderboardUser[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [isRequestingAttendance, setIsRequestingAttendance] = useState(false)
   const [checkingSession, setCheckingSession] = useState(true)
@@ -62,9 +74,11 @@ export default function UserDashboard() {
   const loadData = useCallback(async () => {
     setIsLoading(true)
     try {
-      const [taskRes, attendanceRes] = await Promise.all([
+      const [taskRes, attendanceRes, usersRes, allTasksRes] = await Promise.all([
         taskAPI.getTasks(),
         attendanceAPI.getAttendance(),
+        userAPI.getUsers({ role: 'user' }).catch(() => ({ data: [] })),
+        taskAPI.getTasks().catch(() => ({ data: [] })),
       ])
 
       // Backend already filters tasks for the current user if not admin
@@ -82,6 +96,32 @@ export default function UserDashboard() {
           (a: AttendanceRecord, b: AttendanceRecord) => new Date(b.date).getTime() - new Date(a.date).getTime(),
         ),
       )
+
+      // Build leaderboard from users and tasks
+      const allUsers = Array.isArray(usersRes?.data) ? usersRes.data : []
+      const allTasks = Array.isArray(allTasksRes?.data) ? allTasksRes.data : []
+      
+      const leaderboardData: LeaderboardUser[] = allUsers.map((u: any) => {
+        const userTasks = allTasks.filter((t: any) => {
+          const assignees = t.assignedTo || []
+          return assignees.some((a: any) => 
+            (typeof a === 'string' ? a : a._id) === u._id
+          )
+        })
+        const completedCount = userTasks.filter((t: any) => t.status === 'completed').length
+        const totalCount = userTasks.length
+        return {
+          _id: u._id,
+          name: u.name || 'Unknown',
+          email: u.email || '',
+          profileImage: u.profileImage,
+          completedTasks: completedCount,
+          totalTasks: totalCount,
+          completionRate: totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0,
+        }
+      }).sort((a: LeaderboardUser, b: LeaderboardUser) => b.completedTasks - a.completedTasks)
+      
+      setLeaderboard(leaderboardData)
     } catch (error) {
       console.error('Failed to load user dashboard', error)
     } finally {
@@ -365,29 +405,113 @@ export default function UserDashboard() {
         </div>
       )}
 
-      {/* Recent Tasks */}
-      <div className="rounded-xl border bg-white p-5 shadow-sm">
-        <div className="mb-4 flex items-center justify-between">
-          <h3 className="font-semibold text-neutral-900">Recent Tasks</h3>
-          <button 
-            onClick={() => setActiveTab('tasks')}
-            className="text-sm text-emerald-600 hover:text-emerald-700"
-          >
-            View All →
-          </button>
+      {/* Leaderboard & Recent Tasks Grid */}
+      <div className="grid gap-6 lg:grid-cols-2">
+        {/* Leaderboard */}
+        <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
+          <div className="border-b bg-linear-to-r from-amber-500 to-orange-500 px-5 py-4">
+            <div className="flex items-center gap-2 text-white">
+              <span className="text-2xl">🏆</span>
+              <h3 className="font-bold text-lg">Leaderboard</h3>
+            </div>
+            <p className="text-amber-100 text-sm mt-1">Top performers this month</p>
+          </div>
+          {leaderboard.length === 0 ? (
+            <div className="p-8 text-center">
+              <div className="text-4xl mb-3">👥</div>
+              <p className="text-sm text-neutral-500">No team members yet</p>
+            </div>
+          ) : (
+            <div className="divide-y">
+              {leaderboard.slice(0, 5).map((member, index) => {
+                const isCurrentUser = member._id === user?._id
+                const rankEmoji = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `#${index + 1}`
+                return (
+                  <div 
+                    key={member._id} 
+                    className={`flex items-center gap-4 px-5 py-3 ${isCurrentUser ? 'bg-emerald-50' : 'hover:bg-neutral-50'} transition-colors`}
+                  >
+                    {/* Rank */}
+                    <div className={`flex h-8 w-8 items-center justify-center rounded-full text-sm font-bold ${
+                      index === 0 ? 'bg-amber-100 text-amber-700' :
+                      index === 1 ? 'bg-neutral-200 text-neutral-700' :
+                      index === 2 ? 'bg-orange-100 text-orange-700' :
+                      'bg-neutral-100 text-neutral-600'
+                    }`}>
+                      {typeof rankEmoji === 'string' && rankEmoji.startsWith('#') ? rankEmoji : rankEmoji}
+                    </div>
+                    
+                    {/* Avatar */}
+                    <div className="relative">
+                      {member.profileImage ? (
+                        <img 
+                          src={member.profileImage} 
+                          alt={member.name} 
+                          className="h-10 w-10 rounded-full object-cover border-2 border-white shadow"
+                        />
+                      ) : (
+                        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100 text-sm font-bold text-emerald-600 border-2 border-white shadow">
+                          {member.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
+                        </div>
+                      )}
+                      {isCurrentUser && (
+                        <div className="absolute -bottom-1 -right-1 h-4 w-4 rounded-full bg-emerald-500 border-2 border-white flex items-center justify-center">
+                          <span className="text-[8px] text-white">✓</span>
+                        </div>
+                      )}
+                    </div>
+                    
+                    {/* Info */}
+                    <div className="flex-1 min-w-0">
+                      <p className={`font-medium truncate ${isCurrentUser ? 'text-emerald-700' : 'text-neutral-900'}`}>
+                        {member.name}
+                        {isCurrentUser && <span className="ml-2 text-xs text-emerald-600">(You)</span>}
+                      </p>
+                      <p className="text-xs text-neutral-500">{member.completedTasks} tasks completed</p>
+                    </div>
+                    
+                    {/* Stats */}
+                    <div className="text-right">
+                      <div className="flex items-center gap-1">
+                        <div className="h-1.5 w-16 rounded-full bg-neutral-100 overflow-hidden">
+                          <div 
+                            className="h-full bg-emerald-500 rounded-full transition-all" 
+                            style={{ width: `${member.completionRate}%` }}
+                          ></div>
+                        </div>
+                        <span className="text-xs font-medium text-neutral-600 w-8">{member.completionRate}%</span>
+                      </div>
+                      <p className="text-[10px] text-neutral-400 mt-0.5">{member.totalTasks} total</p>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {leaderboard.length > 5 && (
+            <div className="border-t px-5 py-3 text-center">
+              <span className="text-xs text-neutral-500">+{leaderboard.length - 5} more team members</span>
+            </div>
+          )}
         </div>
-        {tasks.length === 0 ? (
-          <p className="text-center text-sm text-neutral-500 py-8">No tasks assigned yet.</p>
-        ) : (
-          <div className="space-y-3">
-            {tasks.slice(0, 5).map((task) => {
-              const config = statusConfig[task.status] || statusConfig.pending
-              const pConfig = priorityConfig[task.priority || 'medium']
-              return (
-                <div key={task._id} className="flex items-center justify-between rounded-lg border p-3 hover:bg-neutral-50 transition-colors">
-                  <div className="flex items-center gap-3">
-                    <span className="text-lg">{config.icon}</span>
-                    <div>
+
+        {/* Recent Tasks */}
+        <div className="rounded-xl border bg-white p-5 shadow-sm">
+          <div className="mb-4 flex items-center justify-between">
+            <h3 className="font-semibold text-neutral-900">Recent Tasks</h3>
+          </div>
+          {tasks.length === 0 ? (
+            <p className="text-center text-sm text-neutral-500 py-8">No tasks assigned yet.</p>
+          ) : (
+            <div className="space-y-3">
+              {tasks.slice(0, 5).map((task) => {
+                const config = statusConfig[task.status] || statusConfig.pending
+                const pConfig = priorityConfig[task.priority || 'medium']
+                return (
+                  <div key={task._id} className="flex items-center justify-between rounded-lg border p-3 hover:bg-neutral-50 transition-colors">
+                    <div className="flex items-center gap-3">
+                      <span className="text-lg">{config.icon}</span>
+                      <div>
                       <p className="font-medium text-neutral-900">{task.title}</p>
                       <div className="mt-1 flex items-center gap-2">
                         <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${pConfig.bg} ${pConfig.text}`}>
@@ -427,6 +551,7 @@ export default function UserDashboard() {
             })}
           </div>
         )}
+        </div>
       </div>
     </div>
   )
@@ -439,8 +564,5 @@ export default function UserDashboard() {
       </div>
     </div>
   )
-}
-function setActiveTab(_arg0: string): void {
-  throw new Error('Function not implemented.')
 }
 

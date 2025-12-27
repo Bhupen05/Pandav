@@ -32,6 +32,7 @@ type AttendanceRecord = {
 }
 
 type User = {
+  profileImage: string | undefined
   _id: string
   name: string
   email: string
@@ -185,7 +186,7 @@ export default function Userview() {
   return (
     <div className="min-h-screen bg-linear-to-br from-neutral-50 via-white to-neutral-100">
       {/* Header */}
-      <div className="bg-linear-to-r from-neutral-900 via-neutral-800 to-neutral-900 text-white">
+      <div className="bg-linear-to-r from-blue-500 to-emerald-500 text-white">
         <div className="mx-auto max-w-7xl px-4 py-8">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div className="flex items-center gap-3">
@@ -233,7 +234,17 @@ export default function Userview() {
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-4">
                 <div className="flex h-16 w-16 items-center justify-center rounded-full bg-neutral-100 text-xl font-bold text-neutral-700">
-                  {selectedUserData.name?.split(' ').map(n => n[0]).join('') || '?'}
+                {selectedUserData.profileImage ? (
+                    <img 
+                        src={selectedUserData.profileImage} 
+                        alt={selectedUserData.name} 
+                        className="h-16 w-16 rounded-full object-cover"
+                    />
+                ) : (
+                    <div className="flex h-16 w-16 items-center justify-center rounded-full bg-neutral-100 text-xl font-bold text-neutral-700">
+                        {selectedUserData.name?.split(' ').map(n => n[0]).join('') || '?'}
+                    </div>
+                )}
                 </div>
                 <div>
                   <h2 className="text-xl font-bold text-neutral-900">{selectedUserData.name}</h2>

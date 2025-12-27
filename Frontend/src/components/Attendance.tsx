@@ -362,10 +362,10 @@ function Attendance() {
                   <tr key={record._id} className="hover:bg-neutral-50">
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
-                        {record.user.profileImage ? (
+                        {record.user?.profileImage ? (
                           <img
                             src={record.user.profileImage}
-                            alt={record.user.name}
+                            alt={record.user?.name || 'User'}
                             className="h-8 w-8 rounded-full object-cover"
                             onError={(e) => {
                               e.currentTarget.style.display = 'none'
@@ -374,10 +374,10 @@ function Attendance() {
                             }}
                           />
                         ) : null}
-                        <div className={`flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700 ${record.user.profileImage ? 'hidden' : ''}`}>
-                          {record.user.name.split(' ').map(n => n[0]).join('')}
+                        <div className={`flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700 ${record.user?.profileImage ? 'hidden' : ''}`}>
+                          {record.user?.name ? record.user.name.split(' ').map(n => n[0]).join('') : '?'}
                         </div>
-                        <span className="text-neutral-900">{record.user.name}</span>
+                        <span className="text-neutral-900">{record.user?.name || 'Unknown User'}</span>
                       </div>
                     </td>
                     <td className="px-4 py-3 text-neutral-700">{formatDate(record.date)}</td>

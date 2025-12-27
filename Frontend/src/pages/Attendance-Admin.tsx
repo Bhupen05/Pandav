@@ -169,7 +169,7 @@ export default function AttendanceAdmin() {
   return (
     <div className="min-h-screen bg-linear-to-br from-neutral-50 via-white to-neutral-100">
       {/* Header */}
-      <div className="bg-linear-to-r from-neutral-900 via-neutral-800 to-neutral-900 text-white">
+      <div className="bg-linear-to-r from-blue-500 to-emerald-500 text-white">
         <div className="mx-auto max-w-7xl px-4 py-8">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div className="flex items-center gap-3">
