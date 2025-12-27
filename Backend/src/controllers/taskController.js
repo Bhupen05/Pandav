@@ -1,4 +1,5 @@
-import Task from '../models/Task.js';
+import Task from '../models/Task.js'
+import User from '../models/User.js'
 
 // @desc    Get all tasks
 // @route   GET /api/tasks
@@ -18,25 +19,24 @@ export const getTasks = async (req, res) => {
     }
 
     const tasks = await Task.find(filter)
-      .populate('assignedTo', 'name email')
+      .populate('assignedTo', 'name email profileImage')
       .populate('createdBy', 'name email')
       .populate('completionRequestedBy', 'name email')
       .populate('approvedBy', 'name email')
-      .populate('assigneeProgress.user', 'name email')
-      .sort('-createdAt');
+      .populate('rejectedBy', 'name email')
+      .sort({ createdAt: -1 })
 
-    res.json({
+    res.status(200).json({
       success: true,
-      count: tasks.length,
       data: tasks,
-    });
+    })
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    })
   }
-};
+}
 
 // @desc    Get single task
 // @route   GET /api/tasks/:id
@@ -44,312 +44,265 @@ export const getTasks = async (req, res) => {
 export const getTask = async (req, res) => {
   try {
     const task = await Task.findById(req.params.id)
-      .populate('assignedTo', 'name email department')
+      .populate('assignedTo', 'name email profileImage')
       .populate('createdBy', 'name email')
       .populate('completionRequestedBy', 'name email')
       .populate('approvedBy', 'name email')
-      .populate('assigneeProgress.user', 'name email');
+      .populate('rejectedBy', 'name email')
 
     if (!task) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Task not found' 
-      });
+      return res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      })
     }
 
-    // Check if user has access to this task
-    const isAssigned = task.assignedTo.some(user => user._id.toString() === req.user.id);
-    if (req.user.role !== 'admin' && !isAssigned) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Not authorized to access this task' 
-      });
-    }
-
-    res.json({
+    res.status(200).json({
       success: true,
       data: task,
-    });
+    })
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    })
   }
-};
+}
 
 // @desc    Create task
 // @route   POST /api/tasks
 // @access  Private (Admin)
 export const createTask = async (req, res) => {
   try {
-    req.body.createdBy = req.user.id;
-    
-    // Initialize assignee progress for all assigned users
-    if (req.body.assignedTo && req.body.assignedTo.length > 0) {
-      req.body.assigneeProgress = req.body.assignedTo.map(userId => ({
-        user: userId,
-        status: 'not-started'
-      }));
-    }
+    req.body.createdBy = req.user.id
 
-    const task = await Task.create(req.body);
+    const task = await Task.create(req.body)
 
     const populatedTask = await Task.findById(task._id)
-      .populate('assignedTo', 'name email')
+      .populate('assignedTo', 'name email profileImage')
       .populate('createdBy', 'name email')
-      .populate('assigneeProgress.user', 'name email');
 
     res.status(201).json({
       success: true,
       data: populatedTask,
-    });
+    })
   } catch (error) {
-    res.status(400).json({ 
-      success: false, 
-      message: error.message 
-    });
+    res.status(400).json({
+      success: false,
+      message: error.message,
+    })
   }
-};
+}
 
 // @desc    Update task
 // @route   PUT /api/tasks/:id
 // @access  Private
 export const updateTask = async (req, res) => {
   try {
-    let task = await Task.findById(req.params.id);
+    let task = await Task.findById(req.params.id)
 
     if (!task) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Task not found' 
-      });
+      return res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      })
     }
 
-    // Check authorization
-    const isAssigned = task.assignedTo.some(userId => userId.toString() === req.user.id);
-    if (req.user.role !== 'admin' && !isAssigned) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Not authorized to update this task' 
-      });
-    }
-
-    // Regular users can only update their progress, not the main task
-    if (req.user.role !== 'admin') {
-      const userProgressIndex = task.assigneeProgress.findIndex(
-        p => p.user.toString() === req.user.id
-      );
-      
-      if (userProgressIndex !== -1) {
-        task.assigneeProgress[userProgressIndex].status = req.body.status || task.assigneeProgress[userProgressIndex].status;
-        task.assigneeProgress[userProgressIndex].notes = req.body.notes || task.assigneeProgress[userProgressIndex].notes;
-      }
-      
-      await task.save();
-      
-      const populatedTask = await Task.findById(task._id)
-        .populate('assignedTo', 'name email')
-        .populate('createdBy', 'name email')
-        .populate('assigneeProgress.user', 'name email');
-
-      return res.json({
-        success: true,
-        data: populatedTask,
-      });
-    }
-
-    // Admin can update everything
+    // Update fields
     task = await Task.findByIdAndUpdate(req.params.id, req.body, {
       new: true,
       runValidators: true,
     })
-      .populate('assignedTo', 'name email')
+      .populate('assignedTo', 'name email profileImage')
       .populate('createdBy', 'name email')
-      .populate('assigneeProgress.user', 'name email');
+      .populate('rejectedBy', 'name email')
 
-    res.json({
+    res.status(200).json({
       success: true,
       data: task,
-    });
+    })
   } catch (error) {
-    res.status(400).json({ 
-      success: false, 
-      message: error.message 
-    });
+    res.status(400).json({
+      success: false,
+      message: error.message,
+    })
   }
-};
+}
+
+// @desc    Delete task
+// @route   DELETE /api/tasks/:id
+// @access  Private (Admin)
+export const deleteTask = async (req, res) => {
+  try {
+    const task = await Task.findById(req.params.id)
+
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      })
+    }
+
+    await Task.findByIdAndDelete(req.params.id)
+
+    res.status(200).json({
+      success: true,
+      message: 'Task deleted successfully',
+    })
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    })
+  }
+}
 
 // @desc    Request task completion
 // @route   POST /api/tasks/:id/request-completion
 // @access  Private
 export const requestTaskCompletion = async (req, res) => {
   try {
-    const task = await Task.findById(req.params.id);
+    const task = await Task.findById(req.params.id)
 
     if (!task) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Task not found' 
-      });
+      return res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      })
     }
 
-    // Check if user is assigned to this task
-    const isAssigned = task.assignedTo.some(userId => userId.toString() === req.user.id);
-    if (!isAssigned) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Not authorized to request completion for this task' 
-      });
+    if (task.status === 'completed') {
+      return res.status(400).json({
+        success: false,
+        message: 'Task is already completed',
+      })
     }
 
-    // Update individual progress
-    const userProgressIndex = task.assigneeProgress.findIndex(
-      p => p.user.toString() === req.user.id
-    );
-    
-    if (userProgressIndex !== -1) {
-      task.assigneeProgress[userProgressIndex].status = 'completion-requested';
-      task.assigneeProgress[userProgressIndex].completionRequestedAt = new Date();
-      task.assigneeProgress[userProgressIndex].notes = req.body.notes || '';
-    }
+    task.status = 'completion-requested'
+    task.completionRequestedBy = req.user.id
+    task.completionRequestedAt = new Date()
+    // Clear rejection when requesting again
+    task.rejectionReason = undefined
+    task.rejectedBy = undefined
+    task.rejectedAt = undefined
 
-    // Check if all assignees have requested completion
-    const allCompleted = task.assigneeProgress.every(p => p.status === 'completion-requested');
-    
-    if (allCompleted) {
-      task.status = 'completion-requested';
-      task.completionRequestedBy = req.user.id;
-      task.completionRequestedAt = new Date();
-    }
-
-    await task.save();
+    await task.save()
 
     const populatedTask = await Task.findById(task._id)
-      .populate('assignedTo', 'name email')
+      .populate('assignedTo', 'name email profileImage')
       .populate('createdBy', 'name email')
       .populate('completionRequestedBy', 'name email')
-      .populate('assigneeProgress.user', 'name email');
+      .populate('rejectedBy', 'name email')
 
-    res.json({
+    res.status(200).json({
       success: true,
-      message: allCompleted ? 'Task completion requested for admin approval' : 'Your completion request submitted',
+      message: 'Task completion requested',
       data: populatedTask,
-    });
+    })
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    })
   }
-};
+}
 
 // @desc    Approve task completion
 // @route   PUT /api/tasks/:id/approve
 // @access  Private (Admin)
 export const approveTaskCompletion = async (req, res) => {
   try {
-    const task = await Task.findById(req.params.id);
+    const task = await Task.findById(req.params.id)
 
     if (!task) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Task not found' 
-      });
+      return res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      })
     }
 
     if (task.status !== 'completion-requested') {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Task completion has not been requested' 
-      });
+      return res.status(400).json({
+        success: false,
+        message: 'Task completion has not been requested',
+      })
     }
 
-    // Approve the task
-    task.status = 'completed';
-    task.completedDate = new Date();
-    task.approvedBy = req.user.id;
+    task.status = 'completed'
+    task.approvedBy = req.user.id
+    task.approvedAt = new Date()
+    task.completedDate = new Date()
 
-    // Update all assignee progress
-    task.assigneeProgress.forEach(progress => {
-      progress.status = 'completed';
-    });
-
-    await task.save();
+    await task.save()
 
     const populatedTask = await Task.findById(task._id)
-      .populate('assignedTo', 'name email')
+      .populate('assignedTo', 'name email profileImage')
       .populate('createdBy', 'name email')
+      .populate('completionRequestedBy', 'name email')
       .populate('approvedBy', 'name email')
-      .populate('assigneeProgress.user', 'name email');
 
-    res.json({
+    res.status(200).json({
       success: true,
-      message: 'Task completion approved successfully',
+      message: 'Task completion approved',
       data: populatedTask,
-    });
+    })
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    })
   }
-};
+}
 
 // @desc    Reject task completion
 // @route   PUT /api/tasks/:id/reject
 // @access  Private (Admin)
 export const rejectTaskCompletion = async (req, res) => {
   try {
-    const task = await Task.findById(req.params.id);
+    const task = await Task.findById(req.params.id)
 
     if (!task) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Task not found' 
-      });
+      return res.status(404).json({
+        success: false,
+        message: 'Task not found',
+      })
     }
 
     if (task.status !== 'completion-requested') {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Task completion has not been requested' 
-      });
+      return res.status(400).json({
+        success: false,
+        message: 'Task completion has not been requested',
+      })
     }
 
-    // Reject the completion
-    task.status = 'in-progress';
-    task.completionRequestedBy = undefined;
-    task.completionRequestedAt = undefined;
-    task.notes = req.body.rejectionReason || 'Task completion rejected by admin';
+    // Set task back to in-progress with rejection details
+    task.status = 'in-progress'
+    task.rejectionReason = req.body.rejectionReason || 'Task completion rejected by admin'
+    task.rejectedBy = req.user.id
+    task.rejectedAt = new Date()
+    // Clear completion request
+    task.completionRequestedBy = undefined
+    task.completionRequestedAt = undefined
 
-    // Reset assignee progress back to in-progress
-    task.assigneeProgress.forEach(progress => {
-      if (progress.status === 'completion-requested') {
-        progress.status = 'in-progress';
-        progress.completionRequestedAt = undefined;
-      }
-    });
-
-    await task.save();
+    await task.save()
 
     const populatedTask = await Task.findById(task._id)
-      .populate('assignedTo', 'name email')
+      .populate('assignedTo', 'name email profileImage')
       .populate('createdBy', 'name email')
-      .populate('assigneeProgress.user', 'name email');
+      .populate('rejectedBy', 'name email')
 
-    res.json({
+    res.status(200).json({
       success: true,
       message: 'Task completion rejected',
       data: populatedTask,
-    });
+    })
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    })
   }
-};
+}
 
 // @desc    Get tasks pending approval
 // @route   GET /api/tasks/pending-approval
@@ -357,49 +310,19 @@ export const rejectTaskCompletion = async (req, res) => {
 export const getPendingApprovalTasks = async (req, res) => {
   try {
     const tasks = await Task.find({ status: 'completion-requested' })
-      .populate('assignedTo', 'name email')
+      .populate('assignedTo', 'name email profileImage')
       .populate('createdBy', 'name email')
       .populate('completionRequestedBy', 'name email')
-      .populate('assigneeProgress.user', 'name email')
-      .sort('-completionRequestedAt');
+      .sort({ completionRequestedAt: -1 })
 
-    res.json({
+    res.status(200).json({
       success: true,
-      count: tasks.length,
       data: tasks,
-    });
+    })
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    })
   }
-};
-
-// @desc    Delete task
-// @route   DELETE /api/tasks/:id
-// @access  Private (Admin)
-export const deleteTask = async (req, res) => {
-  try {
-    const task = await Task.findById(req.params.id);
-
-    if (!task) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Task not found' 
-      });
-    }
-
-    await task.deleteOne();
-
-    res.json({
-      success: true,
-      message: 'Task deleted successfully',
-    });
-  } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
-  }
-};
+}

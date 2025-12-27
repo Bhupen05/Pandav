@@ -53,6 +53,10 @@ export default function AdminDashboard() {
   const [processedTasks, setProcessedTasks] = useState<Record<string, boolean>>({})
   const [showTaskModal, setShowTaskModal] = useState(false)
   const [activeTab, setActiveTab] = useState<'overview' | 'tasks' | 'attendance' | 'users'>('overview')
+  const [showRejectModal, setShowRejectModal] = useState(false)
+  const [rejectionReason, setRejectionReason] = useState('')
+  const [rejectingTaskId, setRejectingTaskId] = useState<string | null>(null)
+  const [isRejectSubmitting, setIsRejectSubmitting] = useState(false)
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -113,13 +117,32 @@ export default function AdminDashboard() {
   }
 
   const handleRejectTaskCompletion = async (taskId: string) => {
+    // Open modal instead of directly rejecting
+    setRejectingTaskId(taskId)
+    setRejectionReason('')
+    setShowRejectModal(true)
+  }
+
+  // NEW: Add this function to handle rejection with reason
+  const handleRejectTaskWithReason = async () => {
+    if (!rejectingTaskId) return
+
+    setIsRejectSubmitting(true)
     try {
-      await taskAPI.rejectCompletion(taskId)
-      setProcessedTasks((prev) => ({ ...prev, [taskId]: true }))
-      setPendingApprovalTasks((prev) => prev.filter((task) => task._id !== taskId))
+      await taskAPI.rejectCompletion(rejectingTaskId, {
+        rejectionReason: rejectionReason.trim() || 'Task completion rejected by admin'
+      })
+      setProcessedTasks((prev) => ({ ...prev, [rejectingTaskId]: true }))
+      setPendingApprovalTasks((prev) => prev.filter((task) => task._id !== rejectingTaskId))
+      setShowRejectModal(false)
+      setRejectionReason('')
+      setRejectingTaskId(null)
       await fetchAllData()
     } catch (error) {
       console.error('Failed to reject task completion', error)
+      alert('Failed to reject task')
+    } finally {
+      setIsRejectSubmitting(false)
     }
   }
 
@@ -815,6 +838,56 @@ export default function AdminDashboard() {
                 )}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* Reject Task Modal */}
+      {showRejectModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="mb-4">
+              <h3 className="text-lg font-bold text-neutral-900">Reject Task Completion</h3>
+              <p className="mt-1 text-sm text-neutral-600">Provide a reason for rejecting this task completion request.</p>
+            </div>
+
+            <div className="mb-6">
+              <label className="mb-2 block text-sm font-medium text-neutral-700">Rejection Reason</label>
+              <textarea
+                value={rejectionReason}
+                onChange={(e) => setRejectionReason(e.target.value)}
+                placeholder="e.g., Work quality needs improvement, Missing requirements, etc."
+                className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-3 text-sm outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/10 resize-none"
+                rows={4}
+              />
+              <p className="mt-1 text-xs text-neutral-500">
+                {rejectionReason.length}/500 characters
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowRejectModal(false)}
+                disabled={isRejectSubmitting}
+                className="flex-1 rounded-lg border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRejectTaskWithReason}
+                disabled={isRejectSubmitting}
+                className="flex-1 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50 transition-colors inline-flex items-center justify-center gap-2"
+              >
+                {isRejectSubmitting ? (
+                  <>
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"></div>
+                    Rejecting...
+                  </>
+                ) : (
+                  'Reject Task'
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

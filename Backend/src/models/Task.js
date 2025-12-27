@@ -10,7 +10,7 @@ const taskSchema = new mongoose.Schema({
     type: String,
     required: [true, 'Task description is required'],
   },
-  assignedTo: [{  // Changed to array for multiple assignees
+  assignedTo: [{  //  Multiple assignees
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: [true, 'Task must be assigned to at least one user'],
@@ -31,7 +31,6 @@ const taskSchema = new mongoose.Schema({
     default: 'medium',
   },
   
-  // Multi-day task support
   startDate: {
     type: Date,
     required: [true, 'Start date is required'],
@@ -44,8 +43,21 @@ const taskSchema = new mongoose.Schema({
     type: Number,
     default: 1,
   },
-  
-  // Completion workflow
+
+  //  Rejection tracking
+  rejectionReason: {
+    type: String,
+    trim: true,
+  },
+  rejectedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+  },
+  rejectedAt: {
+    type: Date,
+  },
+
+  // Approval tracking
   completionRequestedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -60,8 +72,11 @@ const taskSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
   },
+  approvedAt: {
+    type: Date, 
+  },
   
-  // Individual assignee progress tracking
+  //  Individual assignee progress tracking
   assigneeProgress: [{
     user: {
       type: mongoose.Schema.Types.ObjectId,
@@ -87,7 +102,7 @@ const taskSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-// Calculate task duration in days
+// Virtual for duration
 taskSchema.virtual('durationInDays').get(function() {
   if (this.startDate && this.dueDate) {
     const diffTime = Math.abs(this.dueDate - this.startDate);
@@ -96,7 +111,7 @@ taskSchema.virtual('durationInDays').get(function() {
   return this.estimatedDays;
 });
 
-// Index for better query performance
+//  Indexes
 taskSchema.index({ assignedTo: 1, status: 1 });
 taskSchema.index({ createdBy: 1 });
 taskSchema.index({ status: 1 });

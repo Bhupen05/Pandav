@@ -14,6 +14,10 @@ export default function Tasks() {
   const [filter, setFilter] = useState<'all' | TaskInput['status']>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
+  const [showRejectModal, setShowRejectModal] = useState(false)
+  const [rejectionReason, setRejectionReason] = useState('')
+  const [rejectingTaskId, setRejectingTaskId] = useState<string | null>(null)
+  const [isRejectSubmitting, setIsRejectSubmitting] = useState(false)
   const { user, isAuthenticated, isAdmin } = useAuth()
 
   useEffect(() => {
@@ -104,23 +108,11 @@ export default function Tasks() {
       return
     }
 
-    // Admin rejecting task completion (sending back to in-progress)
+    // Admin rejecting task completion (send to modal)
     if (isAdmin && newStatus === 'in-progress' && task.status === 'completion-requested') {
-      const updatedTasks = [...tasks]
-      updatedTasks[originalIndex] = { ...updatedTasks[originalIndex], status: newStatus }
-      setTasks(updatedTasks)
-
-      try {
-        const response = await taskAPI.rejectCompletion(task._id)
-        if (response.success) {
-          console.log('Task completion rejected')
-          alert('Task sent back for more work.')
-        }
-      } catch (err: any) {
-        console.error('Failed to reject task:', err)
-        alert(err.response?.data?.message || 'Failed to reject task')
-        setTasks(tasks)
-      }
+      setRejectingTaskId(task._id)
+      setRejectionReason('')
+      setShowRejectModal(true)
       return
     }
 
@@ -176,6 +168,38 @@ export default function Tasks() {
       alert(err.response?.data?.message || 'Failed to delete task')
       // Revert on error
       setTasks(tasks)
+    }
+  }
+
+  const handleRejectTask = async () => {
+    if (!rejectingTaskId) return
+
+    setIsRejectSubmitting(true)
+    try {
+      const response = await taskAPI.rejectCompletion(rejectingTaskId, {
+        rejectionReason: rejectionReason.trim() || 'Task completion rejected by admin'
+      })
+      if (response.success) {
+        // Update local state
+        setTasks(prev => prev.map(t => 
+          t._id === rejectingTaskId 
+            ? { 
+                ...t, 
+                status: 'in-progress' as const,
+                rejectionReason: rejectionReason.trim() || 'Task completion rejected by admin'
+              }
+            : t
+        ))
+        setShowRejectModal(false)
+        setRejectionReason('')
+        setRejectingTaskId(null)
+        alert('Task rejected successfully')
+      }
+    } catch (err: any) {
+      console.error('Failed to reject task:', err)
+      alert(err.response?.data?.message || 'Failed to reject task')
+    } finally {
+      setIsRejectSubmitting(false)
     }
   }
 
@@ -455,6 +479,56 @@ export default function Tasks() {
           loadTasks()
         }}
       />
+
+      {/* Reject Task Modal */}
+      {showRejectModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="mb-4">
+              <h3 className="text-lg font-bold text-neutral-900">Reject Task Completion</h3>
+              <p className="mt-1 text-sm text-neutral-600">Provide a reason for rejecting this task completion request.</p>
+            </div>
+
+            <div className="mb-6">
+              <label className="mb-2 block text-sm font-medium text-neutral-700">Rejection Reason</label>
+              <textarea
+                value={rejectionReason}
+                onChange={(e) => setRejectionReason(e.target.value)}
+                placeholder="e.g., Work quality needs improvement, Missing requirements, etc."
+                className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-3 text-sm outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/10 resize-none"
+                rows={4}
+              />
+              <p className="mt-1 text-xs text-neutral-500">
+                {rejectionReason.length}/500 characters
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowRejectModal(false)}
+                disabled={isRejectSubmitting}
+                className="flex-1 rounded-lg border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-50 disabled:opacity-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleRejectTask}
+                disabled={isRejectSubmitting}
+                className="flex-1 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50 transition-colors inline-flex items-center justify-center gap-2"
+              >
+                {isRejectSubmitting ? (
+                  <>
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"></div>
+                    Rejecting...
+                  </>
+                ) : (
+                  'Reject Task'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
