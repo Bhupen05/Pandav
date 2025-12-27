@@ -156,6 +156,13 @@ function Attendance() {
     return new Date(dateString).toLocaleTimeString()
   }
 
+  // Find today's attendance record
+  const today = new Date().toISOString().split('T')[0]
+  const todayRecord = records.find(r => r.date.startsWith(today))
+
+  // Calculate total hours this week/month
+  const totalHoursThisMonth = records.reduce((sum, r) => sum + (r.workHours || 0), 0)
+
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
       <div className="mb-6">
@@ -165,23 +172,71 @@ function Attendance() {
         </p>
       </div>
 
+      {/* Today's Summary */}
+      <div className="mb-6 grid gap-4 sm:grid-cols-4">
+        <div className="rounded-xl border bg-white p-4 shadow-sm">
+          <p className="text-xs text-neutral-500">Today's Status</p>
+          <p className={`mt-1 text-lg font-semibold ${
+            todayRecord?.status === 'present' ? 'text-green-600' :
+            todayRecord?.status === 'late' ? 'text-yellow-600' :
+            todayRecord?.status === 'absent' ? 'text-red-600' :
+            'text-neutral-600'
+          }`}>
+            {todayRecord?.status ? todayRecord.status.charAt(0).toUpperCase() + todayRecord.status.slice(1) : 'Not Checked In'}
+          </p>
+        </div>
+        <div className="rounded-xl border bg-white p-4 shadow-sm">
+          <p className="text-xs text-neutral-500">Check In Time</p>
+          <p className="mt-1 text-lg font-semibold text-neutral-900">
+            {todayRecord?.checkInTime ? formatTime(todayRecord.checkInTime) : '-'}
+          </p>
+        </div>
+        <div className="rounded-xl border bg-white p-4 shadow-sm">
+          <p className="text-xs text-neutral-500">Check Out Time</p>
+          <p className="mt-1 text-lg font-semibold text-neutral-900">
+            {todayRecord?.checkOutTime ? formatTime(todayRecord.checkOutTime) : '-'}
+          </p>
+        </div>
+        <div className="rounded-xl border bg-white p-4 shadow-sm">
+          <p className="text-xs text-neutral-500">Today's Work Hours</p>
+          <p className="mt-1 text-lg font-semibold text-blue-600">
+            {todayRecord?.workHours !== undefined && todayRecord?.workHours > 0
+              ? `${todayRecord.workHours.toFixed(2)} hrs`
+              : todayRecord?.checkInTime && !todayRecord?.checkOutTime
+              ? 'In progress...'
+              : '0 hrs'}
+          </p>
+        </div>
+      </div>
+
+      {/* Total Hours Summary */}
+      <div className="mb-6 rounded-xl border bg-linear-to-r from-blue-500 to-emerald-500 p-6 text-white shadow-sm">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm opacity-90">Total Working Hours (This Period)</p>
+            <p className="mt-1 text-3xl font-bold">{totalHoursThisMonth.toFixed(2)} hrs</p>
+          </div>
+          <div className="text-5xl opacity-80">⏱️</div>
+        </div>
+      </div>
+
       {/* Quick Check In/Out */}
       <div className="mb-6 rounded-xl border bg-white p-6 shadow-sm">
         <h2 className="mb-4 text-lg font-semibold text-neutral-900">Quick Actions</h2>
         <div className="flex flex-wrap gap-3">
           <button
             onClick={handleCheckIn}
-            disabled={loading}
+            disabled={loading || !!todayRecord?.checkInTime}
             className="rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50"
           >
-            {loading ? 'Processing...' : 'Check In'}
+            {todayRecord?.checkInTime ? '✓ Checked In' : loading ? 'Processing...' : 'Check In'}
           </button>
           <button
             onClick={handleCheckOut}
-            disabled={loading}
+            disabled={loading || !todayRecord?.checkInTime || !!todayRecord?.checkOutTime}
             className="rounded-md bg-orange-600 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-700 disabled:opacity-50"
           >
-            {loading ? 'Processing...' : 'Check Out'}
+            {todayRecord?.checkOutTime ? '✓ Checked Out' : loading ? 'Processing...' : 'Check Out'}
           </button>
         </div>
       </div>
@@ -345,7 +400,13 @@ function Attendance() {
                     </td>
                     <td className="px-4 py-3 text-neutral-700">{formatTime(record.checkInTime)}</td>
                     <td className="px-4 py-3 text-neutral-700">{formatTime(record.checkOutTime)}</td>
-                    <td className="px-4 py-3 text-neutral-700">{record.workHours || '-'}</td>
+                    <td className="px-4 py-3 text-neutral-700">
+                      {record.workHours !== undefined && record.workHours !== null
+                        ? `${record.workHours.toFixed(2)} hrs`
+                        : record.checkInTime && !record.checkOutTime
+                        ? 'In progress...'
+                        : '-'}
+                    </td>
                     <td className="px-4 py-3 text-neutral-600">{record.remarks || '-'}</td>
                     {isAdmin && (
                       <td className="px-4 py-3">

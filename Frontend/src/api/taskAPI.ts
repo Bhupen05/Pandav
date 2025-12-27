@@ -2,9 +2,11 @@ import api from './axios';
 
 interface TaskData {
   title: string;
-  description?: string;
-  assignedTo: string;
-  dueDate?: string;
+  description: string;
+  assignedTo: string[];
+  startDate: string;
+  dueDate: string;
+  estimatedDays?: number;
   priority?: string;
   status?: string;
   tags?: string[];
@@ -39,6 +41,30 @@ export const taskAPI = {
   // Delete task
   deleteTask: async (id: string) => {
     const response = await api.delete(`/tasks/${id}`);
+    return response.data;
+  },
+
+  // Request task completion (for users)
+  requestCompletion: async (id: string) => {
+    const response = await api.post(`/tasks/${id}/request-completion`);
+    return response.data;
+  },
+    
+  // Approve task completion (admin only)
+  approveCompletion: async (id: string) => {
+    const response = await api.put(`/tasks/${id}/approve`);
+    return response.data;
+  },
+
+  // Reject task completion (admin only)
+  rejectCompletion: async (id: string) => {
+    const response = await api.put(`/tasks/${id}/reject`);
+    return response.data;
+  },
+
+  // Get pending approval tasks (admin only)
+  getPendingApprovalTasks: async () => {
+    const response = await api.get('/tasks/pending-approval');
     return response.data;
   },
 };

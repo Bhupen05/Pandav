@@ -8,9 +8,12 @@ type Task = {
   _id: string
   title: string
   description?: string
-  status: 'pending' | 'completed'
+  status: 'pending' | 'in-progress' | 'completed' | 'cancelled' | 'completion-requested'
+  startDate?: string
   dueDate?: string
-  assignedTo?: string | { _id: string }
+  priority?: 'low' | 'medium' | 'high' | 'urgent'
+  assignedTo?: Array<string | { _id: string; name?: string; email?: string }>
+  tags?: string[]
 }
 
 type AttendanceRecord = {
@@ -20,18 +23,24 @@ type AttendanceRecord = {
   user?: { _id: string }
 }
 
-type Tab = 'dashboard' | 'tasks' | 'attendance'
+const priorityConfig = {
+  urgent: { bg: 'bg-red-100', text: 'text-red-700', border: 'border-red-200' },
+  high: { bg: 'bg-orange-100', text: 'text-orange-700', border: 'border-orange-200' },
+  medium: { bg: 'bg-blue-100', text: 'text-blue-700', border: 'border-blue-200' },
+  low: { bg: 'bg-neutral-100', text: 'text-neutral-600', border: 'border-neutral-200' },
+}
 
-const navItems: { key: Tab; label: string }[] = [
-  { key: 'dashboard', label: 'Dashboard' },
-  { key: 'tasks', label: 'My Tasks' },
-  { key: 'attendance', label: 'Attendance' },
-]
+const statusConfig = {
+  pending: { bg: 'bg-amber-100', text: 'text-amber-700', icon: '⏳' },
+  'in-progress': { bg: 'bg-blue-100', text: 'text-blue-700', icon: '🔄' },
+  'completion-requested': { bg: 'bg-purple-100', text: 'text-purple-700', icon: '📤' },
+  completed: { bg: 'bg-emerald-100', text: 'text-emerald-700', icon: '✅' },
+  cancelled: { bg: 'bg-neutral-200', text: 'text-neutral-600', icon: '❌' },
+}
 
 export default function UserDashboard() {
   const navigate = useNavigate()
   const { isAuthenticated, user } = useAuth()
-  const [activeTab, setActiveTab] = useState<Tab>('dashboard')
   const [tasks, setTasks] = useState<Task[]>([])
   const [attendanceHistory, setAttendanceHistory] = useState<AttendanceRecord[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -58,14 +67,8 @@ export default function UserDashboard() {
         attendanceAPI.getAttendance(),
       ])
 
-      const myTasks = Array.isArray(taskRes?.data)
-        ? taskRes.data.filter((task: Task) => {
-            if (!task.assignedTo) return false
-            return typeof task.assignedTo === 'string'
-              ? task.assignedTo === user?._id
-              : task.assignedTo._id === user?._id
-          })
-        : []
+      // Backend already filters tasks for the current user if not admin
+      const myTasks = Array.isArray(taskRes?.data) ? taskRes.data : []
 
       const myAttendance = Array.isArray(attendanceRes?.data)
         ? attendanceRes.data.filter(
@@ -92,24 +95,66 @@ export default function UserDashboard() {
     }
   }, [checkingSession, isAuthenticated, user?._id, loadData])
 
-  const pendingTasks = tasks.filter((task) => task.status !== 'completed')
+  const pendingTasks = tasks.filter((task) => task.status === 'pending')
+  const inProgressTasks = tasks.filter((task) => task.status === 'in-progress')
+  const completedTasks = tasks.filter((task) => task.status === 'completed')
+  const completionRequestedTasks = tasks.filter((task) => task.status === 'completion-requested')
   const todayKey = new Date().toISOString().split('T')[0]
   const todaysAttendance = attendanceHistory.find((entry) =>
     entry.date.startsWith(todayKey),
   )
   const todayStatus = todaysAttendance?.status ?? 'Not Requested'
   const hasRequestedToday = todayStatus !== 'Not Requested'
+  
+  // Calculate completion rate
+  const completionRate = tasks.length > 0 ? Math.round((completedTasks.length / tasks.length) * 100) : 0
+  
+  // Get urgent/overdue tasks
+  const overdueTasks = tasks.filter((task) => {
+    if (!task.dueDate || task.status === 'completed' || task.status === 'cancelled') return false
+    return new Date(task.dueDate) < new Date()
+  })
+  
+  // Get upcoming tasks (due in next 3 days)
+  const upcomingTasks = tasks.filter((task) => {
+    if (!task.dueDate || task.status === 'completed' || task.status === 'cancelled') return false
+    const dueDate = new Date(task.dueDate)
+    const threeDaysFromNow = new Date()
+    threeDaysFromNow.setDate(threeDaysFromNow.getDate() + 3)
+    return dueDate >= new Date() && dueDate <= threeDaysFromNow
+  })
+
+  // Get greeting based on time
+  const getGreeting = () => {
+    const hour = new Date().getHours()
+    if (hour < 12) return 'Good morning'
+    if (hour < 17) return 'Good afternoon'
+    return 'Good evening'
+  }
 
   const handleCompleteTask = async (taskId: string) => {
     try {
-      await taskAPI.updateTask(taskId, { status: 'completed' })
+      await taskAPI.requestCompletion(taskId)
       setTasks((prev) =>
         prev.map((task) =>
-          task._id === taskId ? { ...task, status: 'completed' } : task,
+          task._id === taskId ? { ...task, status: 'completion-requested' } : task,
         ),
       )
     } catch (error) {
-      console.error('Unable to mark task complete', error)
+      console.error('Unable to request task completion', error)
+    }
+  }
+
+  const handleStartTask = async (taskId: string) => {
+    try {
+      await taskAPI.updateTask(taskId, { status: 'in-progress' })
+      setTasks((prev) =>
+        prev.map((task) =>
+          task._id === taskId ? { ...task, status: 'in-progress' } : task,
+        ),
+      )
+    } catch (error) {
+      console.error('Unable to start task', error)
     }
   }
 
@@ -154,135 +199,248 @@ export default function UserDashboard() {
   }
 
   const renderDashboard = (
-    <div className="space-y-4">
-      <div className="grid gap-4 md:grid-cols-2">
-        <div className="rounded-lg border bg-white p-4">
-          <p className="text-xs text-neutral-500">Pending Tasks</p>
-          <p className="mt-2 text-2xl font-semibold text-neutral-900">
-            {pendingTasks.length}
-          </p>
-        </div>
-        <div className="rounded-lg border bg-white p-4">
-          <p className="text-xs text-neutral-500">Today&apos;s Attendance</p>
-          <p className="mt-2 text-xl font-semibold text-neutral-900">
-            {todayStatus}
-          </p>
+    <div className="space-y-6">
+      {/* Welcome Header */}
+      <div className="rounded-xl bg-linear-to-r from-emerald-600 to-teal-600 p-6 text-white">
+        <h1 className="text-2xl font-bold">{getGreeting()}, {user?.name?.split(' ')[0] || 'User'}! 👋</h1>
+        <p className="mt-1 text-emerald-100">Here's what's happening with your tasks today.</p>
+        
+        {/* Quick Stats in Header */}
+        <div className="mt-4 flex flex-wrap gap-4">
+          <div className="rounded-lg bg-white/20 px-4 py-2">
+            <span className="text-sm opacity-90">Active Tasks</span>
+            <span className="ml-2 text-lg font-bold">{pendingTasks.length + inProgressTasks.length}</span>
+          </div>
+          <div className="rounded-lg bg-white/20 px-4 py-2">
+            <span className="text-sm opacity-90">Completion Rate</span>
+            <span className="ml-2 text-lg font-bold">{completionRate}%</span>
+          </div>
+          <div className="rounded-lg bg-white/20 px-4 py-2">
+            <span className="text-sm opacity-90">Today's Attendance</span>
+            <span className="ml-2 text-lg font-bold capitalize">{todayStatus}</span>
+          </div>
         </div>
       </div>
-      <p className="text-sm text-neutral-600">
-        Welcome back, {user?.name?.split(' ')[0] || 'User'}.
-      </p>
-    </div>
-  )
 
-  const renderTasks = (
-    <div className="rounded-lg border bg-white">
-      <table className="w-full text-sm">
-        <thead className="bg-neutral-50 text-left text-xs font-semibold text-neutral-600">
-          <tr>
-            <th className="px-3 py-2">Title</th>
-            <th className="px-3 py-2">Description</th>
-            <th className="px-3 py-2">Due Date</th>
-            <th className="px-3 py-2">Status</th>
-            <th className="px-3 py-2 text-right">Action</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y text-neutral-800">
-          {tasks.length === 0 ? (
-            <tr>
-              <td colSpan={5} className="px-3 py-4 text-center text-neutral-500">
-                No tasks assigned yet.
-              </td>
-            </tr>
-          ) : (
-            tasks.map((task) => (
-              <tr key={task._id}>
-                <td className="px-3 py-2 font-medium">{task.title}</td>
-                <td className="px-3 py-2 text-neutral-600">
-                  {task.description || '—'}
-                </td>
-                <td className="px-3 py-2">
-                  {task.dueDate
-                    ? new Date(task.dueDate).toLocaleDateString()
-                    : '—'}
-                </td>
-                <td className="px-3 py-2 capitalize">{task.status}</td>
-                <td className="px-3 py-2 text-right">
-                  <button
-                    onClick={() => handleCompleteTask(task._id)}
-                    disabled={task.status === 'completed'}
-                    className="rounded border px-3 py-1 text-xs text-neutral-700 disabled:opacity-50"
-                  >
-                    Mark Complete
-                  </button>
-                </td>
-              </tr>
-            ))
+      {/* Quick Actions */}
+      <div className="grid gap-4 md:grid-cols-2">
+        {/* Attendance Card */}
+        <div className="rounded-xl border bg-white p-5 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-semibold text-neutral-900">Today's Attendance</h3>
+              <p className="mt-1 text-sm text-neutral-500">
+                {hasRequestedToday 
+                  ? `Status: ${todayStatus.charAt(0).toUpperCase() + todayStatus.slice(1)}`
+                  : "Don't forget to mark your attendance"
+                }
+              </p>
+            </div>
+            <div className={`flex h-12 w-12 items-center justify-center rounded-full text-2xl ${
+              todayStatus === 'approved' ? 'bg-emerald-100' : 
+              todayStatus === 'requested' ? 'bg-amber-100' : 
+              todayStatus === 'rejected' ? 'bg-red-100' : 'bg-neutral-100'
+            }`}>
+              {todayStatus === 'approved' ? '✅' : 
+               todayStatus === 'requested' ? '⏳' : 
+               todayStatus === 'rejected' ? '❌' : '📅'}
+            </div>
+          </div>
+          <button
+            onClick={handleRequestAttendance}
+            disabled={hasRequestedToday || isRequestingAttendance}
+            className={`mt-4 w-full rounded-lg px-4 py-2.5 text-sm font-semibold transition-colors ${
+              hasRequestedToday 
+                ? 'bg-neutral-100 text-neutral-500 cursor-not-allowed'
+                : 'bg-emerald-600 text-white hover:bg-emerald-700'
+            }`}
+          >
+            {hasRequestedToday ? 'Already Requested' : isRequestingAttendance ? 'Requesting...' : 'Request Attendance'}
+          </button>
+        </div>
+
+        {/* Progress Card */}
+        <div className="rounded-xl border bg-white p-5 shadow-sm">
+          <h3 className="font-semibold text-neutral-900">Task Progress</h3>
+          <div className="mt-4">
+            <div className="mb-2 flex justify-between text-sm">
+              <span className="text-neutral-600">Overall Progress</span>
+              <span className="font-medium text-neutral-900">{completionRate}%</span>
+            </div>
+            <div className="h-3 overflow-hidden rounded-full bg-neutral-100">
+              <div className="flex h-full">
+                <div className="bg-emerald-500 transition-all" style={{ width: `${tasks.length > 0 ? (completedTasks.length / tasks.length) * 100 : 0}%` }}></div>
+                <div className="bg-purple-500 transition-all" style={{ width: `${tasks.length > 0 ? (completionRequestedTasks.length / tasks.length) * 100 : 0}%` }}></div>
+                <div className="bg-blue-500 transition-all" style={{ width: `${tasks.length > 0 ? (inProgressTasks.length / tasks.length) * 100 : 0}%` }}></div>
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-3 text-xs">
+              <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-emerald-500"></span> Completed ({completedTasks.length})</span>
+              <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-purple-500"></span> Awaiting ({completionRequestedTasks.length})</span>
+              <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-blue-500"></span> In Progress ({inProgressTasks.length})</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Stats Grid */}
+      <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
+        <div className="rounded-xl border bg-white p-4 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100 text-xl">📋</div>
+            <div>
+              <p className="text-2xl font-bold text-neutral-900">{tasks.length}</p>
+              <p className="text-xs text-neutral-500">Total Tasks</p>
+            </div>
+          </div>
+        </div>
+        <div className="rounded-xl border bg-white p-4 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-100 text-xl">⏳</div>
+            <div>
+              <p className="text-2xl font-bold text-amber-600">{pendingTasks.length}</p>
+              <p className="text-xs text-neutral-500">Pending</p>
+            </div>
+          </div>
+        </div>
+        <div className="rounded-xl border bg-white p-4 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100 text-xl">🔄</div>
+            <div>
+              <p className="text-2xl font-bold text-blue-600">{inProgressTasks.length}</p>
+              <p className="text-xs text-neutral-500">In Progress</p>
+            </div>
+          </div>
+        </div>
+        <div className="rounded-xl border bg-white p-4 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-100 text-xl">✅</div>
+            <div>
+              <p className="text-2xl font-bold text-emerald-600">{completedTasks.length}</p>
+              <p className="text-xs text-neutral-500">Completed</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Alerts Section */}
+      {(overdueTasks.length > 0 || upcomingTasks.length > 0) && (
+        <div className="grid gap-4 md:grid-cols-2">
+          {overdueTasks.length > 0 && (
+            <div className="rounded-xl border border-red-200 bg-red-50 p-4">
+              <div className="flex items-center gap-2 text-red-700">
+                <span className="text-lg">⚠️</span>
+                <h3 className="font-semibold">Overdue Tasks ({overdueTasks.length})</h3>
+              </div>
+              <ul className="mt-2 space-y-1">
+                {overdueTasks.slice(0, 3).map(task => (
+                  <li key={task._id} className="text-sm text-red-600">
+                    • {task.title} (Due: {new Date(task.dueDate!).toLocaleDateString()})
+                  </li>
+                ))}
+                {overdueTasks.length > 3 && (
+                  <li className="text-sm text-red-500">+{overdueTasks.length - 3} more...</li>
+                )}
+              </ul>
+            </div>
           )}
-        </tbody>
-      </table>
-    </div>
-  )
+          {upcomingTasks.length > 0 && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+              <div className="flex items-center gap-2 text-amber-700">
+                <span className="text-lg">📌</span>
+                <h3 className="font-semibold">Due Soon ({upcomingTasks.length})</h3>
+              </div>
+              <ul className="mt-2 space-y-1">
+                {upcomingTasks.slice(0, 3).map(task => (
+                  <li key={task._id} className="text-sm text-amber-600">
+                    • {task.title} (Due: {new Date(task.dueDate!).toLocaleDateString()})
+                  </li>
+                ))}
+                {upcomingTasks.length > 3 && (
+                  <li className="text-sm text-amber-500">+{upcomingTasks.length - 3} more...</li>
+                )}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
 
-  const renderAttendance = (
-    <div className="space-y-4">
-      <button
-        onClick={handleRequestAttendance}
-        disabled={hasRequestedToday || isRequestingAttendance}
-        className="rounded bg-neutral-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-      >
-        {hasRequestedToday ? 'Already Requested Today' : isRequestingAttendance ? 'Requesting...' : 'Request Attendance'}
-      </button>
-      <div className="rounded-lg border bg-white">
-        <table className="w-full text-sm">
-          <thead className="bg-neutral-50 text-left text-xs font-semibold text-neutral-600">
-            <tr>
-              <th className="px-3 py-2">Date</th>
-              <th className="px-3 py-2">Status</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y text-neutral-800">
-            {attendanceHistory.length === 0 ? (
-              <tr>
-                <td colSpan={2} className="px-3 py-4 text-center text-neutral-500">
-                  No attendance records yet.
-                </td>
-              </tr>
-            ) : (
-              attendanceHistory.slice(0, 10).map((entry) => (
-                <tr key={entry._id}>
-                  <td className="px-3 py-2">
-                    {new Date(entry.date).toLocaleDateString()}
-                  </td>
-                  <td className="px-3 py-2 capitalize">{entry.status}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+      {/* Recent Tasks */}
+      <div className="rounded-xl border bg-white p-5 shadow-sm">
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="font-semibold text-neutral-900">Recent Tasks</h3>
+          <button 
+            onClick={() => setActiveTab('tasks')}
+            className="text-sm text-emerald-600 hover:text-emerald-700"
+          >
+            View All →
+          </button>
+        </div>
+        {tasks.length === 0 ? (
+          <p className="text-center text-sm text-neutral-500 py-8">No tasks assigned yet.</p>
+        ) : (
+          <div className="space-y-3">
+            {tasks.slice(0, 5).map((task) => {
+              const config = statusConfig[task.status] || statusConfig.pending
+              const pConfig = priorityConfig[task.priority || 'medium']
+              return (
+                <div key={task._id} className="flex items-center justify-between rounded-lg border p-3 hover:bg-neutral-50 transition-colors">
+                  <div className="flex items-center gap-3">
+                    <span className="text-lg">{config.icon}</span>
+                    <div>
+                      <p className="font-medium text-neutral-900">{task.title}</p>
+                      <div className="mt-1 flex items-center gap-2">
+                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${pConfig.bg} ${pConfig.text}`}>
+                          {task.priority || 'medium'}
+                        </span>
+                        {task.dueDate && (
+                          <span className="text-xs text-neutral-500">
+                            Due: {new Date(task.dueDate).toLocaleDateString()}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${config.bg} ${config.text}`}>
+                      {task.status.replace('-', ' ')}
+                    </span>
+                    {task.status === 'pending' && (
+                      <button
+                        onClick={() => handleStartTask(task._id)}
+                        className="rounded-lg bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
+                      >
+                        Start
+                      </button>
+                    )}
+                    {task.status === 'in-progress' && (
+                      <button
+                        onClick={() => handleCompleteTask(task._id)}
+                        className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700"
+                      >
+                        Complete
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
     </div>
   )
 
   return (
-    <div className="min-h-screen bg-neutral-50 p-6">
-      <nav className="mb-6 flex flex-wrap gap-2">
-        {navItems.map((item) => (
-          <button
-            key={item.key}
-            onClick={() => setActiveTab(item.key)}
-            className={`rounded border px-3 py-2 text-sm ${
-              activeTab === item.key ? 'bg-neutral-900 text-white' : 'bg-white text-neutral-700'
-            }`}
-          >
-            {item.label}
-          </button>
-        ))}
-      </nav>
-
-      {activeTab === 'dashboard' && renderDashboard}
-      {activeTab === 'tasks' && renderTasks}
-      {activeTab === 'attendance' && renderAttendance}
+    <div className="min-h-screen bg-neutral-50">
+      {/* Content */}
+      <div className="mx-auto max-w-6xl px-4 py-6">
+        {renderDashboard}
+      </div>
     </div>
   )
 }
+function setActiveTab(_arg0: string): void {
+  throw new Error('Function not implemented.')
+}
+

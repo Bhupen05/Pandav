@@ -5,6 +5,7 @@ type Props = {
 	onEdit?: (index: number) => void
 	onDelete?: (index: number) => void
 	onStatusChange?: (index: number, next: TaskInput['status']) => void
+	isAdmin?: boolean
 }
 
 function formatDate(date?: string) {
@@ -21,6 +22,10 @@ function statusClasses(status: TaskInput['status']) {
 			return 'bg-blue-100 text-blue-800'
 		case 'completed':
 			return 'bg-emerald-100 text-emerald-800'
+		case 'completion-requested':
+			return 'bg-purple-100 text-purple-800'
+		case 'cancelled':
+			return 'bg-neutral-200 text-neutral-700'
 	}
 }
 
@@ -58,10 +63,14 @@ function statusIcon(status: TaskInput['status']) {
 			return '🔄'
 		case 'completed':
 			return '✅'
+		case 'completion-requested':
+			return '🔔'
+		case 'cancelled':
+			return '❌'
 	}
 }
 
-export default function Taskscard({ tasks, onEdit, onDelete, onStatusChange }: Props) {
+export default function Taskscard({ tasks, onEdit, onDelete, onStatusChange, isAdmin = false }: Props) {
 	if (!tasks || tasks.length === 0) {
 		return (
 			<div className="mx-auto max-w-4xl rounded-xl border bg-white p-12 text-center shadow-sm">
@@ -112,16 +121,24 @@ export default function Taskscard({ tasks, onEdit, onDelete, onStatusChange }: P
 							<p className="mb-4 line-clamp-2 text-sm text-neutral-600 leading-relaxed">{task.description}</p>
 						)}
 
-						{/* Metadata */}
-						<div className="mb-4 space-y-2">
-							{due && (
-								<div className={`flex items-center gap-2 text-xs ${isOverdue ? 'text-red-600' : 'text-neutral-600'}`}>
-									<svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-										<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-									</svg>
-									<span className="font-medium">{isOverdue ? 'Overdue:' : 'Due:'} {due}</span>
-								</div>
-							)}
+					{/* Metadata */}
+					<div className="mb-4 space-y-2">
+						{task.startDate && task.dueDate && (
+							<div className="flex items-center gap-2 text-xs text-neutral-600">
+								<svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+									<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+								</svg>
+								<span className="font-medium">
+									{formatDate(task.startDate)} → {formatDate(task.dueDate)}
+									{task.estimatedDays && ` (${task.estimatedDays}d)`}
+								</span>
+							</div>
+						)}
+						{due && (
+							<div className={`flex items-center gap-2 text-xs ${isOverdue ? 'text-red-600 font-semibold' : 'text-neutral-500'}`}>
+								{isOverdue && <span>⚠️ Overdue</span>}
+							</div>
+						)}
 							{task.tags && task.tags.length > 0 && (
 								<div className="flex flex-wrap items-center gap-1.5">
 									{task.tags.map((t, i) => (
@@ -135,24 +152,73 @@ export default function Taskscard({ tasks, onEdit, onDelete, onStatusChange }: P
 
 						{/* Actions */}
 						<div className="flex items-center gap-2 border-t pt-3">
-							{onStatusChange && (
-								<button
-									className={`flex-1 rounded-lg px-3 py-2 text-xs font-semibold transition-colors ${
-										task.status === 'completed'
-											? 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'
-											: 'bg-emerald-600 text-white hover:bg-emerald-700'
-									}`}
-									onClick={() => {
-										let next: TaskInput['status']
-										if (task.status === 'pending') next = 'in-progress'
-										else if (task.status === 'in-progress') next = 'completed'
-										else next = 'pending'
-										onStatusChange(idx, next)
-									}}
-								>
-									{task.status === 'completed' ? '↩️ Reopen' : task.status === 'in-progress' ? '✓ Complete' : '▶️ Start'}
-								</button>
-							)}
+						{onStatusChange && (
+							<>
+								{/* User actions */}
+								{!isAdmin && task.status === 'pending' && (
+									<button
+										className="flex-1 rounded-lg px-3 py-2 text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+										onClick={() => onStatusChange(idx, 'in-progress')}
+									>
+										▶️ Start Task
+									</button>
+								)}
+								{!isAdmin && task.status === 'in-progress' && (
+									<button
+										className="flex-1 rounded-lg px-3 py-2 text-xs font-semibold bg-purple-600 text-white hover:bg-purple-700 transition-colors"
+										onClick={() => onStatusChange(idx, 'completion-requested')}
+									>
+										🔔 Request Completion
+									</button>
+								)}
+								{!isAdmin && task.status === 'completion-requested' && (
+									<span className="flex-1 text-center text-xs text-purple-600 font-medium py-2">
+										⏳ Awaiting Admin Approval
+									</span>
+								)}
+								{!isAdmin && task.status === 'completed' && (
+									<span className="flex-1 text-center text-xs text-emerald-600 font-medium py-2">
+										✅ Completed
+									</span>
+								)}
+								{!isAdmin && task.status === 'cancelled' && (
+									<span className="flex-1 text-center text-xs text-neutral-500 font-medium py-2">
+										❌ Cancelled
+									</span>
+								)}
+								
+								{/* Admin actions */}
+								{isAdmin && task.status === 'completion-requested' && (
+									<>
+										<button
+											className="flex-1 rounded-lg px-3 py-2 text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
+											onClick={() => onStatusChange(idx, 'completed')}
+										>
+											✓ Approve
+										</button>
+										<button
+											className="rounded-lg px-3 py-2 text-xs font-semibold border border-red-500 text-red-600 hover:bg-red-50 transition-colors"
+											onClick={() => onStatusChange(idx, 'in-progress')}
+										>
+											✗ Reject
+										</button>
+									</>
+								)}
+								{isAdmin && task.status !== 'completion-requested' && (
+									<span className={`flex-1 text-center text-xs font-medium py-2 ${
+										task.status === 'completed' ? 'text-emerald-600' :
+										task.status === 'in-progress' ? 'text-blue-600' :
+										task.status === 'cancelled' ? 'text-neutral-500' :
+										'text-amber-600'
+									}`}>
+										{task.status === 'completed' ? '✅ Completed' :
+										 task.status === 'in-progress' ? '🔄 In Progress' :
+										 task.status === 'cancelled' ? '❌ Cancelled' :
+										 '⏳ Pending'}
+									</span>
+								)}
+							</>
+						)}
 							{onEdit && (
 								<button
 									className="rounded-lg border border-neutral-200 p-2 text-neutral-600 hover:bg-neutral-50 transition-colors"

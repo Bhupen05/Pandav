@@ -63,6 +63,9 @@ function Navbar() {
           
           {isAuthenticated && !isAdmin && (
             <>
+              <NavLink to="/user" className={linkClass} onClick={close}>
+                Dashboard
+              </NavLink>
               <NavLink to="/tasks" className={linkClass} onClick={close}>
                 Tasks
               </NavLink>
@@ -77,7 +80,18 @@ function Navbar() {
               <NavLink to="/admin" className={linkClass} onClick={close}>
                 Admin Panel
               </NavLink>
-              
+              <NavLink to="/admin/userview" className={linkClass} onClick={close}>
+                User View
+              </NavLink>
+              <NavLink to="/admin/attendance" className={linkClass} onClick={close}>
+                Team Attendance
+              </NavLink>
+              <NavLink to="/tasks" className={linkClass} onClick={close}>
+                Tasks
+              </NavLink>
+              {/* <NavLink to="/attendance" className={linkClass} onClick={close}>
+                My Attendance
+              </NavLink> */}
             </>
           )}
           
