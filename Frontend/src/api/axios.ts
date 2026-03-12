@@ -11,7 +11,8 @@ const api = axios.create({
 // Request interceptor - Add token to requests
 api.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('token');
+    // Check sessionStorage first (session-based), then localStorage (remember me)
+    const token = sessionStorage.getItem('token') || localStorage.getItem('token');
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -36,8 +37,11 @@ api.interceptors.response.use(
                                error.config?.url?.includes('/auth/register');
         
         if (!isAuthEndpoint) {
+          // Clear both storage types
           localStorage.removeItem('token');
           localStorage.removeItem('user');
+          sessionStorage.removeItem('token');
+          sessionStorage.removeItem('user');
           window.location.href = '/login';
           return Promise.reject(error.response.data);
         }

@@ -19,7 +19,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isAdmin: boolean;
   loading: boolean;
-  login: (email: string, password: string) => Promise<User>;  // Changed from Promise<void>
+  login: (email: string, password: string, rememberMe?: boolean) => Promise<User>;
   register: (userData: any) => Promise<void>;
   logout: () => void;
   updateUser: (user: User) => void;
@@ -28,8 +28,9 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const getInitialAuthState = () => {
-  const storedUser = localStorage.getItem('user');
-  const storedToken = localStorage.getItem('token');
+  // Check sessionStorage first (session-based login), then localStorage (remember me)
+  const storedUser = sessionStorage.getItem('user') || localStorage.getItem('user');
+  const storedToken = sessionStorage.getItem('token') || localStorage.getItem('token');
 
   if (storedUser && storedToken) {
     try {
@@ -55,18 +56,21 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(() => getInitialAuthState()?.isAuthenticated ?? false);
   const [isAdmin, setIsAdmin] = useState(() => getInitialAuthState()?.isAdmin ?? false);
 
-  const hydrateSession = (authUser: User, authToken: string) => {
+  const hydrateSession = (authUser: User, authToken: string, rememberMe: boolean = false) => {
     setUser(authUser)
     setToken(authToken)
     setIsAuthenticated(true)
     setIsAdmin(authUser.role === 'admin')
-    localStorage.setItem('user', JSON.stringify(authUser))
-    localStorage.setItem('token', authToken)
+    
+    // Use localStorage for "Remember Me", sessionStorage for session-based (logout on close)
+    const storage = rememberMe ? localStorage : sessionStorage;
+    storage.setItem('user', JSON.stringify(authUser))
+    storage.setItem('token', authToken)
     setLoading(false)
   }
 
-  const login = async (email: string, password: string) => {
-    const response = await authAPI.login({ email, password })
+  const login = async (email: string, password: string, rememberMe: boolean = false) => {
+    const response = await authAPI.login({ email, password }, rememberMe)
     
     console.log('Login API response:', response)  // Add this to debug
     
@@ -79,7 +83,7 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
 
     console.log('User role:', authUser.role)  // Check the role value
     
-    hydrateSession(authUser, authToken)
+    hydrateSession(authUser, authToken, rememberMe)
     return authUser
   }
 
@@ -101,9 +105,16 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
 
   const updateUser = (updatedUser: User) => {
     setUser(updatedUser);
-    const storedUser = localStorage.getItem('user');
-    if (storedUser) {
-      const parsed = JSON.parse(storedUser);
+    // Check which storage is being used and update accordingly
+    const sessionUser = sessionStorage.getItem('user');
+    const localUser = localStorage.getItem('user');
+    
+    if (sessionUser) {
+      const parsed = JSON.parse(sessionUser);
+      sessionStorage.setItem('user', JSON.stringify({ ...parsed, ...updatedUser }));
+    }
+    if (localUser) {
+      const parsed = JSON.parse(localUser);
       localStorage.setItem('user', JSON.stringify({ ...parsed, ...updatedUser }));
     }
   };

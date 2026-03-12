@@ -28,7 +28,7 @@ export const authAPI = {
   },
 
   // Login user
-  login: async (credentials: LoginCredentials) => {
+  login: async (credentials: LoginCredentials, rememberMe: boolean = false) => {
     const trimmedCredentials = {
       email: credentials.email.trim(),
       password: credentials.password
@@ -51,8 +51,10 @@ export const authAPI = {
     } : null;
     
     if (success && token) {
-      localStorage.setItem('token', token);
-      localStorage.setItem('user', JSON.stringify(user));
+      // Use localStorage for "Remember Me", sessionStorage for session-based (logout on close)
+      const storage = rememberMe ? localStorage : sessionStorage;
+      storage.setItem('token', token);
+      storage.setItem('user', JSON.stringify(user));
     }
     
     return { success, token, user, message };
@@ -70,9 +72,11 @@ export const authAPI = {
     return response.data;
   },
 
-  // Logout
+  // Logout - clear both storage types
   logout: () => {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    sessionStorage.removeItem('token');
+    sessionStorage.removeItem('user');
   },
 };

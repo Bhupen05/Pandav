@@ -25,7 +25,7 @@ function Login() {
     setLoading(true)
     
     try {
-      const user = await login(email.trim(), password)
+      const user = await login(email.trim(), password, remember)
       
       if (user.role === 'admin') {
         navigate('/admin')
