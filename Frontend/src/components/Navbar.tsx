@@ -72,6 +72,9 @@ function Navbar() {
               <NavLink to="/attendance" className={linkClass} onClick={close}>
                 Attendance
               </NavLink>
+              <NavLink to="/chat" className={linkClass} onClick={close}>
+                Chat
+              </NavLink>
             </>
           )}
           
@@ -88,6 +91,9 @@ function Navbar() {
               </NavLink>
               <NavLink to="/tasks" className={linkClass} onClick={close}>
                 Tasks
+              </NavLink>
+              <NavLink to="/chat" className={linkClass} onClick={close}>
+                Chat
               </NavLink>
               {/* <NavLink to="/attendance" className={linkClass} onClick={close}>
                 My Attendance

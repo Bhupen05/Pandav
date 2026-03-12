@@ -5,10 +5,13 @@ import {
   updateUser,
   deleteUser,
   toggleUserActive,
+  getChatUsers,
 } from '../controllers/userController.js';
 import { protect, authorize } from '../middleware/auth.js';
 
 const router = express.Router();
+
+router.get('/chat-list', protect, getChatUsers);
 
 router
   .route('/')

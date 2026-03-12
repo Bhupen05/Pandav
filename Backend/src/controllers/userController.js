@@ -1,5 +1,18 @@
 import User from '../models/User.js';
 
+// @desc    Get all users for chat (any authenticated user)
+// @route   GET /api/users/chat-list
+// @access  Private
+export const getChatUsers = async (req, res) => {
+  try {
+    const users = await User.find({ _id: { $ne: req.user._id }, isActive: { $ne: false } })
+      .select('_id name email profileImage');
+    res.json({ success: true, data: users });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // @desc    Get all users
 // @route   GET /api/users
 // @access  Private (Admin)

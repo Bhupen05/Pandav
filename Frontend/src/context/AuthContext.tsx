@@ -1,7 +1,9 @@
 import { createContext, useState, useContext, type FC, type ReactNode } from 'react';
 import { authAPI } from '../api/authAPI';
+import { setSecureItem, removeSecureItem, CHAT_USER_ID_KEY, CHAT_USER_NAME_KEY } from '../utils/secureStorage';
 
 interface User {
+  id?: string;
   _id: string;
   name: string;
   email: string;
@@ -66,6 +68,9 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
     const storage = rememberMe ? localStorage : sessionStorage;
     storage.setItem('user', JSON.stringify(authUser))
     storage.setItem('token', authToken)
+    // Store encrypted chat identity
+    setSecureItem(CHAT_USER_ID_KEY, authUser._id)
+    setSecureItem(CHAT_USER_NAME_KEY, authUser.name)
     setLoading(false)
   }
 
@@ -101,6 +106,8 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
     setToken(null)
     setIsAuthenticated(false)
     setIsAdmin(false)
+    removeSecureItem(CHAT_USER_ID_KEY)
+    removeSecureItem(CHAT_USER_NAME_KEY)
   };
 
   const updateUser = (updatedUser: User) => {

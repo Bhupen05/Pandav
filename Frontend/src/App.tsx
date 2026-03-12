@@ -14,27 +14,32 @@ import Contactus from './components/Contactus'
 import About from './pages/About'
 import Service from './pages/Service'
 import UserDashboard from './pages/UserDashboard'
+import { ChatProvider } from './context/ChatContext'
+import ChatPage from './pages/ChatPage'
 
 function App() {
   return (
-    <BrowserRouter>
-      <Navbar />
-      <Routes>
-        <Route path="/" element={<Landing />} />
-        <Route path="/about" element={<About/>} />
-        <Route path="/service" element={<Service />} />
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
-        <Route path="/profile" element={<Profile />} />
-        <Route path="/admin" element={<AdminDashboard />} />
-        <Route path="/admin/attendance" element={<AttendanceAdmin />} />
-        <Route path="/admin/userview" element={<Userview />} />
-        <Route path="/tasks" element={<Tasks />} />
-        <Route path="/attendance" element={<Attendance />} />
-        <Route path="/contact" element={<Contactus />} />
-        <Route path="/user" element = {<UserDashboard />} />
-      </Routes>
-    </BrowserRouter>
+    <ChatProvider>
+      <BrowserRouter>
+        <Navbar />
+        <Routes>
+          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/" element={<Landing />} />
+          <Route path="/about" element={<About/>} />
+          <Route path="/service" element={<Service />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/profile" element={<Profile />} />
+          <Route path="/admin" element={<AdminDashboard />} />
+          <Route path="/admin/attendance" element={<AttendanceAdmin />} />
+          <Route path="/admin/userview" element={<Userview />} />
+          <Route path="/tasks" element={<Tasks />} />
+          <Route path="/attendance" element={<Attendance />} />
+          <Route path="/contact" element={<Contactus />} />
+          <Route path="/user" element = {<UserDashboard />} />
+        </Routes>
+      </BrowserRouter>
+    </ChatProvider>
   )
 }
 
