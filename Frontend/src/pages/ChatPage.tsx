@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Navigate } from 'react-router-dom';
 import Chat from '../components/Chat';
 import { useAuth } from '../context/AuthContext';
+import { useChat } from '../context/ChatContext';
 
 interface UserItem {
   _id: string;
@@ -11,6 +12,7 @@ interface UserItem {
 
 export default function ChatPage() {
   const { token, isAuthenticated } = useAuth();
+  const { unreadCounts, clearUnread } = useChat();
   const [users, setUsers] = useState<UserItem[]>([]);
   const [selectedUser, setSelectedUser] = useState<UserItem | null>(null);
   const [loadingUsers, setLoadingUsers] = useState(true);
@@ -55,7 +57,7 @@ export default function ChatPage() {
           users.map(u => (
             <button
               key={u._id}
-              onClick={() => setSelectedUser(u)}
+              onClick={() => { setSelectedUser(u); clearUnread(u._id); }}
               className={`flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-neutral-50 ${
                 selectedUser?._id === u._id ? 'bg-emerald-50 border-l-2 border-emerald-600' : ''
               }`}
@@ -63,8 +65,15 @@ export default function ChatPage() {
               <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-sm font-semibold text-emerald-700">
                 {u.name.split(' ').map(n => n[0]).join('').slice(0, 2)}
               </div>
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-neutral-900">{u.name}</p>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-1">
+                  <p className="truncate text-sm font-medium text-neutral-900">{u.name}</p>
+                  {(unreadCounts[u._id] ?? 0) > 0 && (
+                    <span className="shrink-0 flex h-5 min-w-5 items-center justify-center rounded-full bg-emerald-600 px-1 text-xs font-semibold text-white">
+                      {unreadCounts[u._id] > 99 ? '99+' : unreadCounts[u._id]}
+                    </span>
+                  )}
+                </div>
                 <p className="truncate text-xs text-neutral-400">{u.email}</p>
               </div>
             </button>

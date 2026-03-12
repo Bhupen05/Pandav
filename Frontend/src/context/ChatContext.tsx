@@ -16,6 +16,8 @@ interface ChatContextType {
   messages: Message[];
   activeUsers: string[];
   loadingMessages: boolean;
+  unreadCounts: Record<string, number>;
+  clearUnread: (userId: string) => void;
   sendMessage: (receiverId: string, message: string) => void;
   fetchMessages: (userId: string) => Promise<void>;
 }
@@ -28,6 +30,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [messages, setMessages] = useState<Message[]>([]);
   const [activeUsers, setActiveUsers] = useState<string[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [, setOpenChatUserId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -41,6 +45,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     newSocket.on('receive_message', (data) => {
       setMessages(prev => [...prev, data]);
+      // increment unread only if this chat is not currently open
+      const senderId = data.sender?._id || data.sender;
+      setOpenChatUserId(current => {
+        if (current !== senderId) {
+          setUnreadCounts(prev => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
+        }
+        return current;
+      });
     });
 
     newSocket.on('update_active_users', (users) => {
@@ -77,7 +89,13 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const clearUnread = (userId: string) => {
+    setUnreadCounts(prev => ({ ...prev, [userId]: 0 }));
+  };
+
   const fetchMessages = async (userId: string) => {
+    setOpenChatUserId(userId);
+    clearUnread(userId);
     setLoadingMessages(true);
     setMessages([]);
     try {
@@ -97,7 +115,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   return (
-    <ChatContext.Provider value={{ socket, messages, activeUsers, loadingMessages, sendMessage, fetchMessages }}>
+    <ChatContext.Provider value={{ socket, messages, activeUsers, loadingMessages, unreadCounts, clearUnread, sendMessage, fetchMessages }}>
       {children}
     </ChatContext.Provider>
   );
