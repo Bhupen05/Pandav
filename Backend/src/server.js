@@ -10,6 +10,7 @@ import attendanceRoutes from './routes/attendanceRoutes.js';
 import contactRoutes from './routes/contactRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import chatRoutes from './routes/chatRoutes.js';
+import teamRoutes from './routes/teamRoutes.js';
 
 dotenv.config();
 
@@ -82,9 +83,8 @@ app.use('/api/tasks', taskRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/contact', contactRoutes);
 app.use('/api/users', userRoutes);
-
-// Add chat routes
 app.use('/api/chat', chatRoutes);
+app.use('/api/teams', teamRoutes);
 
 // Health check route
 app.get('/api/health', (req, res) => {

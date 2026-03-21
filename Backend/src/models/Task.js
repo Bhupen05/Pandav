@@ -98,6 +98,12 @@ const taskSchema = new mongoose.Schema({
   notes: {
     type: String,
   },
+  // Optional: team this task belongs to
+  team: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Team',
+    default: null,
+  },
 }, {
   timestamps: true,
 });

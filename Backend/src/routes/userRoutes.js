@@ -1,5 +1,6 @@
 import express from 'express';
 import {
+  searchUsers,
   getUsers,
   getUser,
   updateUser,
@@ -11,6 +12,7 @@ import { protect, authorize } from '../middleware/auth.js';
 
 const router = express.Router();
 
+router.get('/search', protect, searchUsers);
 router.get('/chat-list', protect, getChatUsers);
 
 router

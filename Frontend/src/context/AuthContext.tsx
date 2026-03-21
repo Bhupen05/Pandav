@@ -20,6 +20,8 @@ interface AuthContextType {
   token: string | null;
   isAuthenticated: boolean;
   isAdmin: boolean;
+  isTeamLeader: boolean;
+  isTeamMember: boolean;
   loading: boolean;
   login: (email: string, password: string, rememberMe?: boolean) => Promise<User>;
   register: (userData: any) => Promise<void>;
@@ -42,6 +44,8 @@ const getInitialAuthState = () => {
         token: storedToken,
         isAuthenticated: true,
         isAdmin: parsedUser.role === 'admin',
+        isTeamLeader: parsedUser.role === 'team_leader',
+        isTeamMember: parsedUser.role === 'team_member',
         loading: false,
       };
     } catch {
@@ -57,12 +61,16 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const [loading, setLoading] = useState(() => getInitialAuthState()?.loading ?? false);
   const [isAuthenticated, setIsAuthenticated] = useState(() => getInitialAuthState()?.isAuthenticated ?? false);
   const [isAdmin, setIsAdmin] = useState(() => getInitialAuthState()?.isAdmin ?? false);
+  const [isTeamLeader, setIsTeamLeader] = useState(() => getInitialAuthState()?.isTeamLeader ?? false);
+  const [isTeamMember, setIsTeamMember] = useState(() => getInitialAuthState()?.isTeamMember ?? false);
 
   const hydrateSession = (authUser: User, authToken: string, rememberMe: boolean = false) => {
     setUser(authUser)
     setToken(authToken)
     setIsAuthenticated(true)
     setIsAdmin(authUser.role === 'admin')
+    setIsTeamLeader(authUser.role === 'team_leader')
+    setIsTeamMember(authUser.role === 'team_member')
     
     // Use localStorage for "Remember Me", sessionStorage for session-based (logout on close)
     const storage = rememberMe ? localStorage : sessionStorage;
@@ -106,12 +114,17 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
     setToken(null)
     setIsAuthenticated(false)
     setIsAdmin(false)
+    setIsTeamLeader(false)
+    setIsTeamMember(false)
     removeSecureItem(CHAT_USER_ID_KEY)
     removeSecureItem(CHAT_USER_NAME_KEY)
   };
 
   const updateUser = (updatedUser: User) => {
     setUser(updatedUser);
+    setIsAdmin(updatedUser.role === 'admin');
+    setIsTeamLeader(updatedUser.role === 'team_leader');
+    setIsTeamMember(updatedUser.role === 'team_member');
     // Check which storage is being used and update accordingly
     const sessionUser = sessionStorage.getItem('user');
     const localUser = localStorage.getItem('user');
@@ -131,6 +144,8 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
     token,
     isAuthenticated,
     isAdmin,
+    isTeamLeader,
+    isTeamMember,
     loading,
     login,
     register,

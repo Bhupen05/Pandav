@@ -1,4 +1,6 @@
 import Attendance from '../models/Attendance.js';
+import Team from '../models/Team.js';
+import User from '../models/User.js';
 
 // @desc    Get all attendance records
 // @route   GET /api/attendance
@@ -17,13 +19,29 @@ export const getAttendance = async (req, res) => {
       if (endDate) filter.date.$lte = new Date(endDate);
     }
 
-    // If user is not admin, show only their attendance
-    if (req.user.role !== 'admin') {
+    // Scope attendance based on role
+    if (req.user.role === 'team_leader') {
+      const team = await Team.findOne({ leaders: req.user.id });
+      if (team) {
+        filter.team = team._id;
+      } else {
+        // If not a leader of any team, show only their own
+        filter.user = req.user.id;
+      }
+    } else if (req.user.role === 'team_member') {
+      const user = await User.findById(req.user.id);
+      if (user && user.teamId) {
+        filter.team = user.teamId;
+      } else {
+        filter.user = req.user.id;
+      }
+    } else if (req.user.role !== 'admin') {
       filter.user = req.user.id;
     }
 
     const attendance = await Attendance.find(filter)
       .populate('user', 'name email department profileImage')
+      .populate('team', 'name')
       .populate('approvedBy', 'name email')
       .sort('-date');
 
@@ -86,6 +104,14 @@ export const createAttendance = async (req, res) => {
       req.body.user = req.user.id
     }
 
+    // Set team if user belongs to a team
+    if (!req.body.team) {
+      const user = await User.findById(req.body.user);
+      if (user && user.teamId) {
+        req.body.team = user.teamId;
+      }
+    }
+
     // Check if record already exists for today
     const today = new Date().toISOString().split('T')[0]
     const existingRecord = await Attendance.findOne({
@@ -113,6 +139,7 @@ export const createAttendance = async (req, res) => {
 
     const populatedAttendance = await Attendance.findById(attendance._id)
       .populate('user', 'name email profileImage')
+      .populate('team', 'name')
 
     res.status(201).json({
       success: true,
@@ -146,16 +173,26 @@ export const updateAttendance = async (req, res) => {
       });
     }
 
-    // Only admin or the user themselves can update
+    // Only admin, the user themselves, or their team leader can update
     if (req.user.role !== 'admin' && attendance.user.toString() !== req.user.id) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Not authorized to update this record' 
-      });
+      if (req.user.role === 'team_leader') {
+        const team = await Team.findOne({ leaders: req.user.id });
+        const isTeamMember = team &&
+          (team.members.some(m => m.toString() === attendance.user.toString()) ||
+           team.leaders.some(l => l.toString() === attendance.user.toString()));
+        if (!isTeamMember) {
+          return res.status(403).json({ success: false, message: 'Not authorized to update this record' });
+        }
+      } else {
+        return res.status(403).json({ 
+          success: false, 
+          message: 'Not authorized to update this record' 
+        });
+      }
     }
 
     // Restrict what regular users can update
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'admin' && req.user.role !== 'team_leader') {
       // Regular users can only update status and remarks, not dates/times
       const allowedUpdates = ['status', 'remarks'];
       const updateData = {};
@@ -169,8 +206,8 @@ export const updateAttendance = async (req, res) => {
       req.body = updateData;
     }
 
-    // If admin is updating, set approvedBy
-    if (req.user.role === 'admin') {
+    // If admin or team_leader is updating, set approvedBy
+    if (req.user.role === 'admin' || req.user.role === 'team_leader') {
       req.body.approvedBy = req.user.id;
     }
 

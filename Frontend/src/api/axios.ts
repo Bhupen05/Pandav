@@ -58,11 +58,14 @@ api.interceptors.response.use(
       // Log the actual error message from backend
       console.error('Backend error message:', error.response.data?.message);
       
-      // Return error with proper message
-      const errorData = error.response.data;
+      // Return error with full response object so callers can check status code
       return Promise.reject({
-        message: errorData?.message || errorData?.error || `Request failed with status ${error.response.status}`,
-        ...errorData
+        response: {
+          status: error.response.status,
+          statusText: error.response.statusText,
+          data: error.response.data,
+        },
+        message: error.response.data?.message || error.response.data?.error || `Request failed with status ${error.response.status}`,
       });
     }
     
