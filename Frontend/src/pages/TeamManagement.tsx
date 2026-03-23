@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { teamAPI } from '../api/teamAPI'
@@ -24,6 +24,23 @@ type Team = {
   createdBy?: { _id: string; name: string }
 }
 
+const getErrorMessage = (error: unknown, fallback: string) => {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'response' in error &&
+    typeof (error as { response?: { data?: { message?: string } } }).response?.data?.message === 'string'
+  ) {
+    return (error as { response?: { data?: { message?: string } } }).response?.data?.message as string
+  }
+
+  if (error instanceof Error && error.message) {
+    return error.message
+  }
+
+  return fallback
+}
+
 export default function TeamManagement() {
   const navigate = useNavigate()
   const { isAdmin, isAuthenticated } = useAuth()
@@ -41,13 +58,7 @@ export default function TeamManagement() {
   const [inviteUserId, setInviteUserId] = useState('')
   const [newLeaderId, setNewLeaderId] = useState('')
 
-  useEffect(() => {
-    if (!isAuthenticated) { navigate('/login'); return }
-    if (!isAdmin) { navigate('/') ; return }
-    fetchData()
-  }, [isAuthenticated, isAdmin])
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     setIsLoading(true)
     try {
       const [teamsRes, usersRes] = await Promise.all([
@@ -61,7 +72,13 @@ export default function TeamManagement() {
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    if (!isAuthenticated) { navigate('/login'); return }
+    if (!isAdmin) { navigate('/dashboard') ; return }
+    void fetchData()
+  }, [fetchData, isAuthenticated, isAdmin, navigate])
 
   const handleCreateTeam = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -71,8 +88,8 @@ export default function TeamManagement() {
       setShowCreateModal(false)
       setNewTeam({ name: '', description: '', leaderId: '' })
       await fetchData()
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to create team')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to create team'))
     } finally {
       setActionLoading(p => ({ ...p, create: false }))
     }
@@ -84,8 +101,8 @@ export default function TeamManagement() {
     try {
       await teamAPI.deleteTeam(teamId)
       setTeams(p => p.filter(t => t._id !== teamId))
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to delete team')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to delete team'))
     } finally {
       setActionLoading(p => ({ ...p, [teamId]: false }))
     }
@@ -99,8 +116,8 @@ export default function TeamManagement() {
       setShowInviteModal(false)
       setInviteUserId('')
       alert('Invite sent successfully!')
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to send invite')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to send invite'))
     } finally {
       setActionLoading(p => ({ ...p, invite: false }))
     }
@@ -114,8 +131,8 @@ export default function TeamManagement() {
       setShowLeaderModal(false)
       setNewLeaderId('')
       await fetchData()
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to add leader')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to add leader'))
     } finally {
       setActionLoading(p => ({ ...p, addLeader: false }))
     }
@@ -127,8 +144,8 @@ export default function TeamManagement() {
     try {
       await teamAPI.removeMember(teamId, userId)
       await fetchData()
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to remove member')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to remove member'))
     } finally {
       setActionLoading(p => ({ ...p, [`${teamId}-${userId}`]: false }))
     }

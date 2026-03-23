@@ -2,7 +2,6 @@ import { useEffect, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { teamAPI } from '../api/teamAPI'
-import { userAPI } from '../api/userAPI'
 
 type TeamMember = {
   _id: string
@@ -52,6 +51,30 @@ type Invite = {
   createdAt: string
 }
 
+const overviewCardTone: Record<'blue' | 'indigo' | 'purple' | 'yellow', string> = {
+  blue: 'text-blue-600',
+  indigo: 'text-indigo-600',
+  purple: 'text-purple-600',
+  yellow: 'text-yellow-600',
+}
+
+const getErrorMessage = (error: unknown, fallback: string) => {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'response' in error &&
+    typeof (error as { response?: { data?: { message?: string } } }).response?.data?.message === 'string'
+  ) {
+    return (error as { response?: { data?: { message?: string } } }).response?.data?.message as string
+  }
+
+  if (error instanceof Error && error.message) {
+    return error.message
+  }
+
+  return fallback
+}
+
 export default function TeamDashboard() {
   const navigate = useNavigate()
   const { user, isAuthenticated } = useAuth()
@@ -67,10 +90,7 @@ export default function TeamDashboard() {
   const [showCreateTask, setShowCreateTask] = useState(false)
   const [showCreateTeam, setShowCreateTeam] = useState(false)
   const [showInviteModal, setShowInviteModal] = useState(false)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [searchResults, setSearchResults] = useState<TeamMember[]>([])
-  const [selectedUser, setSelectedUser] = useState<TeamMember | null>(null)
-  const [searchLoading, setSearchLoading] = useState(false)
+  const [inviteIdentifier, setInviteIdentifier] = useState('')
   const [showRejectModal, setShowRejectModal] = useState(false)
   const [rejectingTaskId, setRejectingTaskId] = useState<string | null>(null)
   const [rejectionReason, setRejectionReason] = useState('')
@@ -85,12 +105,6 @@ export default function TeamDashboard() {
   })
 
   const isLeader = user?.role === 'team_leader' || user?.role === 'admin'
-
-  useEffect(() => {
-    if (!isAuthenticated) { navigate('/login'); return }
-    if (!isLeader) { navigate('/user'); return }
-    fetchData()
-  }, [isAuthenticated, user])
 
   const fetchData = useCallback(async () => {
     setIsLoading(true)
@@ -119,9 +133,15 @@ export default function TeamDashboard() {
       } catch {
         // Partial failure — team is loaded, secondary data unavailable
       }
-    } catch (err: any) {
-      const status = err?.response?.status;
-      const message = err?.response?.data?.message || err?.message;
+    } catch (err: unknown) {
+      const status =
+        typeof err === 'object' &&
+        err !== null &&
+        'response' in err &&
+        typeof (err as { response?: { status?: number } }).response?.status === 'number'
+          ? (err as { response?: { status?: number } }).response?.status
+          : undefined
+      const message = getErrorMessage(err, 'Failed to load team data')
       
       console.error('[TeamDashboard] Error fetching team data:', { status, message, error: err })
       
@@ -136,7 +156,7 @@ export default function TeamDashboard() {
       } else {
         const errorMsg =
           message ||
-          (err?.message === 'Network Error'
+          (message === 'Network Error'
             ? 'Could not connect to the server. Please check that the backend is running.'
             : 'Failed to load team data')
         console.error('[TeamDashboard] Setting error:', errorMsg)
@@ -145,7 +165,13 @@ export default function TeamDashboard() {
     } finally {
       setIsLoading(false)
     }
-  }, [])
+  }, [user?.email, user?.role])
+
+  useEffect(() => {
+    if (!isAuthenticated) { navigate('/login'); return }
+    if (!isLeader) { navigate('/dashboard'); return }
+    void fetchData()
+  }, [fetchData, isAuthenticated, isLeader, navigate])
 
   const handleCreateTeam = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -158,8 +184,8 @@ export default function TeamDashboard() {
       setShowCreateTeam(false)
       setNewTeam({ name: '', description: '' })
       await fetchData()
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to create team')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to create team'))
     } finally {
       setActionLoading(p => ({ ...p, createTeam: false }))
     }
@@ -171,8 +197,8 @@ export default function TeamDashboard() {
     try {
       await teamAPI.approveTeamTask(team._id, taskId)
       await fetchData()
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to approve task')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to approve task'))
     } finally {
       setActionLoading(p => ({ ...p, [taskId]: false }))
     }
@@ -191,8 +217,8 @@ export default function TeamDashboard() {
       await teamAPI.rejectTeamTask(team._id, rejectingTaskId, { rejectionReason })
       setShowRejectModal(false)
       await fetchData()
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to reject task')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to reject task'))
     } finally {
       setActionLoading(p => ({ ...p, [rejectingTaskId]: false }))
     }
@@ -204,8 +230,8 @@ export default function TeamDashboard() {
     try {
       await teamAPI.approveTeamAttendance(team._id, attendanceId)
       await fetchData()
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to approve attendance')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to approve attendance'))
     } finally {
       setActionLoading(p => ({ ...p, [attendanceId]: false }))
     }
@@ -217,48 +243,23 @@ export default function TeamDashboard() {
     try {
       await teamAPI.disapproveTeamAttendance(team._id, attendanceId)
       await fetchData()
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to disapprove attendance')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to disapprove attendance'))
     } finally {
       setActionLoading(p => ({ ...p, [attendanceId]: false }))
     }
   }
 
-  const handleSearchUsers = async (query: string) => {
-    setSearchQuery(query)
-    setSelectedUser(null)
-    if (query.trim().length < 2) {
-      setSearchResults([])
-      return
-    }
-    setSearchLoading(true)
-    try {
-      const result = await userAPI.searchUsers(query)
-      setSearchResults(result.data || [])
-    } catch (err: any) {
-      setSearchResults([])
-    } finally {
-      setSearchLoading(false)
-    }
-  }
-
-  const handleSelectUser = (user: TeamMember) => {
-    setSelectedUser(user)
-    setSearchQuery(user.name)
-    setSearchResults([])
-  }
-
   const handleInviteMember = async () => {
-    if (!team || !selectedUser) return
+    if (!team || !inviteIdentifier.trim()) return
     setActionLoading(p => ({ ...p, invite: true }))
     try {
-      await teamAPI.inviteMember(team._id, selectedUser._id)
-      setSearchQuery('')
-      setSelectedUser(null)
+      await teamAPI.inviteMember(team._id, inviteIdentifier.trim())
+      setInviteIdentifier('')
       setShowInviteModal(false)
       alert('Invite sent successfully!')
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to send invite')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to send invite'))
     } finally {
       setActionLoading(p => ({ ...p, invite: false }))
     }
@@ -271,8 +272,8 @@ export default function TeamDashboard() {
     try {
       await teamAPI.removeMember(team._id, userId)
       await fetchData()
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to remove member')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to remove member'))
     } finally {
       setActionLoading(p => ({ ...p, [userId]: false }))
     }
@@ -287,8 +288,8 @@ export default function TeamDashboard() {
       setShowCreateTask(false)
       setNewTask({ title: '', description: '', assignedTo: [], priority: 'medium', startDate: '', dueDate: '' })
       await fetchData()
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to create task')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to create task'))
     } finally {
       setActionLoading(p => ({ ...p, createTask: false }))
     }
@@ -299,8 +300,8 @@ export default function TeamDashboard() {
     try {
       await teamAPI.acceptInvite(inviteId)
       await fetchData()
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to accept invite')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to accept invite'))
     } finally {
       setActionLoading(p => ({ ...p, [inviteId]: false }))
     }
@@ -311,8 +312,8 @@ export default function TeamDashboard() {
     try {
       await teamAPI.declineInvite(inviteId)
       setInvites(prev => prev.filter(i => i._id !== inviteId))
-    } catch (err: any) {
-      alert(err?.response?.data?.message || 'Failed to decline invite')
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to decline invite'))
     } finally {
       setActionLoading(p => ({ ...p, [inviteId]: false }))
     }
@@ -519,7 +520,7 @@ export default function TeamDashboard() {
               ].map(card => (
                 <div key={card.label} className="bg-white rounded-xl shadow-sm p-4 border">
                   <p className="text-sm text-gray-500">{card.label}</p>
-                  <p className={`text-3xl font-bold text-${card.color}-600 mt-1`}>{card.value}</p>
+                  <p className={`mt-1 text-3xl font-bold ${overviewCardTone[card.color as keyof typeof overviewCardTone]}`}>{card.value}</p>
                 </div>
               ))}
             </div>
@@ -895,55 +896,20 @@ export default function TeamDashboard() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md">
             <h3 className="text-lg font-semibold mb-3">Invite Member</h3>
-            <p className="text-sm text-gray-500 mb-3">Search for a user to invite to the team:</p>
-            
-            <div className="relative mb-3">
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={e => handleSearchUsers(e.target.value)}
-                placeholder="Search by name or email..."
-                className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              
-              {searchLoading && (
-                <div className="absolute right-3 top-2.5">
-                  <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
-                </div>
-              )}
-              
-              {/* Search Results Dropdown */}
-              {searchResults.length > 0 && !selectedUser && (
-                <div className="absolute top-full left-0 right-0 mt-1 bg-white border rounded-lg shadow-lg z-50">
-                  {searchResults.map(user => (
-                    <button
-                      key={user._id}
-                      type="button"
-                      onClick={() => handleSelectUser(user)}
-                      className="w-full text-left px-3 py-2 hover:bg-blue-50 border-b last:border-b-0 transition-colors"
-                    >
-                      <div className="font-medium text-sm text-gray-900">{user.name}</div>
-                      <div className="text-xs text-gray-500">{user.email}</div>
-                      {user.role && <div className="text-xs text-gray-400">{user.role}</div>}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {selectedUser && (
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
-                <div className="font-medium text-sm text-gray-900">{selectedUser.name}</div>
-                <div className="text-xs text-gray-500">{selectedUser.email}</div>
-              </div>
-            )}
+            <p className="text-sm text-gray-500 mb-3">Enter the username or user id to invite. This avoids showing a global user list to team leaders.</p>
+            <input
+              type="text"
+              value={inviteIdentifier}
+              onChange={e => setInviteIdentifier(e.target.value)}
+              placeholder="Username or user id"
+              className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
 
             <div className="flex gap-3 justify-end">
               <button
                 onClick={() => {
                   setShowInviteModal(false)
-                  setSearchQuery('')
-                  setSelectedUser(null)
+                  setInviteIdentifier('')
                 }}
                 className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200"
               >
@@ -951,7 +917,7 @@ export default function TeamDashboard() {
               </button>
               <button
                 onClick={handleInviteMember}
-                disabled={actionLoading['invite'] || !selectedUser}
+                disabled={actionLoading['invite'] || !inviteIdentifier.trim()}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
               >
                 {actionLoading['invite'] ? 'Sending...' : 'Send Invite'}

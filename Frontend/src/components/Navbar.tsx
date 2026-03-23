@@ -75,29 +75,34 @@ function Navbar() {
 
   const navItems = isAdmin
     ? [
-        { to: '/admin', label: 'Admin Dashboard' },
+        { to: '/dashboard', label: 'Dashboard' },
+        { to: '/social', label: 'Social Hub' },
         { to: '/admin/teams', label: 'Teams' },
-        { to: '/admin/userview', label: 'Users' },
+        { to: '/admin/users', label: 'Users' },
         { to: '/admin/attendance', label: 'Attendance' },
         { to: '/tasks', label: 'Tasks' },
         { to: '/chat', label: 'Chat' },
       ]
     : isTeamLeader
       ? [
-          { to: '/team', label: 'Team Dashboard' },
+          { to: '/dashboard', label: 'Dashboard' },
+          { to: '/teams', label: 'Team' },
+          { to: '/social', label: 'Social Hub' },
           { to: '/tasks', label: 'Tasks' },
           { to: '/attendance', label: 'Attendance' },
           { to: '/chat', label: 'Chat' },
         ]
       : isTeamMember
         ? [
-            { to: '/team-member', label: 'Member Dashboard' },
+            { to: '/dashboard', label: 'Dashboard' },
+            { to: '/social', label: 'Social Hub' },
             { to: '/tasks', label: 'My Tasks' },
             { to: '/attendance', label: 'My Attendance' },
             { to: '/chat', label: 'Chat' },
           ]
         : [
-            { to: '/user', label: 'Dashboard' },
+            { to: '/dashboard', label: 'Dashboard' },
+            { to: '/social', label: 'Social Hub' },
             { to: '/tasks', label: 'Tasks' },
             { to: '/attendance', label: 'Attendance' },
             { to: '/chat', label: 'Chat' },

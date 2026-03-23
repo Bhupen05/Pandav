@@ -20,6 +20,8 @@ import ChatPage from './pages/ChatPage'
 import TeamDashboard from './pages/TeamDashboard'
 import TeamManagement from './pages/TeamManagement'
 import TeamMemberDashboard from './pages/TeamMemberDashboard'
+import SocialHub from './pages/SocialHub'
+import DashboardRedirect from './pages/DashboardRedirect'
 import { useAuth } from './context/AuthContext'
 
 function AppRoutes() {
@@ -42,17 +44,26 @@ function AppRoutes() {
           <Route path="/pricing" element={<Pricing />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
+          <Route path="/dashboard" element={<DashboardRedirect />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/admin" element={<AdminDashboard />} />
           <Route path="/admin/attendance" element={<AttendanceAdmin />} />
           <Route path="/admin/userview" element={<Userview />} />
+          <Route path="/admin/users" element={<Userview />} />
           <Route path="/admin/teams" element={<TeamManagement />} />
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/attendance" element={<Attendance />} />
           <Route path="/contact" element={<Contactus />} />
           <Route path="/user" element={<UserDashboard />} />
           <Route path="/team" element={<TeamDashboard />} />
+          <Route path="/teams" element={<TeamDashboard />} />
           <Route path="/team-member" element={<TeamMemberDashboard />} />
+          <Route path="/social" element={<SocialHub />} />
+          <Route path="/todo" element={<SocialHub />} />
+          <Route path="/network" element={<SocialHub />} />
+          <Route path="/integrations" element={<SocialHub />} />
+          <Route path="/publish-jobs" element={<SocialHub />} />
+          <Route path="/admin/moderation" element={<SocialHub />} />
         </Routes>
       </main>
     </div>

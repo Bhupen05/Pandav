@@ -176,7 +176,7 @@ export default function Profile() {
 
       // Load attendance and add to activity
       try {
-        const attendanceResponse = await attendanceAPI.getAttendance()
+        const attendanceResponse = await attendanceAPI.getAttendance({ user: user._id })
         if (attendanceResponse.success && Array.isArray(attendanceResponse.data)) {
           const records = attendanceResponse.data
           const approvedRecords = records.filter((r: any) => r.status === 'approved')

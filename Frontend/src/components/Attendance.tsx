@@ -11,7 +11,7 @@ export type AttendanceRecord = {
     profileImage?: string
   }
   date: string
-  status: 'present' | 'absent' | 'late' | 'half-day' | 'leave'
+  status: 'present' | 'absent' | 'late' | 'half-day' | 'leave' | 'requested' | 'approved' | 'rejected'
   checkInTime?: string
   checkOutTime?: string
   workHours?: number
@@ -21,14 +21,14 @@ export type AttendanceRecord = {
 function Attendance() {
   const [records, setRecords] = useState<AttendanceRecord[]>([])
   const [date, setDate] = useState('')
-  const [status, setStatus] = useState<'present' | 'absent' | 'late' | 'half-day' | 'leave'>('present')
+  const [status, setStatus] = useState<'present' | 'absent' | 'late' | 'half-day' | 'leave' | 'requested'>('requested')
   const [remarks, setRemarks] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [filterStatus, setFilterStatus] = useState<'all' | AttendanceRecord['status']>('all')
   
-  const { isAdmin } = useAuth()
+  const { isAdmin, user } = useAuth()
 
   useEffect(() => {
     loadAttendance()
@@ -39,13 +39,14 @@ function Attendance() {
     }, 30000)
     
     return () => clearInterval(refreshInterval)
-  }, [])
+  }, [isAdmin, user?._id])
 
   const loadAttendance = async (silent = false) => {
     try {
-      const response = await attendanceAPI.getAttendance()
+      const response = await attendanceAPI.getAttendance(!isAdmin && user?._id ? { user: user._id } : undefined)
       if (response.success) {
-        setRecords(response.data)
+        const data = Array.isArray(response.data) ? response.data : []
+        setRecords(isAdmin ? data : data.filter((record: AttendanceRecord) => record.user?._id === user?._id))
       }
     } catch (err) {
       if (!silent) {
@@ -63,7 +64,7 @@ function Attendance() {
       const response = await attendanceAPI.checkIn()
       console.log('Check-in response:', response)
       if (response.success) {
-        setSuccess('Checked in successfully!Checked in successfully! Your attendance is pending admin approval.')
+        setSuccess('Checked in successfully. Your attendance is pending approval.')
         loadAttendance()
       } else {
         setError(response.message || 'Failed to check in')
@@ -86,7 +87,7 @@ function Attendance() {
       const response = await attendanceAPI.checkOut()
       console.log('Check-out response:', response)
       if (response.success) {
-        setSuccess(' Checked in successfully! Your attendance is pending admin approval.')
+        setSuccess('Checked out successfully. Your attendance record has been updated.')
         loadAttendance()
       } else {
         setError(response.message || 'Failed to check out')
@@ -121,7 +122,7 @@ function Attendance() {
       if (response.success) {
         setSuccess('Attendance record added successfully!')
         setDate('')
-        setStatus('present')
+        setStatus('requested')
         setRemarks('')
         loadAttendance()
       }
@@ -177,8 +178,9 @@ function Attendance() {
         <div className="rounded-xl border bg-white p-4 shadow-sm">
           <p className="text-xs text-neutral-500">Today's Status</p>
           <p className={`mt-1 text-lg font-semibold ${
-            todayRecord?.status === 'present' ? 'text-green-600' :
+            todayRecord?.status === 'present' || todayRecord?.status === 'approved' ? 'text-green-600' :
             todayRecord?.status === 'late' ? 'text-yellow-600' :
+            todayRecord?.status === 'requested' ? 'text-purple-600' :
             todayRecord?.status === 'absent' ? 'text-red-600' :
             'text-neutral-600'
           }`}>
@@ -283,6 +285,7 @@ function Attendance() {
                   onChange={(e) => setStatus(e.target.value as any)}
                   className="block w-full rounded-md border px-3 py-2 text-sm outline-none focus:border-neutral-900"
                 >
+                  <option value="requested">Requested</option>
                   <option value="present">Present</option>
                   <option value="absent">Absent</option>
                   <option value="late">Late</option>
@@ -332,6 +335,9 @@ function Attendance() {
             >
               <option value="all">All</option>
               <option value="present">Present</option>
+              <option value="approved">Approved</option>
+              <option value="requested">Requested</option>
+              <option value="rejected">Rejected</option>
               <option value="absent">Absent</option>
               <option value="late">Late</option>
               <option value="half-day">Half Day</option>
@@ -384,9 +390,13 @@ function Attendance() {
                     <td className="px-4 py-3">
                       <span
                         className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
-                          record.status === 'present'
+                          record.status === 'present' || record.status === 'approved'
                             ? 'bg-green-100 text-green-800'
+                            : record.status === 'requested'
+                            ? 'bg-purple-100 text-purple-800'
                             : record.status === 'absent'
+                            ? 'bg-red-100 text-red-800'
+                            : record.status === 'rejected'
                             ? 'bg-red-100 text-red-800'
                             : record.status === 'late'
                             ? 'bg-yellow-100 text-yellow-800'

@@ -1,11 +1,25 @@
 import axios from 'axios';
 
+/**
+ * Axios Instance Configuration
+ *
+ * Base URL: Uses VITE_API_URL environment variable, defaults to /api/v2
+ * This ensures all API calls go to the correct backend V2 endpoint.
+ *
+ * Interceptors:
+ * - Request: Adds JWT token to Authorization header
+ * - Response: Handles errors globally, redirects to login on 401
+ */
+
+const baseURL = (import.meta.env.VITE_API_URL || '/api/v2').replace(/\/+$/, '');
+
 // Create axios instance with base configuration
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL ,
+  baseURL,
   headers: {
     'Content-Type': 'application/json',
   },
+  timeout: 30000, // 30 second timeout for requests
 });
 
 // Request interceptor - Add token to requests
