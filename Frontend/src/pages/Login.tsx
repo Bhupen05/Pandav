@@ -29,6 +29,10 @@ function Login() {
       
       if (user.role === 'admin') {
         navigate('/admin')
+      } else if (user.role === 'team_leader') {
+        navigate('/team')
+      } else if (user.role === 'team_member') {
+        navigate('/team-member')
       } else {
         navigate('/user')
       }

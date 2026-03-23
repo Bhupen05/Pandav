@@ -10,20 +10,20 @@ import {
   rejectTaskCompletion,
   getPendingApprovalTasks,
 } from '../controllers/taskController.js';
-import { protect, authorize } from '../middleware/auth.js';
+import { protect, authorize, adminOrLeader } from '../middleware/auth.js';
 
 const router = express.Router();
 
 // Special routes first
-router.get('/pending-approval', protect, authorize('admin'), getPendingApprovalTasks);
+router.get('/pending-approval', protect, adminOrLeader, getPendingApprovalTasks);
 router.post('/:id/request-completion', protect, requestTaskCompletion);
-router.put('/:id/approve', protect, authorize('admin'), approveTaskCompletion);
-router.put('/:id/reject', protect, authorize('admin'), rejectTaskCompletion);
+router.put('/:id/approve', protect, adminOrLeader, approveTaskCompletion);
+router.put('/:id/reject', protect, adminOrLeader, rejectTaskCompletion);
 
 router
   .route('/')
   .get(protect, getTasks)
-  .post(protect, authorize('admin'), createTask);
+  .post(protect, adminOrLeader, createTask);
 
 router
   .route('/:id')

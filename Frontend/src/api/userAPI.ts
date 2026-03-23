@@ -9,6 +9,12 @@ interface UpdateUserData {
 }
 
 export const userAPI = {
+  // Search users by name or email
+  searchUsers: async (query: string) => {
+    const response = await api.get('/users/search', { params: { q: query } });
+    return response.data;
+  },
+
   // Get all users (Admin only)
   getUsers: async (filters?: { role?: string; department?: string; isActive?: boolean }) => {
     const response = await api.get('/users', { params: filters });

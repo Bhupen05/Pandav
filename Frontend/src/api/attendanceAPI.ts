@@ -56,4 +56,22 @@ export const attendanceAPI = {
     const response = await api.post('/attendance/checkout');
     return response.data;
   },
+
+  // Get pending attendance approval queue
+  getPendingAttendance: async () => {
+    const response = await api.get('/attendance/pending');
+    return response.data;
+  },
+
+  // Approve attendance record
+  approveAttendance: async (id: string, data?: { remarks?: string }) => {
+    const response = await api.put(`/attendance/${id}/approve`, data || {});
+    return response.data;
+  },
+
+  // Reject attendance record
+  disapproveAttendance: async (id: string, data?: { remarks?: string }) => {
+    const response = await api.put(`/attendance/${id}/disapprove`, data || {});
+    return response.data;
+  },
 };

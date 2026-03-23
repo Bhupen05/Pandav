@@ -90,7 +90,7 @@ function Register() {
         phone: formData.phone.trim() || undefined,
         department: formData.department || undefined,
         profileImage: formData.profileImage || undefined,
-        role: 'employee', // Default role for self-registration
+        role: 'user',
       })
 
       if (response.success) {

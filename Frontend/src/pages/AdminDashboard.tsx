@@ -1,10 +1,19 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
 import { attendanceAPI } from '../api/attendanceAPI'
 import { userAPI } from '../api/userAPI'
+import { socialV2API } from '../api/socialV2API'
 import { useAuth } from '../context/AuthContext'
 import Tasksadd from '../components/Tasksadd'
+
+type ModerationPost = {
+  _id: string
+  content: string
+  author: { _id: string; name: string }
+  status?: 'pending' | 'approved' | 'rejected'
+  createdAt: string
+}
 
 type DashboardTask = {
   _id: string
@@ -52,7 +61,8 @@ export default function AdminDashboard() {
   const [processedAttendance, setProcessedAttendance] = useState<Record<string, boolean>>({})
   const [processedTasks, setProcessedTasks] = useState<Record<string, boolean>>({})
   const [showTaskModal, setShowTaskModal] = useState(false)
-  const [activeTab, setActiveTab] = useState<'overview' | 'tasks' | 'attendance' | 'users'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'tasks' | 'attendance' | 'users' | 'moderation'>('overview')
+  const [moderationPosts, setModerationPosts] = useState<ModerationPost[]>([])
   const [showRejectModal, setShowRejectModal] = useState(false)
   const [rejectionReason, setRejectionReason] = useState('')
   const [rejectingTaskId, setRejectingTaskId] = useState<string | null>(null)
@@ -66,20 +76,15 @@ export default function AdminDashboard() {
     }
   }, [isAuthenticated, isAdmin, navigate])
 
-  useEffect(() => {
-    if (isAuthenticated && isAdmin) {
-      fetchAllData()
-    }
-  }, [isAuthenticated, isAdmin])
-
-  const fetchAllData = async () => {
+  const fetchAllData = useCallback(async () => {
     setIsLoading(true)
     try {
-      const [taskRes, pendingTaskRes, attendanceRes, userRes] = await Promise.all([
+      const [taskRes, pendingTaskRes, attendanceRes, userRes, moderationRes] = await Promise.all([
         taskAPI.getTasks(),
         taskAPI.getPendingApprovalTasks(),
         attendanceAPI.getAttendance(),
         userAPI.getUsers(),
+        socialV2API.getModerationPosts?.('pending').catch(() => []),
       ])
       setTasks(Array.isArray(taskRes?.data) ? taskRes.data : [])
       setPendingApprovalTasks(Array.isArray(pendingTaskRes?.data) ? pendingTaskRes.data : [])
@@ -88,12 +93,19 @@ export default function AdminDashboard() {
       const requested = allAttendance.filter((item: AttendanceRecord) => item.status === 'requested')
       setAttendanceRequests(requested)
       setUsers(Array.isArray(userRes?.data) ? userRes.data : [])
+      setModerationPosts(Array.isArray(moderationRes) ? moderationRes : [])
     } catch (error) {
       console.error('Failed to load dashboard data', error)
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    if (isAuthenticated && isAdmin) {
+      void fetchAllData()
+    }
+  }, [fetchAllData, isAuthenticated, isAdmin])
 
   const resolveAssigneeName = (task: DashboardTask) => {
     if (!task.assignedTo || !Array.isArray(task.assignedTo) || task.assignedTo.length === 0) return 'Unassigned'
@@ -158,7 +170,11 @@ export default function AdminDashboard() {
 
   const handleAttendanceDecision = async (requestId: string, decision: 'approved' | 'rejected') => {
     try {
-      await attendanceAPI.updateAttendance(requestId, { status: decision })
+      if (decision === 'approved') {
+        await attendanceAPI.approveAttendance(requestId)
+      } else {
+        await attendanceAPI.disapproveAttendance(requestId)
+      }
       setProcessedAttendance((prev) => ({ ...prev, [requestId]: true }))
       setAttendanceRequests((prev) => prev.filter((item) => item._id !== requestId))
     } catch (error) {
@@ -168,12 +184,21 @@ export default function AdminDashboard() {
 
   const handleToggleUser = async (targetUser: DashboardUser) => {
     try {
-      await userAPI.updateUser(targetUser._id, { isActive: !targetUser.isActive } as Partial<DashboardUser>)
+      await userAPI.toggleUserActive(targetUser._id)
       setUsers((prev) =>
         prev.map((item) => (item._id === targetUser._id ? { ...item, isActive: !item.isActive } : item)),
       )
     } catch (error) {
       console.error('Failed to toggle user status', error)
+    }
+  }
+
+  const handleModerationAction = async (postId: string, action: 'approve' | 'reject', reason?: string) => {
+    try {
+      await socialV2API.moderatePost(postId, action, reason)
+      setModerationPosts((prev) => prev.filter((post) => post._id !== postId))
+    } catch (error) {
+      console.error('Failed to moderate post', error)
     }
   }
 
@@ -338,7 +363,7 @@ export default function AdminDashboard() {
           </Link>
 
           <Link
-            to="/admin/userview"
+            to="/admin/users"
             className="flex flex-col items-center gap-2 rounded-lg border bg-white p-4 hover:bg-neutral-50 transition-all"
           >
             <span className="text-2xl">👤</span>
@@ -373,12 +398,25 @@ export default function AdminDashboard() {
             <span className="text-2xl">👥</span>
             <span className="text-sm text-neutral-700">Manage Users</span>
           </button>
+
+          <button
+            onClick={() => setActiveTab('moderation')}
+            className="flex flex-col items-center gap-2 rounded-lg border bg-white p-4 hover:bg-neutral-50 transition-all relative"
+          >
+            <span className="text-2xl">🛡️</span>
+            <span className="text-sm text-neutral-700">Moderation</span>
+            {moderationPosts.length > 0 && (
+              <span className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-orange-500 text-xs text-white">
+                {moderationPosts.length}
+              </span>
+            )}
+          </button>
         </div>
       </section>
 
       {/* Navigation Tabs */}
       <div className="mb-4 flex gap-2 overflow-x-auto pb-2">
-        {['overview', 'tasks', 'attendance', 'users'].map((tab) => (
+        {['overview', 'tasks', 'attendance', 'users', 'moderation'].map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab as typeof activeTab)}
@@ -392,6 +430,7 @@ export default function AdminDashboard() {
             {tab === 'tasks' && `📋 Tasks (${totalTasks})`}
             {tab === 'attendance' && `📅 Attendance ${pendingAttendance > 0 ? `(${pendingAttendance})` : ''}`}
             {tab === 'users' && `👥 Users (${users.length})`}
+            {tab === 'moderation' && `🛡️ Moderation ${moderationPosts.length > 0 ? `(${moderationPosts.length})` : ''}`}
           </button>
         ))}
       </div>
@@ -839,6 +878,59 @@ export default function AdminDashboard() {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {/* Moderation Tab */}
+      {activeTab === 'moderation' && (
+        <div className="rounded-lg border bg-white p-4">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-neutral-900">Social Post Moderation</h3>
+            <p className="text-sm text-neutral-600">{moderationPosts.length} posts pending review</p>
+          </div>
+          {moderationPosts.length === 0 ? (
+            <div className="py-12 text-center">
+              <div className="text-4xl mb-3">✨</div>
+              <p className="text-neutral-500">No posts to moderate. Great job keeping the platform clean!</p>
+            </div>
+          ) : (
+            <div className="space-y-3 max-h-96 overflow-y-auto">
+              {moderationPosts.map((post) => (
+                <div key={post._id} className="border rounded-lg p-4 hover:bg-neutral-50 transition-colors">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-2">
+                        <p className="font-medium text-neutral-900">{post.author.name}</p>
+                        <span className="text-xs text-neutral-500">
+                          {new Date(post.createdAt).toLocaleDateString()}
+                        </span>
+                      </div>
+                      <p className="text-sm text-neutral-700 break-words">{post.content}</p>
+                      {post.status && (
+                        <p className="text-xs mt-2 text-neutral-500">
+                          Status: <span className="font-medium">{post.status}</span>
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                      <button
+                        onClick={() => handleModerationAction(post._id, 'approve')}
+                        className="rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700 hover:bg-emerald-100 transition-colors"
+                      >
+                        ✓ Approve
+                      </button>
+                      <button
+                        onClick={() => handleModerationAction(post._id, 'reject', 'Violates community guidelines')}
+                        className="rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-100 transition-colors"
+                      >
+                        ✕ Reject
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

@@ -1,5 +1,34 @@
 import User from '../models/User.js';
 
+// @desc    Search users by name or email
+// @route   GET /api/users/search?q=...
+// @access  Private
+export const searchUsers = async (req, res) => {
+  try {
+    const { q } = req.query;
+
+    if (!q || q.trim().length < 2) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const query = q.trim();
+    const users = await User.find({
+      $or: [
+        { name: { $regex: query, $options: 'i' } },
+        { email: { $regex: query, $options: 'i' } },
+      ],
+      _id: { $ne: req.user._id }, // Don't show current user
+      isActive: true,
+    })
+      .select('_id name email role department profileImage')
+      .limit(10);
+
+    res.json({ success: true, count: users.length, data: users });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 // @desc    Get all users for chat (any authenticated user)
 // @route   GET /api/users/chat-list
 // @access  Private

@@ -167,3 +167,7 @@ Required environment variables (see `.env.example`):
 ## License
 
 ISC
+\n## API Versioning\n- Current APIs are mounted under /api/v1 (configurable via API_V1_PREFIX).\n- Legacy /api/* aliases kept temporarily for backward compatibility.\n- New v2 scaffold mounted under /api/v2 (API_V2_PREFIX); starts with health/status endpoints and placeholders for future modules.
+
+## V2 System Design
+- Detailed v2 architecture and social/network module plan: `README_V2_SYSTEM.md`

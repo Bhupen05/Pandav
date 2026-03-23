@@ -42,13 +42,14 @@ function Tasksadd({ isOpen, onClose, onCreate }: Props) {
 	const [users, setUsers] = useState<any[]>([])
 	const [showUserDropdown, setShowUserDropdown] = useState(false)
 	
-	const { isAdmin } = useAuth()
+	const { isAdmin, user } = useAuth()
+	const canCreateTasks = isAdmin || user?.role === 'team_leader'
 
 	useEffect(() => {
-		if (isAdmin && isOpen) {
+		if (canCreateTasks && isOpen) {
 			loadUsers()
 		}
-	}, [isAdmin, isOpen])
+	}, [canCreateTasks, isOpen])
 
 	// Reset form when modal closes
 	useEffect(() => {
@@ -168,7 +169,7 @@ function Tasksadd({ isOpen, onClose, onCreate }: Props) {
 					onClose()
 				}, 1000)
 			} else if (err.response?.status === 403) {
-				setError('You do not have permission to create tasks. Only admins can create tasks.')
+				setError('You do not have permission to create tasks.')
 			} else if (err.response?.status === 401) {
 				setError('You must be logged in to create tasks.')
 			} else {
@@ -187,7 +188,7 @@ function Tasksadd({ isOpen, onClose, onCreate }: Props) {
 		)
 	}
 
-	if (!isOpen) return null
+	if (!isOpen || !canCreateTasks) return null
 
 	return (
 		<div className="fixed inset-0 z-50 flex items-center justify-center p-4">

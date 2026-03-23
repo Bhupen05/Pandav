@@ -1,5 +1,6 @@
 import Task from '../models/Task.js'
 import User from '../models/User.js'
+import Team from '../models/Team.js'
 
 // @desc    Get all tasks
 // @route   GET /api/tasks
@@ -13,8 +14,17 @@ export const getTasks = async (req, res) => {
     if (priority) filter.priority = priority;
     if (assignedTo) filter.assignedTo = { $in: [assignedTo] };
 
-    // If user is not admin, show only their tasks
-    if (req.user.role !== 'admin') {
+    // If user is not admin, scope tasks appropriately
+    if (req.user.role === 'team_leader') {
+      // Team leaders can see tasks assigned to their team members plus their own
+      const team = await Team.findOne({ leaders: req.user.id });
+      if (team) {
+        const teamUserIds = [...team.leaders.map(l => l.toString()), ...team.members.map(m => m.toString())];
+        filter.assignedTo = { $in: teamUserIds };
+      } else {
+        filter.assignedTo = { $in: [req.user.id] };
+      }
+    } else if (req.user.role !== 'admin') {
       filter.assignedTo = { $in: [req.user.id] };
     }
 
@@ -71,7 +81,7 @@ export const getTask = async (req, res) => {
 
 // @desc    Create task
 // @route   POST /api/tasks
-// @access  Private (Admin)
+// @access  Private (Admin or team_leader)
 export const createTask = async (req, res) => {
   try {
     req.body.createdBy = req.user.id
@@ -306,10 +316,20 @@ export const rejectTaskCompletion = async (req, res) => {
 
 // @desc    Get tasks pending approval
 // @route   GET /api/tasks/pending-approval
-// @access  Private (Admin)
+// @access  Private (Admin or team_leader)
 export const getPendingApprovalTasks = async (req, res) => {
   try {
-    const tasks = await Task.find({ status: 'completion-requested' })
+    let filter = { status: 'completion-requested' };
+
+    if (req.user.role === 'team_leader') {
+      const team = await Team.findOne({ leaders: req.user.id });
+      if (team) {
+        const teamUserIds = [...team.leaders.map(l => l.toString()), ...team.members.map(m => m.toString())];
+        filter.assignedTo = { $in: teamUserIds };
+      }
+    }
+
+    const tasks = await Task.find(filter)
       .populate('assignedTo', 'name email profileImage')
       .populate('createdBy', 'name email')
       .populate('completionRequestedBy', 'name email')

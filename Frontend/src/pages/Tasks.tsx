@@ -1,9 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
 import { useAuth } from '../context/AuthContext'
+import { usePagination } from '../utils/usePagination'
 import Taskscard from '../components/Taskscard'
 import Tasksadd from '../components/Tasksadd'
+import Pagination from '../components/Pagination'
 import type { TaskInput } from '../components/Tasksadd'
 
 export default function Tasks() {
@@ -37,8 +39,7 @@ export default function Tasks() {
     if (!silent) setLoading(true)
     setError(null)
     try {
-      // Filter tasks by the current user's ID
-      const filters = user?._id ? { assignedTo: user._id } : {}
+      const filters = !isAdmin && user?.role !== 'team_leader' && user?._id ? { assignedTo: user._id } : {}
       const response = await taskAPI.getTasks(filters)
       if (response.success && Array.isArray(response.data)) {
         setTasks(response.data)
@@ -203,12 +204,19 @@ export default function Tasks() {
     }
   }
 
-  const filteredTasks = (filter === 'all' ? tasks : tasks.filter(t => t.status === filter))
-    .filter(t => searchQuery === '' || 
-      t.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      t.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      t.tags?.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase()))
-    )
+  const canCreateTasks = isAdmin || user?.role === 'team_leader'
+
+  const filteredTasks = useMemo(() => (
+    (filter === 'all' ? tasks : tasks.filter(t => t.status === filter))
+      .filter(t => searchQuery === '' || 
+        t.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        t.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        t.tags?.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase()))
+      )
+  ), [filter, searchQuery, tasks])
+
+  // Pagination hook
+  const pagination = usePagination(filteredTasks, 10)
 
   const statusCounts = {
     all: tasks.length,
@@ -341,7 +349,7 @@ export default function Tasks() {
               className="w-full rounded-xl border-0 bg-neutral-100 py-3 pl-10 pr-4 text-sm outline-none transition-all focus:bg-neutral-50 focus:ring-2 focus:ring-neutral-900"
             />
           </div>
-          {isAdmin && (
+          {canCreateTasks && (
             <button
               onClick={() => setShowAddModal(true)}
               className="inline-flex items-center gap-2 rounded-xl bg-neutral-900 px-5 py-3 text-sm font-semibold text-white shadow-lg transition-all hover:shadow-xl hover:opacity-90"
@@ -461,12 +469,26 @@ export default function Tasks() {
               </button>
             </div>
             <Taskscard
-              tasks={filteredTasks}
+              tasks={pagination.paginatedData}
               onStatusChange={handleStatusChange}
               onEdit={handleEdit}
               onDelete={handleDelete}
-              isAdmin={isAdmin}
+              isAdmin={isAdmin || user?.role === 'team_leader'}
             />
+            
+            {/* Pagination Controls */}
+            {filteredTasks.length > 10 && (
+              <div className="mt-6 border-t pt-4">
+                <Pagination
+                  currentPage={pagination.currentPage}
+                  totalPages={pagination.totalPages}
+                  totalItems={pagination.totalItems}
+                  onPageChange={pagination.goToPage}
+                  itemsPerPage={pagination.pageSize}
+                  onItemsPerPageChange={pagination.setPageSize}
+                />
+              </div>
+            )}
           </div>
         )}
       </div>

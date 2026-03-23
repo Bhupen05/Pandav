@@ -81,7 +81,7 @@ export default function AttendanceAdmin() {
 
   const handleApprove = async (id: string) => {
     try {
-      await attendanceAPI.updateAttendance(id, { status: 'approved' })
+      await attendanceAPI.approveAttendance(id)
       setRecords(prev => prev.map(r => r._id === id ? { ...r, status: 'approved' as const } : r))
     } catch (error) {
       console.error('Failed to approve:', error)
@@ -105,8 +105,7 @@ export default function AttendanceAdmin() {
 
     setIsSubmitting(true)
     try {
-      await attendanceAPI.updateAttendance(selectedRecordId, { 
-        status: 'rejected',
+      await attendanceAPI.disapproveAttendance(selectedRecordId, {
         remarks: rejectRemark.trim() || undefined
       })
       setRecords(prev => prev.map(r => 

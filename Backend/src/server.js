@@ -10,6 +10,8 @@ import attendanceRoutes from './routes/attendanceRoutes.js';
 import contactRoutes from './routes/contactRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import chatRoutes from './routes/chatRoutes.js';
+import teamRoutes from './routes/teamRoutes.js';
+import v2Routes from './routes/v2Routes.js';
 
 dotenv.config();
 
@@ -21,7 +23,10 @@ const io = new SocketIO(server, {
     methods: ['GET', 'POST']
   }
 });
+
 const PORT = process.env.PORT || 5000;
+const API_V1_PREFIX = process.env.API_V1_PREFIX || '/api/v1';
+const API_V2_PREFIX = process.env.API_V2_PREFIX || '/api/v2';
 
 // Socket.io
 const activeUsers = new Map();
@@ -52,7 +57,7 @@ app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or Postman/Thunder Client)
     if (!origin) return callback(null, true);
-    
+
     // List of allowed origins
     const allowedOrigins = [
       'http://localhost:5173',
@@ -62,7 +67,7 @@ app.use(cors({
       'https://pandav.onrender.com/',
       process.env.CLIENT_URL
     ].filter(Boolean);
-    
+
     if (allowedOrigins.indexOf(origin) !== -1 || origin.includes('localhost')) {
       callback(null, true);
     } else {
@@ -76,26 +81,38 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Routes
+// V1 Routes (current production APIs)
+app.use(`${API_V1_PREFIX}/auth`, authRoutes);
+app.use(`${API_V1_PREFIX}/tasks`, taskRoutes);
+app.use(`${API_V1_PREFIX}/attendance`, attendanceRoutes);
+app.use(`${API_V1_PREFIX}/contact`, contactRoutes);
+app.use(`${API_V1_PREFIX}/users`, userRoutes);
+app.use(`${API_V1_PREFIX}/chat`, chatRoutes);
+app.use(`${API_V1_PREFIX}/teams`, teamRoutes);
+app.get(`${API_V1_PREFIX}/health`, (req, res) => {
+  res.json({ status: 'OK', version: 'v1', message: 'Server is running' });
+});
+
+// Legacy alias to reduce breakage (can be removed later)
 app.use('/api/auth', authRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/contact', contactRoutes);
 app.use('/api/users', userRoutes);
-
-// Add chat routes
 app.use('/api/chat', chatRoutes);
-
-// Health check route
+app.use('/api/teams', teamRoutes);
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Server is running' });
+  res.json({ status: 'OK', version: 'v1', message: 'Server is running' });
 });
+
+// V2 Routes
+app.use(API_V2_PREFIX, v2Routes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).json({ 
-    success: false, 
+  res.status(500).json({
+    success: false,
     message: 'Something went wrong!',
     error: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
@@ -103,5 +120,8 @@ app.use((err, req, res, next) => {
 
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
-  console.log(`Local: http://localhost:${PORT}`);
+  console.log(`Local v1: http://localhost:${PORT}${API_V1_PREFIX}`);
+  console.log(`Local v2: http://localhost:${PORT}${API_V2_PREFIX}`);
 });
+
+
