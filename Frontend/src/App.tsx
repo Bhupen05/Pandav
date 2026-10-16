@@ -16,6 +16,7 @@ import Service from './pages/Service'
 import UserDashboard from './pages/UserDashboard'
 import { ChatProvider } from './context/ChatContext'
 import ChatPage from './pages/ChatPage'
+import ContactMessages from './pages/ContactMessages'
 
 function App() {
   return (
@@ -33,6 +34,7 @@ function App() {
           <Route path="/admin" element={<AdminDashboard />} />
           <Route path="/admin/attendance" element={<AttendanceAdmin />} />
           <Route path="/admin/userview" element={<Userview />} />
+          <Route path="/admin/messages" element={<ContactMessages />} />
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/attendance" element={<Attendance />} />
           <Route path="/contact" element={<Contactus />} />

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { contactAPI } from '../api/contactAPI'
+import { getErrorMessage } from '../api/axios'
 
 export default function Contactus() {
   const [name, setName] = useState('')
@@ -39,8 +40,8 @@ export default function Contactus() {
         setSubject('')
         setMessage('')
       }
-    } catch (err: any) {
-      setError(err.message || 'Failed to send message. Please try again.')
+    } catch (err) {
+      setError(getErrorMessage(err, 'Failed to send message. Please try again.'))
     } finally {
       setLoading(false)
     }

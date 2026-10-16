@@ -84,6 +84,14 @@ export const createAttendance = async (req, res) => {
       ? pick(req.body, ['user', ...ADMIN_EDITABLE_FIELDS])
       : { ...pick(req.body, ['date', 'remarks']), user: req.user.id, status: 'requested' }
 
+    // Without this the duplicate check below would match any user's record
+    if (!data.user) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please choose which user this record is for'
+      })
+    }
+
     // Check if record already exists for today
     const today = new Date().toISOString().split('T')[0]
     const existingRecord = await Attendance.findOne({

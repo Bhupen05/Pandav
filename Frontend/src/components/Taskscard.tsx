@@ -84,7 +84,7 @@ function statusIcon(status: TaskInput['status']) {
   }
 }
 
-export default function Taskscard({ tasks, onStatusChange, isAdmin = false }: Props) {
+export default function Taskscard({ tasks, onStatusChange, onEdit, onDelete, isAdmin = false }: Props) {
   if (!tasks || tasks.length === 0) {
     return (
       <div className="mx-auto max-w-4xl rounded-xl border bg-white p-12 text-center shadow-sm">
@@ -110,7 +110,7 @@ export default function Taskscard({ tasks, onStatusChange, isAdmin = false }: Pr
 
         return (
           <article
-            key={idx}
+            key={task._id ?? idx}
             className={`group rounded-xl border bg-white p-5 shadow-sm transition-all hover:shadow-md ${
               isRejected ? 'border-red-200 bg-red-50' : ''
             }`}
@@ -253,6 +253,22 @@ export default function Taskscard({ tasks, onStatusChange, isAdmin = false }: Pr
                     </>
                   )}
                 </>
+              )}
+              {isAdmin && onEdit && (
+                <button
+                  className="rounded-lg border border-neutral-300 px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-neutral-50 transition-colors"
+                  onClick={() => onEdit(idx)}
+                >
+                  Edit
+                </button>
+              )}
+              {isAdmin && onDelete && (
+                <button
+                  className="rounded-lg border border-red-300 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50 transition-colors"
+                  onClick={() => onDelete(idx)}
+                >
+                  Delete
+                </button>
               )}
             </div>
           </article>

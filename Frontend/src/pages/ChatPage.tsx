@@ -3,6 +3,7 @@ import { Navigate } from 'react-router-dom';
 import Chat from '../components/Chat';
 import { useAuth } from '../context/AuthContext';
 import { useChat } from '../context/ChatContext';
+import { userAPI } from '../api/userAPI';
 
 interface UserItem {
   _id: string;
@@ -11,7 +12,7 @@ interface UserItem {
 }
 
 export default function ChatPage() {
-  const { token, isAuthenticated } = useAuth();
+  const { isAuthenticated } = useAuth();
   const { unreadCounts, clearUnread } = useChat();
   const [users, setUsers] = useState<UserItem[]>([]);
   const [selectedUser, setSelectedUser] = useState<UserItem | null>(null);
@@ -19,13 +20,9 @@ export default function ChatPage() {
 
   useEffect(() => {
     if (!isAuthenticated) return;
-    const authToken = token || sessionStorage.getItem('token') || localStorage.getItem('token');
-    fetch(`${import.meta.env.VITE_API_URL}/users/chat-list`, {
-      headers: { Authorization: `Bearer ${authToken}` }
-    })
-      .then(r => r.json())
-      .then(data => {
-        const list: UserItem[] = Array.isArray(data) ? data : data.data ?? [];
+    userAPI.getChatUsers()
+      .then(response => {
+        const list: UserItem[] = Array.isArray(response.data) ? response.data : [];
         setUsers(list);
       })
       .catch(console.error)

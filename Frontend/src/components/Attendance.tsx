@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react'
 import { attendanceAPI } from '../api/attendanceAPI'
+import { userAPI } from '../api/userAPI'
+import { getErrorMessage } from '../api/axios'
 import { useAuth } from '../context/AuthContext'
 
 export type AttendanceRecord = {
@@ -27,8 +29,18 @@ function Attendance() {
   const [success, setSuccess] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [filterStatus, setFilterStatus] = useState<'all' | AttendanceRecord['status']>('all')
-  
+  const [employees, setEmployees] = useState<{ _id: string; name: string }[]>([])
+  const [employeeId, setEmployeeId] = useState('')
+
   const { isAdmin } = useAuth()
+
+  // Admins choose who a new record is for
+  useEffect(() => {
+    if (!isAdmin) return
+    userAPI.getUsers({ isActive: true })
+      .then((response) => setEmployees(Array.isArray(response.data) ? response.data : []))
+      .catch((err) => console.error('Failed to load employees:', err))
+  }, [isAdmin])
 
   useEffect(() => {
     loadAttendance()
@@ -63,15 +75,14 @@ function Attendance() {
       const response = await attendanceAPI.checkIn()
       console.log('Check-in response:', response)
       if (response.success) {
-        setSuccess('Checked in successfully!Checked in successfully! Your attendance is pending admin approval.')
+        setSuccess('Checked in successfully! Your attendance is pending admin approval.')
         loadAttendance()
       } else {
         setError(response.message || 'Failed to check in')
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Check-in error:', err)
-      const errorMsg = err.response?.data?.message || err.message || 'Failed to check in. You may have already checked in today.'
-      setError(errorMsg)
+      setError(getErrorMessage(err, 'Failed to check in. You may have already checked in today.'))
     } finally {
       setLoading(false)
     }
@@ -86,15 +97,14 @@ function Attendance() {
       const response = await attendanceAPI.checkOut()
       console.log('Check-out response:', response)
       if (response.success) {
-        setSuccess(' Checked in successfully! Your attendance is pending admin approval.')
+        setSuccess('Checked out successfully! Your work hours have been recorded.')
         loadAttendance()
       } else {
         setError(response.message || 'Failed to check out')
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Check-out error:', err)
-      const errorMsg = err.response?.data?.message || err.message || 'Failed to check out. Make sure you have checked in first.'
-      setError(errorMsg)
+      setError(getErrorMessage(err, 'Failed to check out. Make sure you have checked in first.'))
     } finally {
       setLoading(false)
     }
@@ -105,6 +115,11 @@ function Attendance() {
     setError(null)
     setSuccess(null)
 
+    if (!employeeId) {
+      setError('Please choose an employee.')
+      return
+    }
+
     if (!date) {
       setError('Date is required.')
       return
@@ -113,20 +128,22 @@ function Attendance() {
     setLoading(true)
     try {
       const response = await attendanceAPI.createAttendance({
+        user: employeeId,
         date,
         status,
         remarks: remarks.trim() || undefined,
       })
-      
+
       if (response.success) {
         setSuccess('Attendance record added successfully!')
+        setEmployeeId('')
         setDate('')
         setStatus('present')
         setRemarks('')
         loadAttendance()
       }
-    } catch (err: any) {
-      setError(err.message || 'Failed to add attendance record.')
+    } catch (err) {
+      setError(getErrorMessage(err, 'Failed to add attendance record.'))
     } finally {
       setLoading(false)
     }
@@ -138,8 +155,8 @@ function Attendance() {
     try {
       await attendanceAPI.deleteAttendance(id)
       loadAttendance()
-    } catch (err: any) {
-      setError(err.message || 'Failed to delete attendance record.')
+    } catch (err) {
+      setError(getErrorMessage(err, 'Failed to delete attendance record.'))
     }
   }
 
@@ -258,7 +275,25 @@ function Attendance() {
         <div className="mb-6 rounded-xl border bg-white p-6 shadow-sm">
           <h2 className="mb-4 text-lg font-semibold text-neutral-900">Add Attendance Record</h2>
           <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
+              <div>
+                <label htmlFor="employee" className="mb-1 block text-sm font-medium text-neutral-800">
+                  Employee
+                </label>
+                <select
+                  id="employee"
+                  value={employeeId}
+                  onChange={(e) => setEmployeeId(e.target.value)}
+                  required
+                  className="block w-full rounded-md border px-3 py-2 text-sm outline-none focus:border-neutral-900"
+                >
+                  <option value="">Select employee</option>
+                  {employees.map((employee) => (
+                    <option key={employee._id} value={employee._id}>{employee.name}</option>
+                  ))}
+                </select>
+              </div>
+
               <div>
                 <label htmlFor="date" className="mb-1 block text-sm font-medium text-neutral-800">
                   Date

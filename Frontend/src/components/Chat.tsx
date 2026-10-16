@@ -1,29 +1,42 @@
 import { useState, useRef, useEffect } from 'react';
-import { useChat } from '../context/ChatContext';
+import { useChat, type Participant } from '../context/ChatContext';
 import { useAuth } from '../context/AuthContext';
+import { getErrorMessage } from '../api/axios';
 
 interface ChatProps {
   receiverId: string;
   receiverName: string;
 }
 
+const participantId = (participant: Participant) =>
+  typeof participant === 'string' ? participant : participant?._id;
+
 export default function Chat({ receiverId, receiverName }: ChatProps) {
-  const { messages, sendMessage, fetchMessages, loadingMessages } = useChat();
+  const { messages, sendMessage, fetchMessages, closeChat, loadingMessages } = useChat();
   const { user } = useAuth();
   const [inputMessage, setInputMessage] = useState('');
   const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (receiverId) fetchMessages(receiverId);
-  }, [receiverId]);
+    // Leaving the conversation makes new messages from this person count as unread
+    return () => closeChat();
+  }, [receiverId, fetchMessages, closeChat]);
 
   const handleSend = async () => {
     if (!inputMessage.trim() || sending) return;
     setSending(true);
-    await sendMessage(receiverId, inputMessage);
-    setInputMessage('');
-    setSending(false);
+    setSendError(null);
+    try {
+      await sendMessage(receiverId, inputMessage);
+      setInputMessage('');
+    } catch (error) {
+      setSendError(getErrorMessage(error, 'Message not sent. Please try again.'));
+    } finally {
+      setSending(false);
+    }
   };
 
   useEffect(() => {
@@ -50,7 +63,7 @@ export default function Chat({ receiverId, receiverName }: ChatProps) {
           <p className="text-center text-sm text-neutral-400 mt-8">No messages yet. Say hello!</p>
         ) : (
           messages.map((msg, idx) => {
-            const isMine = (msg.sender?._id || msg.sender) === currentUserId;
+            const isMine = participantId(msg.sender) === currentUserId;
             return (
               <div key={msg._id || idx} className={`flex ${isMine ? 'justify-end' : 'justify-start'}`}>
                 <div className={`max-w-xs px-4 py-2 rounded-lg ${
@@ -68,6 +81,9 @@ export default function Chat({ receiverId, receiverName }: ChatProps) {
         <div ref={messagesEndRef} />
       </div>
 
+      {sendError && (
+        <p className="border-t bg-red-50 px-4 py-2 text-sm text-red-700">{sendError}</p>
+      )}
       <div className="border-t p-4 flex gap-2">
         <input
           type="text"

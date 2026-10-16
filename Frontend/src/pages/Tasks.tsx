@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
+import { getErrorMessage } from '../api/axios'
 import { useAuth } from '../context/AuthContext'
 import Taskscard from '../components/Taskscard'
 import Tasksadd from '../components/Tasksadd'
@@ -14,6 +15,7 @@ export default function Tasks() {
   const [filter, setFilter] = useState<'all' | TaskInput['status']>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
+  const [editingTask, setEditingTask] = useState<TaskInput | null>(null)
   const [showRejectModal, setShowRejectModal] = useState(false)
   const [rejectionReason, setRejectionReason] = useState('')
   const [rejectingTaskId, setRejectingTaskId] = useState<string | null>(null)
@@ -24,9 +26,9 @@ export default function Tasks() {
     if (isAuthenticated && user) {
       loadTasks()
       
-      // Auto-refresh every 30 seconds
+      // Auto-refresh every 30 seconds, without the loading spinner
       const refreshInterval = setInterval(() => {
-        loadTasks()
+        loadTasks(true)
       }, 30000)
       
       return () => clearInterval(refreshInterval)
@@ -37,15 +39,14 @@ export default function Tasks() {
     if (!silent) setLoading(true)
     setError(null)
     try {
-      // Filter tasks by the current user's ID
-      const filters = user?._id ? { assignedTo: user._id } : {}
-      const response = await taskAPI.getTasks(filters)
+      // The API already limits regular users to their own tasks; admins get all of them
+      const response = await taskAPI.getTasks()
       if (response.success && Array.isArray(response.data)) {
         setTasks(response.data)
       } else {
         setTasks([])
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load tasks:', err)
       if (!silent) {
         setError('Failed to load tasks from server. Please make sure the backend is running.')
@@ -79,9 +80,9 @@ export default function Tasks() {
           console.log('Task completion requested successfully')
           alert('Completion request sent! Waiting for admin approval.')
         }
-      } catch (err: any) {
+      } catch (err) {
         console.error('Failed to request task completion:', err)
-        alert(err.response?.data?.message || 'Failed to request task completion')
+        alert(getErrorMessage(err, 'Failed to request task completion'))
         // Revert on error
         setTasks(tasks)
       }
@@ -100,9 +101,9 @@ export default function Tasks() {
           console.log('Task completion approved')
           alert('Task approved successfully!')
         }
-      } catch (err: any) {
+      } catch (err) {
         console.error('Failed to approve task:', err)
-        alert(err.response?.data?.message || 'Failed to approve task')
+        alert(getErrorMessage(err, 'Failed to approve task'))
         setTasks(tasks)
       }
       return
@@ -126,19 +127,16 @@ export default function Tasks() {
       if (response.success) {
         console.log('Task status updated successfully:', newStatus)
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to update task status:', err)
-      alert(err.response?.data?.message || 'Failed to update task status')
+      alert(getErrorMessage(err, 'Failed to update task status'))
       // Revert on error
       setTasks(tasks)
     }
   }
 
   const handleEdit = (index: number) => {
-    const task = filteredTasks[index]
-    console.log('Edit task:', task)
-    // TODO: Open edit modal
-    alert('Edit functionality coming soon!')
+    setEditingTask(filteredTasks[index])
   }
 
   const handleDelete = async (index: number) => {
@@ -163,9 +161,9 @@ export default function Tasks() {
       if (response.success) {
         console.log('Task deleted successfully')
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to delete task:', err)
-      alert(err.response?.data?.message || 'Failed to delete task')
+      alert(getErrorMessage(err, 'Failed to delete task'))
       // Revert on error
       setTasks(tasks)
     }
@@ -195,9 +193,9 @@ export default function Tasks() {
         setRejectingTaskId(null)
         alert('Task rejected successfully')
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to reject task:', err)
-      alert(err.response?.data?.message || 'Failed to reject task')
+      alert(getErrorMessage(err, 'Failed to reject task'))
     } finally {
       setIsRejectSubmitting(false)
     }
@@ -267,7 +265,7 @@ export default function Tasks() {
                   </svg>
                 </div>
                 <div>
-                  <h1 className="text-2xl font-bold md:text-3xl">My Tasks</h1>
+                  <h1 className="text-2xl font-bold md:text-3xl">{isAdmin ? 'All Tasks' : 'My Tasks'}</h1>
                   <p className="text-sm text-neutral-300">Welcome back, {user?.name?.split(' ')[0] || 'User'}</p>
                 </div>
               </div>
@@ -471,12 +469,16 @@ export default function Tasks() {
         )}
       </div>
 
-      {/* Add Task Modal */}
+      {/* Add / Edit Task Modal */}
       <Tasksadd
-        isOpen={showAddModal}
-        onClose={() => setShowAddModal(false)}
+        isOpen={showAddModal || !!editingTask}
+        task={editingTask}
+        onClose={() => {
+          setShowAddModal(false)
+          setEditingTask(null)
+        }}
         onCreate={() => {
-          loadTasks()
+          loadTasks(true)
         }}
       />
 

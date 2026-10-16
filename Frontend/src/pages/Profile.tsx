@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext'
 import { userAPI } from '../api/userAPI'
 import { taskAPI } from '../api/taskAPI'
 import { attendanceAPI } from '../api/attendanceAPI'
+import { getErrorMessage } from '../api/axios'
 
 type DayEntry = {
   date: string
@@ -180,7 +181,7 @@ export default function Profile() {
         if (attendanceResponse.success && Array.isArray(attendanceResponse.data)) {
           const records = attendanceResponse.data
           const approvedRecords = records.filter((r: any) => r.status === 'approved')
-          const totalHours = approvedRecords.reduce((sum: number, r: any) => sum + (r.totalHours || 0), 0)
+          const totalHours = approvedRecords.reduce((sum: number, r: any) => sum + (r.workHours || 0), 0)
           
           setAttendanceStats({
             totalDays: records.length,
@@ -190,10 +191,10 @@ export default function Profile() {
           
           // Add attendance check-ins to activity map
           records.forEach((record: any) => {
-            if (record.date || record.checkIn) {
-              const dateStr = record.date 
+            if (record.date || record.checkInTime) {
+              const dateStr = record.date
                 ? new Date(record.date).toISOString().slice(0, 10)
-                : new Date(record.checkIn).toISOString().slice(0, 10)
+                : new Date(record.checkInTime).toISOString().slice(0, 10)
               activityMap.set(dateStr, (activityMap.get(dateStr) || 0) + 1)
             }
           })
@@ -279,8 +280,8 @@ export default function Profile() {
       } else {
         alert(response.message || 'Failed to update profile picture')
       }
-    } catch (error: any) {
-      alert(error.response?.data?.message || 'Failed to upload image')
+    } catch (error) {
+      alert(getErrorMessage(error, 'Failed to upload image'))
     } finally {
       setUploadingImage(false)
     }
@@ -319,8 +320,8 @@ export default function Profile() {
       } else {
         alert(response.message || 'Failed to update profile')
       }
-    } catch (error: any) {
-      alert(error.response?.data?.message || 'Failed to update profile')
+    } catch (error) {
+      alert(getErrorMessage(error, 'Failed to update profile'))
     } finally {
       setLoading(false)
     }

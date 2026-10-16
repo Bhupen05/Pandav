@@ -1,5 +1,20 @@
 import axios from 'axios';
 
+// Shape of every rejected request from this instance
+export interface ApiError {
+  message: string;
+  status?: number;
+  data?: unknown;
+}
+
+// Message to show the user for any error thrown by an API call
+export const getErrorMessage = (error: unknown, fallback: string): string => {
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' && error.message) {
+    return error.message;
+  }
+  return fallback;
+};
+
 // Create axios instance with base configuration
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL ,
@@ -30,12 +45,14 @@ api.interceptors.response.use(
   },
   (error) => {
     if (error.response) {
+      const { status, data } = error.response;
+
       // Handle 401 Unauthorized - token expired or invalid
       // BUT skip redirect for auth endpoints (login/register) so error can be shown
-      if (error.response.status === 401) {
-        const isAuthEndpoint = error.config?.url?.includes('/auth/login') || 
+      if (status === 401) {
+        const isAuthEndpoint = error.config?.url?.includes('/auth/login') ||
                                error.config?.url?.includes('/auth/register');
-        
+
         if (!isAuthEndpoint) {
           // Clear both storage types
           localStorage.removeItem('token');
@@ -43,44 +60,27 @@ api.interceptors.response.use(
           sessionStorage.removeItem('token');
           sessionStorage.removeItem('user');
           window.location.href = '/login';
-          return Promise.reject(error.response.data);
         }
       }
-      
-      // Log detailed error information for debugging
-      console.error('API Error:', {
-        status: error.response.status,
-        statusText: error.response.statusText,
-        data: error.response.data,
-        url: error.config?.url
-      });
-      
-      // Log the actual error message from backend
-      console.error('Backend error message:', error.response.data?.message);
-      
-      // Return error with proper message
-      const errorData = error.response.data;
-      return Promise.reject({
-        message: errorData?.message || errorData?.error || `Request failed with status ${error.response.status}`,
-        ...errorData
-      });
+
+      const apiError: ApiError = {
+        message: data?.message || data?.error || `Request failed with status ${status}`,
+        status,
+        data,
+      };
+      return Promise.reject(apiError);
     }
-    
+
     // Network error or CORS issue
     if (error.request) {
-      console.error('Network Error:', {
-        message: 'No response received from server',
-        url: error.config?.url,
-        method: error.config?.method
-      });
-      return Promise.reject({ 
-        message: 'Cannot connect to server. Please check your internet connection or if the backend is running.' 
-      });
+      const apiError: ApiError = {
+        message: 'Cannot connect to server. Please check your internet connection or if the backend is running.',
+      };
+      return Promise.reject(apiError);
     }
-    
+
     // Other errors
-    console.error('Request Error:', error.message);
-    return Promise.reject(error);
+    return Promise.reject({ message: error.message } as ApiError);
   }
 );
 

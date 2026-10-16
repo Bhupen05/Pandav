@@ -1,5 +1,10 @@
 // Sends a 500 response, hiding internal error details in production
 export const sendServerError = (res, error) => {
+  // Malformed ids and similar bad input are the client's mistake, not a server error
+  if (error.name === 'CastError') {
+    return res.status(400).json({ success: false, message: `Invalid ${error.path}` });
+  }
+
   console.error(error);
   res.status(500).json({
     success: false,

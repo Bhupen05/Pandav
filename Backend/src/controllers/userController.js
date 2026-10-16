@@ -166,6 +166,43 @@ export const deleteUser = async (req, res) => {
   }
 };
 
+// @desc    Set a new password for a user who forgot theirs
+// @route   PUT /api/users/:id/reset-password
+// @access  Private (Admin)
+export const resetUserPassword = async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+
+    if (typeof newPassword !== 'string' || newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be at least 6 characters long'
+      });
+    }
+
+    const user = await User.findById(req.params.id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Saving a new password also signs the user out of existing sessions
+    user.password = newPassword;
+    await user.save();
+    disconnectUserSockets(req, user._id);
+
+    res.json({
+      success: true,
+      message: `Password reset for ${user.name}`,
+    });
+  } catch (error) {
+    sendServerError(res, error);
+  }
+};
+
 // @desc    Deactivate/Activate user
 // @route   PUT /api/users/:id/toggle-active
 // @access  Private (Admin)

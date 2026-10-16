@@ -1,7 +1,11 @@
 import { useState, useEffect } from 'react'
 import { taskAPI } from '../api/taskAPI'
 import { userAPI } from '../api/userAPI'
+import { getErrorMessage, type ApiError } from '../api/axios'
 import { useAuth } from '../context/AuthContext'
+
+// The API returns populated users; freshly built inputs hold plain ids
+export type UserRef = { _id: string; name?: string; email?: string; profileImage?: string }
 
 export type TaskInput = {
 	_id?: string
@@ -12,20 +16,26 @@ export type TaskInput = {
 	estimatedDays?: number
 	priority: 'low' | 'medium' | 'high' | 'urgent'
 	status: 'pending' | 'in-progress' | 'completed' | 'cancelled' | 'completion-requested'
-	assignedTo: string[]
+	assignedTo: Array<string | UserRef>
 	tags?: string[]
 	notes?: string
-	createdBy?: any
-	assigneeProgress?: any[]
+	createdBy?: string | UserRef
 }
+
+type AssigneeOption = { _id: string; name: string; email: string }
+
+const toId = (ref: string | UserRef) => (typeof ref === 'string' ? ref : ref._id)
 
 type Props = {
 	isOpen: boolean
 	onClose: () => void
 	onCreate?: (task: TaskInput) => void
+	// When set, the modal edits this task instead of creating a new one
+	task?: TaskInput | null
 }
 
-function Tasksadd({ isOpen, onClose, onCreate }: Props) {
+function Tasksadd({ isOpen, onClose, onCreate, task }: Props) {
+	const isEditing = !!task?._id
 	const [title, setTitle] = useState('')
 	const [description, setDescription] = useState('')
 	const [startDate, setStartDate] = useState('')
@@ -39,7 +49,7 @@ function Tasksadd({ isOpen, onClose, onCreate }: Props) {
 	const [error, setError] = useState<string | null>(null)
 	const [success, setSuccess] = useState<string | null>(null)
 	const [loading, setLoading] = useState(false)
-	const [users, setUsers] = useState<any[]>([])
+	const [users, setUsers] = useState<AssigneeOption[]>([])
 	const [showUserDropdown, setShowUserDropdown] = useState(false)
 	
 	const { isAdmin } = useAuth()
@@ -57,6 +67,20 @@ function Tasksadd({ isOpen, onClose, onCreate }: Props) {
 			setSuccess(null)
 		}
 	}, [isOpen])
+
+	// Fill the form when opening it to edit an existing task
+	useEffect(() => {
+		if (!isOpen || !task) return
+		setTitle(task.title)
+		setDescription(task.description)
+		setStartDate(task.startDate?.slice(0, 10) || '')
+		setDueDate(task.dueDate?.slice(0, 10) || '')
+		setPriority(task.priority)
+		setStatus(task.status)
+		setAssignedTo(task.assignedTo.map(toId))
+		setTags(task.tags?.join(', ') || '')
+		setNotes(task.notes || '')
+	}, [isOpen, task])
 
 	// Auto-calculate estimated days when dates change
 	useEffect(() => {
@@ -146,33 +170,31 @@ function Tasksadd({ isOpen, onClose, onCreate }: Props) {
 
 		setLoading(true)
 		try {
-			const response = await taskAPI.createTask(input)
+			const response = isEditing
+				// Leave status out so an edit can't undo a status change made meanwhile
+				? await taskAPI.updateTask(task!._id!, { ...input, status: undefined })
+				: await taskAPI.createTask(input)
 			if (response && !response.success && response.message) {
 				throw new Error(response.message)
 			}
-			
+
 			if (onCreate) {
 				onCreate(input)
 			}
 
-			setSuccess('Task created successfully!')
+			setSuccess(isEditing ? 'Task updated successfully!' : 'Task created successfully!')
 			setTimeout(() => {
 				resetForm()
 				onClose()
 			}, 1000)
-		} catch (err: any) {
-			if (err.response?.status === 204) {
-				setSuccess('Task created successfully!')
-				setTimeout(() => {
-					resetForm()
-					onClose()
-				}, 1000)
-			} else if (err.response?.status === 403) {
-				setError('You do not have permission to create tasks. Only admins can create tasks.')
-			} else if (err.response?.status === 401) {
-				setError('You must be logged in to create tasks.')
+		} catch (err) {
+			const status = (err as ApiError).status
+			if (status === 403) {
+				setError('You do not have permission to change tasks. Only admins can create or edit tasks.')
+			} else if (status === 401) {
+				setError('You must be logged in to save tasks.')
 			} else {
-				setError(err.response?.data?.message || err.message || 'Failed to create task. Please try again.')
+				setError(getErrorMessage(err, 'Failed to save task. Please try again.'))
 			}
 		} finally {
 			setLoading(false)
@@ -208,8 +230,8 @@ function Tasksadd({ isOpen, onClose, onCreate }: Props) {
 							</svg>
 						</div>
 						<div>
-							<h2 className="text-lg font-semibold text-neutral-900">Create New Task</h2>
-							<p className="text-xs text-neutral-500">Fill in the details below</p>
+							<h2 className="text-lg font-semibold text-neutral-900">{isEditing ? 'Edit Task' : 'Create New Task'}</h2>
+							<p className="text-xs text-neutral-500">{isEditing ? 'Update the details below' : 'Fill in the details below'}</p>
 						</div>
 					</div>
 					<button
@@ -349,16 +371,18 @@ function Tasksadd({ isOpen, onClose, onCreate }: Props) {
 								</div>
 							</div>
 
-							<div>
-								<label htmlFor="status" className="mb-1.5 block text-sm font-medium text-neutral-700">
-									Initial Status
-								</label>
-								<div className="flex items-center gap-2 rounded-xl border border-neutral-200 bg-neutral-100 px-4 py-2.5">
-									<span className="text-lg">⏳</span>
-									<span className="text-sm font-medium text-neutral-700">Pending</span>
-									<span className="ml-auto text-xs text-neutral-400">(default)</span>
+							{!isEditing && (
+								<div>
+									<label htmlFor="status" className="mb-1.5 block text-sm font-medium text-neutral-700">
+										Initial Status
+									</label>
+									<div className="flex items-center gap-2 rounded-xl border border-neutral-200 bg-neutral-100 px-4 py-2.5">
+										<span className="text-lg">⏳</span>
+										<span className="text-sm font-medium text-neutral-700">Pending</span>
+										<span className="ml-auto text-xs text-neutral-400">(default)</span>
+									</div>
 								</div>
-							</div>
+							)}
 						</div>
 
 						{/* Assign To */}
@@ -487,14 +511,14 @@ function Tasksadd({ isOpen, onClose, onCreate }: Props) {
 											<circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
 											<path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
 										</svg>
-										Creating...
+										{isEditing ? 'Saving...' : 'Creating...'}
 									</>
 								) : (
 									<>
 										<svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
 											<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
 										</svg>
-										Create Task
+										{isEditing ? 'Save Changes' : 'Create Task'}
 									</>
 								)}
 							</button>

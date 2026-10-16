@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
 import { attendanceAPI } from '../api/attendanceAPI'
 import { useAuth } from '../context/AuthContext'
+import { getErrorMessage } from '../api/axios'
 
 type Task = {
   _id: string
@@ -183,6 +184,7 @@ export default function UserDashboard() {
       )
     } catch (error) {
       console.error('Unable to request task completion', error)
+      alert(getErrorMessage(error, 'Unable to request task completion'))
     }
   }
 
@@ -196,6 +198,7 @@ export default function UserDashboard() {
       )
     } catch (error) {
       console.error('Unable to start task', error)
+      alert(getErrorMessage(error, 'Unable to start task'))
     }
   }
 

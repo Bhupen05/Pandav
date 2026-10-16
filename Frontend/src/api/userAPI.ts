@@ -38,4 +38,16 @@ export const userAPI = {
     const response = await api.put(`/users/${id}/toggle-active`);
     return response.data;
   },
+
+  // Set a new password for a user who forgot theirs (Admin only)
+  resetPassword: async (id: string, newPassword: string) => {
+    const response = await api.put(`/users/${id}/reset-password`, { newPassword });
+    return response.data;
+  },
+
+  // Everyone the current user can chat with
+  getChatUsers: async () => {
+    const response = await api.get('/users/chat-list');
+    return response.data;
+  },
 };

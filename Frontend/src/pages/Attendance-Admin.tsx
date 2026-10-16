@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { attendanceAPI } from '../api/attendanceAPI'
 import { userAPI } from '../api/userAPI'
 import { useAuth } from '../context/AuthContext'
+import { getErrorMessage } from '../api/axios'
 
 type AttendanceRecord = {
   _id: string
@@ -85,6 +86,7 @@ export default function AttendanceAdmin() {
       setRecords(prev => prev.map(r => r._id === id ? { ...r, status: 'approved' as const } : r))
     } catch (error) {
       console.error('Failed to approve:', error)
+      alert(getErrorMessage(error, 'Failed to approve attendance'))
     }
   }
 
@@ -117,6 +119,7 @@ export default function AttendanceAdmin() {
       closeRejectModal()
     } catch (error) {
       console.error('Failed to reject:', error)
+      alert(getErrorMessage(error, 'Failed to reject attendance'))
     } finally {
       setIsSubmitting(false)
     }
@@ -156,6 +159,7 @@ export default function AttendanceAdmin() {
       closeEditModal()
     } catch (error) {
       console.error('Failed to update record:', error)
+      alert(getErrorMessage(error, 'Failed to update attendance record'))
     } finally {
       setIsSubmitting(false)
     }

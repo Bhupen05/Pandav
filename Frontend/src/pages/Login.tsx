@@ -1,17 +1,21 @@
 import { useState } from 'react'
 import { useAuth } from '../context/AuthContext'
-import { useNavigate, Link } from 'react-router-dom'
+import { useNavigate, useLocation, Link } from 'react-router-dom'
+import { getErrorMessage } from '../api/axios'
 
 function Login() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [remember, setRemember] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
+  const [showForgotHelp, setShowForgotHelp] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  
+
   const { login } = useAuth()
   const navigate = useNavigate()
+  // Set by the register page after a successful sign-up
+  const notice = (useLocation().state as { message?: string } | null)?.message
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -32,8 +36,8 @@ function Login() {
       } else {
         navigate('/user')
       }
-    } catch (err: any) {
-      setError(err.message || 'Login failed. Please check your credentials and try again.')
+    } catch (err) {
+      setError(getErrorMessage(err, 'Login failed. Please check your credentials and try again.'))
       setLoading(false)
     }
   }
@@ -43,6 +47,12 @@ function Login() {
       <div className="w-full max-w-md rounded-xl border bg-white p-6 shadow-sm">
         <h1 className="mb-2 text-2xl font-semibold text-neutral-900">Welcome back</h1>
         <p className="mb-6 text-sm text-neutral-600">Sign in to your account</p>
+
+        {notice && !error && (
+          <div className="mb-4 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+            {notice}
+          </div>
+        )}
 
         {error && (
           <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -100,10 +110,20 @@ function Login() {
               />
               Remember me
             </label>
-            <a href="#forgot" className="text-sm text-neutral-700 hover:text-neutral-900">
+            <button
+              type="button"
+              onClick={() => setShowForgotHelp((v) => !v)}
+              className="text-sm text-neutral-700 hover:text-neutral-900"
+            >
               Forgot password?
-            </a>
+            </button>
           </div>
+
+          {showForgotHelp && (
+            <p className="rounded-md bg-neutral-50 px-3 py-2 text-xs text-neutral-600">
+              Ask your admin to reset it. They can set a new password for you from the Admin Panel's Users tab.
+            </p>
+          )}
 
           <button
             type="submit"
