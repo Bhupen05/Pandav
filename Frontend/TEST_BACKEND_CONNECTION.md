@@ -39,13 +39,10 @@ npm run dev
 ✅ Frontend running on: http://localhost:5173
 
 ### 3. Test Accounts
-**Admin:**
-- Email: `admin@example.com`
-- Password: `admin123`
-
-**User:**
-- Email: `user@example.com`
-- Password: `user123`
+Run `node create-users.js` in `Backend/`. It creates `admin@example.com` (admin) and
+`user@example.com` (user) and prints a random password for each, once.
+To choose the passwords yourself, set `SEED_ADMIN_PASSWORD` and `SEED_USER_PASSWORD`
+in `Backend/.env` before running it.
 
 ---
 

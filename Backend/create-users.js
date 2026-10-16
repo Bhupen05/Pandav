@@ -1,23 +1,32 @@
+import crypto from 'crypto';
 import mongoose from 'mongoose';
-import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
+import User from './src/models/User.js';
 
 dotenv.config();
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/pandav_db';
 
-const userSchema = new mongoose.Schema({
-  name: String,
-  email: String,
-  password: String,
-  role: String,
-  phone: String,
-  department: String,
-  isActive: Boolean,
-  createdAt: Date
-});
+// Passwords come from the environment, or are generated randomly and printed
+// once. There are no shared default passwords.
+const seedAccounts = [
+  {
+    name: 'Admin User',
+    email: process.env.SEED_ADMIN_EMAIL || 'admin@example.com',
+    password: process.env.SEED_ADMIN_PASSWORD,
+    role: 'admin',
+    department: 'Management',
+  },
+  {
+    name: 'Demo User',
+    email: process.env.SEED_USER_EMAIL || 'user@example.com',
+    password: process.env.SEED_USER_PASSWORD,
+    role: 'user',
+    department: 'Engineering',
+  },
+];
 
-const User = mongoose.model('User', userSchema);
+const randomPassword = () => crypto.randomBytes(12).toString('base64url');
 
 async function createInitialUsers() {
   try {
@@ -25,65 +34,28 @@ async function createInitialUsers() {
     await mongoose.connect(MONGODB_URI);
     console.log('Connected to MongoDB');
 
-    // Check if users already exist
-    const existingAdmin = await User.findOne({ email: 'admin@example.com' });
-    const existingUser = await User.findOne({ email: 'user@example.com' });
+    const created = [];
+    for (const account of seedAccounts) {
+      if (await User.exists({ email: account.email })) {
+        console.log(`✓ ${account.email} already exists, leaving it unchanged`);
+        continue;
+      }
 
-    if (existingAdmin && existingUser) {
-      console.log('\n✓ Users already exist!');
-      console.log('\nLogin Credentials:');
+      const password = account.password || randomPassword();
+      await User.create({ ...account, password });
+      created.push({ email: account.email, password, role: account.role });
+    }
+
+    if (created.length > 0) {
+      console.log('\nCreated accounts (save these passwords now, they are not shown again):');
       console.log('─────────────────────────────────────');
-      console.log('Admin: admin@example.com / admin123');
-      console.log('User:  user@example.com / user123');
+      for (const { email, password, role } of created) {
+        console.log(`${role.padEnd(5)}  ${email} / ${password}`);
+      }
       console.log('─────────────────────────────────────\n');
-      process.exit(0);
     }
-
-    const salt = await bcrypt.genSalt(10);
-
-    // Create admin user if doesn't exist
-    if (!existingAdmin) {
-      const hashedAdminPassword = await bcrypt.hash('admin123', salt);
-      const admin = new User({
-        name: 'Admin User',
-        email: 'admin@example.com',
-        password: hashedAdminPassword,
-        role: 'admin',
-        phone: '+1234567890',
-        department: 'Management',
-        isActive: true,
-        createdAt: new Date()
-      });
-      await admin.save();
-      console.log('✓ Admin user created');
-    }
-
-    // Create regular user if doesn't exist
-    if (!existingUser) {
-      const hashedUserPassword = await bcrypt.hash('user123', salt);
-      const user = new User({
-        name: 'Demo User',
-        email: 'user@example.com',
-        password: hashedUserPassword,
-        role: 'user',
-        phone: '+1234567891',
-        department: 'Engineering',
-        isActive: true,
-        createdAt: new Date()
-      });
-      await user.save();
-      console.log('✓ Regular user created');
-    }
-
-    console.log('\n✓ Initial users created successfully!');
-    console.log('\nLogin Credentials:');
-    console.log('─────────────────────────────────────');
-    console.log('Admin: admin@example.com / admin123');
-    console.log('User:  user@example.com / user123');
-    console.log('─────────────────────────────────────\n');
 
     await mongoose.disconnect();
-    console.log('Disconnected from MongoDB');
     process.exit(0);
   } catch (error) {
     console.error('Error creating users:', error.message);

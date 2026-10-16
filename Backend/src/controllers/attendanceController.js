@@ -1,4 +1,9 @@
 import Attendance from '../models/Attendance.js';
+import { pick, sendServerError } from '../utils/http.js';
+
+// Fields an admin may set on a record. Regular users can only submit a
+// request (date + remarks); its status is decided by an admin.
+const ADMIN_EDITABLE_FIELDS = ['date', 'status', 'checkInTime', 'checkOutTime', 'remarks'];
 
 // @desc    Get all attendance records
 // @route   GET /api/attendance
@@ -33,10 +38,7 @@ export const getAttendance = async (req, res) => {
       data: attendance,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -69,10 +71,7 @@ export const getAttendanceById = async (req, res) => {
       data: attendance,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -81,15 +80,14 @@ export const getAttendanceById = async (req, res) => {
 // @access  Private
 export const createAttendance = async (req, res) => {
   try {
-    // Set user from logged in user if not admin
-    if (req.user.role !== 'admin') {
-      req.body.user = req.user.id
-    }
+    const data = req.user.role === 'admin'
+      ? pick(req.body, ['user', ...ADMIN_EDITABLE_FIELDS])
+      : { ...pick(req.body, ['date', 'remarks']), user: req.user.id, status: 'requested' }
 
     // Check if record already exists for today
     const today = new Date().toISOString().split('T')[0]
     const existingRecord = await Attendance.findOne({
-      user: req.body.user,
+      user: data.user,
       date: { 
         $gte: new Date(today), 
         $lt: new Date(new Date(today).getTime() + 24 * 60 * 60 * 1000) 
@@ -103,13 +101,11 @@ export const createAttendance = async (req, res) => {
       })
     }
 
-    // If status is provided, use it. Otherwise default to 'present'
-    // This allows users to request with status 'requested'
-    if (!req.body.status) {
-      req.body.status = 'requested'
+    if (!data.status) {
+      data.status = 'requested'
     }
 
-    const attendance = await Attendance.create(req.body)
+    const attendance = await Attendance.create(data)
 
     const populatedAttendance = await Attendance.findById(attendance._id)
       .populate('user', 'name email profileImage')
@@ -154,31 +150,23 @@ export const updateAttendance = async (req, res) => {
       });
     }
 
-    // Restrict what regular users can update
-    if (req.user.role !== 'admin') {
-      // Regular users can only update status and remarks, not dates/times
-      const allowedUpdates = ['status', 'remarks'];
-      const updateData = {};
-      
-      Object.keys(req.body).forEach(key => {
-        if (allowedUpdates.includes(key)) {
-          updateData[key] = req.body[key];
-        }
-      });
-      
-      req.body = updateData;
-    }
-
-    // If admin is updating, set approvedBy
+    let updates;
     if (req.user.role === 'admin') {
-      req.body.approvedBy = req.user.id;
+      updates = { ...pick(req.body, ADMIN_EDITABLE_FIELDS), approvedBy: req.user.id };
+    } else {
+      // Users can only edit the remarks on a request that hasn't been reviewed yet
+      if (attendance.status !== 'requested') {
+        return res.status(403).json({
+          success: false,
+          message: 'This record has already been reviewed and can no longer be edited'
+        });
+      }
+      updates = pick(req.body, ['remarks']);
     }
-
-    console.log('Updating attendance with:', req.body); // Debug log
 
     attendance = await Attendance.findByIdAndUpdate(
-      req.params.id, 
-      req.body, 
+      req.params.id,
+      updates,
       {
         new: true,
         runValidators: true,
@@ -192,8 +180,7 @@ export const updateAttendance = async (req, res) => {
       data: attendance,
     });
   } catch (error) {
-    console.error('Update attendance error:', error); // Debug log
-    res.status(400).json({ 
+    res.status(400).json({
       success: false, 
       message: error.message 
     });
@@ -221,10 +208,7 @@ export const deleteAttendance = async (req, res) => {
       message: 'Attendance record deleted successfully',
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -346,10 +330,7 @@ export const approveAttendance = async (req, res) => {
       data: populatedAttendance,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -383,10 +364,7 @@ export const disapproveAttendance = async (req, res) => {
       data: populatedAttendance,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -407,9 +385,6 @@ export const getPendingAttendance = async (req, res) => {
       data: pendingAttendance,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };

@@ -76,18 +76,12 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
 
   const login = async (email: string, password: string, rememberMe: boolean = false) => {
     const response = await authAPI.login({ email, password }, rememberMe)
-    
-    console.log('Login API response:', response)  // Add this to debug
-    
     const { success, token: authToken, user: authUser, message } = response
 
     if (!success || !authToken || !authUser) {
-      console.log('Login failed - success:', success, 'token:', !!authToken, 'user:', authUser)
       throw new Error(message || 'Invalid credentials')
     }
 
-    console.log('User role:', authUser.role)  // Check the role value
-    
     hydrateSession(authUser, authToken, rememberMe)
     return authUser
   }

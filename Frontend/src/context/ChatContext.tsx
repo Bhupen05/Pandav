@@ -25,7 +25,8 @@ interface ChatContextType {
 export const ChatContext = createContext<ChatContextType | undefined>(undefined);
 
 export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user } = useAuth();
+  const { user, token } = useAuth();
+  const userId = user?._id;
   const [socket, setSocket] = useState<Socket | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [activeUsers, setActiveUsers] = useState<string[]>([]);
@@ -34,13 +35,15 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [, setOpenChatUserId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!user) return;
+    if (!userId || !token) return;
 
-    const newSocket = io(import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:5000');
-    
-    newSocket.on('connect', () => {
-      // use _id to register into the socket room
-      newSocket.emit('user_online', user._id);
+    // The server identifies the user from this token and joins their room itself
+    const newSocket = io(import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:5000', {
+      auth: { token },
+    });
+
+    newSocket.on('connect_error', (error) => {
+      console.error('Chat connection failed:', error.message);
     });
 
     newSocket.on('receive_message', (data) => {
@@ -64,7 +67,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       newSocket.close();
     };
-  }, [user]);
+  }, [userId, token]);
 
   const sendMessage = async (receiverId: string, message: string) => {
     if (!user) return;

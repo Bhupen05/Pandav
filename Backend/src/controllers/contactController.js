@@ -1,4 +1,5 @@
 import Contact from '../models/Contact.js';
+import { pick, sendServerError } from '../utils/http.js';
 
 // @desc    Get all contact messages
 // @route   GET /api/contact
@@ -20,10 +21,7 @@ export const getContacts = async (req, res) => {
       data: contacts,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -47,10 +45,7 @@ export const getContact = async (req, res) => {
       data: contact,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -59,7 +54,10 @@ export const getContact = async (req, res) => {
 // @access  Public
 export const createContact = async (req, res) => {
   try {
-    const contact = await Contact.create(req.body);
+    // Public route: visitors can't set status or resolution fields
+    const contact = await Contact.create(
+      pick(req.body, ['name', 'email', 'phone', 'subject', 'message'])
+    );
 
     res.status(201).json({
       success: true,
@@ -90,13 +88,15 @@ export const updateContact = async (req, res) => {
       });
     }
 
+    const updates = pick(req.body, ['status']);
+
     // If marking as resolved, set resolvedBy and resolvedAt
     if (status === 'resolved' && contact.status !== 'resolved') {
-      req.body.resolvedBy = req.user.id;
-      req.body.resolvedAt = new Date();
+      updates.resolvedBy = req.user.id;
+      updates.resolvedAt = new Date();
     }
 
-    contact = await Contact.findByIdAndUpdate(req.params.id, req.body, {
+    contact = await Contact.findByIdAndUpdate(req.params.id, updates, {
       new: true,
       runValidators: true,
     }).populate('resolvedBy', 'name email');
@@ -134,9 +134,6 @@ export const deleteContact = async (req, res) => {
       message: 'Contact message deleted successfully',
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };

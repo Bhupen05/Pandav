@@ -1,6 +1,28 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 
+// Resolves a JWT to an active user. Returns null if the token is invalid or
+// expired, the account is deactivated, or the password changed after the
+// token was issued. Shared by HTTP routes and socket connections.
+export const getUserFromToken = async (token) => {
+  let decoded;
+  try {
+    decoded = jwt.verify(token, process.env.JWT_SECRET);
+  } catch {
+    return null;
+  }
+
+  const user = await User.findById(decoded.id).select('+passwordChangedAt');
+  if (!user || !user.isActive) return null;
+
+  if (user.passwordChangedAt && decoded.iat < Math.floor(user.passwordChangedAt.getTime() / 1000)) {
+    return null;
+  }
+
+  user.passwordChangedAt = undefined;
+  return user;
+};
+
 export const protect = async (req, res, next) => {
   try {
     let token;
@@ -10,34 +32,26 @@ export const protect = async (req, res, next) => {
     }
 
     if (!token) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Not authorized to access this route' 
+      return res.status(401).json({
+        success: false,
+        message: 'Not authorized to access this route'
       });
     }
 
-    try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      req.user = await User.findById(decoded.id).select('-password');
-      
-      if (!req.user) {
-        return res.status(401).json({ 
-          success: false, 
-          message: 'User not found' 
-        });
-      }
+    req.user = await getUserFromToken(token);
 
-      next();
-    } catch (error) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Not authorized, token failed' 
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Not authorized, token failed'
       });
     }
+
+    next();
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error in authentication' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error in authentication'
     });
   }
 };
@@ -45,9 +59,9 @@ export const protect = async (req, res, next) => {
 export const authorize = (...roles) => {
   return (req, res, next) => {
     if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ 
-        success: false, 
-        message: `User role ${req.user.role} is not authorized to access this route` 
+      return res.status(403).json({
+        success: false,
+        message: `User role ${req.user.role} is not authorized to access this route`
       });
     }
     next();

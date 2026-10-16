@@ -248,27 +248,13 @@ router.delete('/tasks/:id', protect, authorize('admin'), deleteTask);  // Admin 
 
 ## 👤 Default Users
 
-After setting up the database, you can create users:
+After setting up the database, run `node create-users.js` in `Backend/`. It creates an
+admin (`admin@example.com`) and a regular user (`user@example.com`) and prints a random
+password for each, once. Set `SEED_ADMIN_PASSWORD` / `SEED_USER_PASSWORD` in `Backend/.env`
+to choose them yourself.
 
-### Admin User
-```json
-{
-  "name": "Admin User",
-  "email": "admin@pandav.com",
-  "password": "admin123",
-  "role": "admin"
-}
-```
-
-### Regular User
-```json
-{
-  "name": "John Doe",
-  "email": "john@example.com",
-  "password": "password123",
-  "role": "user"
-}
-```
+Self-registration (`POST /api/auth/register`) always creates a regular user; the `role`
+field is ignored. An admin can promote a user with `PUT /api/users/:id` and `{ "role": "admin" }`.
 
 ## 🎨 Key Features Implementation
 

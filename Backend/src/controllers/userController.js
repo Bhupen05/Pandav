@@ -1,4 +1,16 @@
 import User from '../models/User.js';
+import { pick, sendServerError } from '../utils/http.js';
+
+// Fields a user may change on their own profile
+const SELF_EDITABLE_FIELDS = ['name', 'email', 'phone', 'department', 'profileImage'];
+// Admins can additionally change role and active status
+const ADMIN_EDITABLE_FIELDS = [...SELF_EDITABLE_FIELDS, 'role', 'isActive'];
+
+// Ends any open chat connections for a user who was just deactivated
+const disconnectUserSockets = (req, userId) => {
+  const io = req.app.get('io');
+  if (io) io.in(userId.toString()).disconnectSockets(true);
+};
 
 // @desc    Get all users for chat (any authenticated user)
 // @route   GET /api/users/chat-list
@@ -9,7 +21,7 @@ export const getChatUsers = async (req, res) => {
       .select('_id name email profileImage');
     res.json({ success: true, data: users });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -33,10 +45,7 @@ export const getUsers = async (req, res) => {
       data: users,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -67,10 +76,7 @@ export const getUser = async (req, res) => {
       data: user,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -79,35 +85,41 @@ export const getUser = async (req, res) => {
 // @access  Private
 export const updateUser = async (req, res) => {
   try {
+    const isAdmin = req.user.role === 'admin';
+    const isSelf = req.user.id === req.params.id;
+
     // Users can only update their own profile unless they're admin
-    if (req.user.role !== 'admin' && req.user.id !== req.params.id) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Not authorized to update this profile' 
+    if (!isAdmin && !isSelf) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to update this profile'
       });
     }
 
-    // Prevent non-admin users from changing role
-    if (req.user.role !== 'admin' && req.body.role) {
-      delete req.body.role;
+    // Only whitelisted fields; password changes go through /api/auth/updatepassword
+    const updates = pick(req.body, isAdmin ? ADMIN_EDITABLE_FIELDS : SELF_EDITABLE_FIELDS);
+
+    // Stop admins from locking themselves out
+    if (isAdmin && isSelf && ((updates.role && updates.role !== 'admin') || updates.isActive === false)) {
+      return res.status(400).json({
+        success: false,
+        message: 'You cannot remove your own admin access or deactivate yourself'
+      });
     }
 
-    // Don't allow password update through this route
-    if (req.body.password) {
-      delete req.body.password;
-    }
-
-    const user = await User.findByIdAndUpdate(req.params.id, req.body, {
+    const user = await User.findByIdAndUpdate(req.params.id, updates, {
       new: true,
       runValidators: true,
     }).select('-password');
 
     if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
       });
     }
+
+    if (updates.isActive === false) disconnectUserSockets(req, user._id);
 
     res.json({
       success: true,
@@ -150,10 +162,7 @@ export const deleteUser = async (req, res) => {
       message: 'User deleted successfully',
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -171,8 +180,17 @@ export const toggleUserActive = async (req, res) => {
       });
     }
 
+    if (req.user.id === req.params.id) {
+      return res.status(400).json({
+        success: false,
+        message: 'You cannot deactivate your own account'
+      });
+    }
+
     user.isActive = !user.isActive;
     await user.save();
+
+    if (!user.isActive) disconnectUserSockets(req, user._id);
 
     res.json({
       success: true,
@@ -180,9 +198,6 @@ export const toggleUserActive = async (req, res) => {
       message: `User ${user.isActive ? 'activated' : 'deactivated'} successfully`,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };

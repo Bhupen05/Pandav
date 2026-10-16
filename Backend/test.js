@@ -13,10 +13,9 @@ async function testAPI() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        name: 'Test Admin',
-        email: 'testadmin@example.com',
-        password: 'password123',
-        role: 'admin'
+        name: 'Test User',
+        email: 'testuser@example.com',
+        password: 'password123'
       })
     });
     const registerData = await registerRes.json();

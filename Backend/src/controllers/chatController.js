@@ -1,21 +1,51 @@
 import mongoose from 'mongoose';
 import Chat from '../models/Chat.js';
+import User from '../models/User.js';
+import { sendServerError } from '../utils/http.js';
+
+const MAX_MESSAGE_LENGTH = 2000;
+
+// Only expose what the chat UI needs about each participant
+const participants = [
+  { path: 'sender', select: 'name' },
+  { path: 'receiver', select: 'name' },
+];
 
 export const sendMessage = async (req, res) => {
   try {
     const { receiverId, message } = req.body;
     const senderId = req.user._id;
 
+    if (!mongoose.isObjectIdOrHexString(receiverId)) {
+      return res.status(400).json({ success: false, message: 'Invalid receiver' });
+    }
+
+    if (typeof message !== 'string' || !message.trim()) {
+      return res.status(400).json({ success: false, message: 'Message cannot be empty' });
+    }
+
+    if (message.length > MAX_MESSAGE_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        message: `Message cannot be longer than ${MAX_MESSAGE_LENGTH} characters`,
+      });
+    }
+
+    const receiver = await User.exists({ _id: receiverId, isActive: true });
+    if (!receiver) {
+      return res.status(404).json({ success: false, message: 'Recipient not found' });
+    }
+
     const newMessage = new Chat({
       sender: senderId,
       receiver: receiverId,
-      message
+      message: message.trim()
     });
 
     await newMessage.save();
-    await newMessage.populate('sender receiver');
+    await newMessage.populate(participants);
 
-    // Emit the fully populated message to receiver's room in real-time
+    // Emit the populated message to receiver's room in real-time
     const io = req.app.get('io');
     if (io) {
       io.to(receiverId.toString()).emit('receive_message', newMessage);
@@ -23,7 +53,7 @@ export const sendMessage = async (req, res) => {
 
     res.status(201).json(newMessage);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -32,18 +62,22 @@ export const getMessages = async (req, res) => {
     const { userId } = req.params;
     const currentUserId = req.user.id;
 
+    if (!mongoose.isObjectIdOrHexString(userId)) {
+      return res.status(400).json({ success: false, message: 'Invalid user' });
+    }
+
     const messages = await Chat.find({
       $or: [
         { sender: currentUserId, receiver: userId },
         { sender: userId, receiver: currentUserId }
       ]
     })
-      .populate(['sender', 'receiver'])
+      .populate(participants)
       .sort({ timestamp: 1 });
 
     res.json(messages);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -74,10 +108,13 @@ export const getChats = async (req, res) => {
         }
       },
       {
+        // Aggregations ignore the schema's select: false, so project
+        // explicitly to keep password hashes and other fields out
         $lookup: {
           from: 'users',
           localField: '_id',
           foreignField: '_id',
+          pipeline: [{ $project: { name: 1, profileImage: 1 } }],
           as: 'user'
         }
       }
@@ -85,6 +122,6 @@ export const getChats = async (req, res) => {
 
     res.json(chats);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendServerError(res, error);
   }
 };

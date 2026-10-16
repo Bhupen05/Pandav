@@ -11,7 +11,6 @@ interface RegisterData {
   password: string;
   phone?: string;
   department?: string;
-  role?: string;
   profileImage?: string;
 }
 

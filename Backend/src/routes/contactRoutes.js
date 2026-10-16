@@ -7,13 +7,14 @@ import {
   deleteContact,
 } from '../controllers/contactController.js';
 import { protect, authorize } from '../middleware/auth.js';
+import { contactLimiter } from '../middleware/rateLimit.js';
 
 const router = express.Router();
 
 router
   .route('/')
   .get(protect, authorize('admin'), getContacts)
-  .post(createContact); // Public route
+  .post(contactLimiter, createContact); // Public route
 
 router
   .route('/:id')

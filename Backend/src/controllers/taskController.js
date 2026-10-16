@@ -1,5 +1,23 @@
 import Task from '../models/Task.js'
-import User from '../models/User.js'
+import { pick, sendServerError } from '../utils/http.js'
+
+// Fields an admin may set when creating or editing a task
+const TASK_FIELDS = [
+  'title',
+  'description',
+  'assignedTo',
+  'status',
+  'priority',
+  'startDate',
+  'dueDate',
+  'estimatedDays',
+  'tags',
+  'notes',
+]
+
+// Works whether assignedTo is populated or still a list of ObjectIds
+const isAssignee = (task, userId) =>
+  task.assignedTo.some((assignee) => (assignee._id || assignee).toString() === userId)
 
 // @desc    Get all tasks
 // @route   GET /api/tasks
@@ -31,10 +49,7 @@ export const getTasks = async (req, res) => {
       data: tasks,
     })
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    })
+    sendServerError(res, error)
   }
 }
 
@@ -57,15 +72,19 @@ export const getTask = async (req, res) => {
       })
     }
 
+    if (req.user.role !== 'admin' && !isAssignee(task, req.user.id)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to view this task',
+      })
+    }
+
     res.status(200).json({
       success: true,
       data: task,
     })
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    })
+    sendServerError(res, error)
   }
 }
 
@@ -74,9 +93,7 @@ export const getTask = async (req, res) => {
 // @access  Private (Admin)
 export const createTask = async (req, res) => {
   try {
-    req.body.createdBy = req.user.id
-
-    const task = await Task.create(req.body)
+    const task = await Task.create({ ...pick(req.body, TASK_FIELDS), createdBy: req.user.id })
 
     const populatedTask = await Task.findById(task._id)
       .populate('assignedTo', 'name email profileImage')
@@ -108,8 +125,23 @@ export const updateTask = async (req, res) => {
       })
     }
 
-    // Update fields
-    task = await Task.findByIdAndUpdate(req.params.id, req.body, {
+    let updates
+    if (req.user.role === 'admin') {
+      updates = pick(req.body, TASK_FIELDS)
+    } else {
+      // Assignees can only start a pending task. Completion goes through
+      // request-completion so that an admin has to approve it.
+      const isStartingTask = req.body.status === 'in-progress' && task.status === 'pending'
+      if (!isAssignee(task, req.user.id) || !isStartingTask) {
+        return res.status(403).json({
+          success: false,
+          message: 'Not authorized to make this change to the task',
+        })
+      }
+      updates = { status: 'in-progress' }
+    }
+
+    task = await Task.findByIdAndUpdate(req.params.id, updates, {
       new: true,
       runValidators: true,
     })
@@ -150,10 +182,7 @@ export const deleteTask = async (req, res) => {
       message: 'Task deleted successfully',
     })
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    })
+    sendServerError(res, error)
   }
 }
 
@@ -171,10 +200,17 @@ export const requestTaskCompletion = async (req, res) => {
       })
     }
 
-    if (task.status === 'completed') {
+    if (req.user.role !== 'admin' && !isAssignee(task, req.user.id)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only users assigned to this task can request completion',
+      })
+    }
+
+    if (!['pending', 'in-progress'].includes(task.status)) {
       return res.status(400).json({
         success: false,
-        message: 'Task is already completed',
+        message: `Cannot request completion for a task that is ${task.status}`,
       })
     }
 
@@ -200,10 +236,7 @@ export const requestTaskCompletion = async (req, res) => {
       data: populatedTask,
     })
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    })
+    sendServerError(res, error)
   }
 }
 
@@ -247,10 +280,7 @@ export const approveTaskCompletion = async (req, res) => {
       data: populatedTask,
     })
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    })
+    sendServerError(res, error)
   }
 }
 
@@ -297,10 +327,7 @@ export const rejectTaskCompletion = async (req, res) => {
       data: populatedTask,
     })
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    })
+    sendServerError(res, error)
   }
 }
 
@@ -320,9 +347,6 @@ export const getPendingApprovalTasks = async (req, res) => {
       data: tasks,
     })
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-    })
+    sendServerError(res, error)
   }
 }
