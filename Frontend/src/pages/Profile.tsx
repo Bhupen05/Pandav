@@ -4,6 +4,7 @@ import { userAPI } from '../api/userAPI'
 import { taskAPI } from '../api/taskAPI'
 import { attendanceAPI } from '../api/attendanceAPI'
 import { getErrorMessage } from '../api/axios'
+import { resizeImage } from '../utils/resizeImage'
 
 type DayEntry = {
   date: string
@@ -180,7 +181,7 @@ export default function Profile() {
         const attendanceResponse = await attendanceAPI.getAttendance()
         if (attendanceResponse.success && Array.isArray(attendanceResponse.data)) {
           const records = attendanceResponse.data
-          const approvedRecords = records.filter((r: any) => r.status === 'approved')
+          const approvedRecords = records.filter((r: any) => r.approvalStatus === 'approved')
           const totalHours = approvedRecords.reduce((sum: number, r: any) => sum + (r.workHours || 0), 0)
           
           setAttendanceStats({
@@ -239,7 +240,7 @@ export default function Profile() {
     setIsEditing(false)
   }
 
-  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
 
@@ -253,13 +254,12 @@ export default function Profile() {
       return
     }
 
-    const reader = new FileReader()
-    reader.onloadend = () => {
-      const base64String = reader.result as string
-      setPreviewImage(base64String)
+    try {
+      setPreviewImage(await resizeImage(file))
       setShowImagePreview(true)
+    } catch {
+      alert('Could not read that image. Please try another file.')
     }
-    reader.readAsDataURL(file)
   }
 
   const handleImageConfirm = async () => {

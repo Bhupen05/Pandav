@@ -1,29 +1,20 @@
 import { useState, useEffect } from 'react'
-import { attendanceAPI } from '../api/attendanceAPI'
+import { attendanceAPI, type AttendanceRecord, type AttendanceStatus } from '../api/attendanceAPI'
 import { userAPI } from '../api/userAPI'
 import { getErrorMessage } from '../api/axios'
 import { useAuth } from '../context/AuthContext'
+import { todayKey } from '../utils/date'
 
-export type AttendanceRecord = {
-  _id: string
-  user: {
-    _id: string
-    name: string
-    email: string
-    profileImage?: string
-  }
-  date: string
-  status: 'present' | 'absent' | 'late' | 'half-day' | 'leave'
-  checkInTime?: string
-  checkOutTime?: string
-  workHours?: number
-  remarks?: string
+const approvalBadge = {
+  pending: 'bg-purple-50 text-purple-700 ring-1 ring-purple-200',
+  approved: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200',
+  rejected: 'bg-red-50 text-red-700 ring-1 ring-red-200',
 }
 
 function Attendance() {
   const [records, setRecords] = useState<AttendanceRecord[]>([])
   const [date, setDate] = useState('')
-  const [status, setStatus] = useState<'present' | 'absent' | 'late' | 'half-day' | 'leave'>('present')
+  const [status, setStatus] = useState<AttendanceStatus>('present')
   const [remarks, setRemarks] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
@@ -174,11 +165,14 @@ function Attendance() {
   }
 
   // Find today's attendance record
-  const today = new Date().toISOString().split('T')[0]
-  const todayRecord = records.find(r => r.date.startsWith(today))
+  const today = todayKey()
+  const todayRecord = records.find(r => r.day === today)
 
-  // Calculate total hours this week/month
-  const totalHoursThisMonth = records.reduce((sum, r) => sum + (r.workHours || 0), 0)
+  // Hours worked in the current calendar month
+  const thisMonth = today.slice(0, 7)
+  const totalHoursThisMonth = records
+    .filter(r => r.day?.startsWith(thisMonth))
+    .reduce((sum, r) => sum + (r.workHours || 0), 0)
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
@@ -201,6 +195,11 @@ function Attendance() {
           }`}>
             {todayRecord?.status ? todayRecord.status.charAt(0).toUpperCase() + todayRecord.status.slice(1) : 'Not Checked In'}
           </p>
+          {todayRecord && (
+            <span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-xs font-medium capitalize ${approvalBadge[todayRecord.approvalStatus]}`}>
+              {todayRecord.approvalStatus === 'pending' ? 'Awaiting approval' : todayRecord.approvalStatus}
+            </span>
+          )}
         </div>
         <div className="rounded-xl border bg-white p-4 shadow-sm">
           <p className="text-xs text-neutral-500">Check In Time</p>
@@ -230,7 +229,7 @@ function Attendance() {
       <div className="mb-6 rounded-xl border bg-linear-to-r from-blue-500 to-emerald-500 p-6 text-white shadow-sm">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-sm opacity-90">Total Working Hours (This Period)</p>
+            <p className="text-sm opacity-90">Total Working Hours (This Month)</p>
             <p className="mt-1 text-3xl font-bold">{totalHoursThisMonth.toFixed(2)} hrs</p>
           </div>
           <div className="text-5xl opacity-80">⏱️</div>
@@ -315,7 +314,7 @@ function Attendance() {
                 <select
                   id="status"
                   value={status}
-                  onChange={(e) => setStatus(e.target.value as any)}
+                  onChange={(e) => setStatus(e.target.value as AttendanceStatus)}
                   className="block w-full rounded-md border px-3 py-2 text-sm outline-none focus:border-neutral-900"
                 >
                   <option value="present">Present</option>
@@ -362,7 +361,7 @@ function Attendance() {
             <select
               id="filter"
               value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value as any)}
+              onChange={(e) => setFilterStatus(e.target.value as 'all' | AttendanceStatus)}
               className="rounded-md border px-3 py-1.5 text-sm outline-none"
             >
               <option value="all">All</option>
@@ -431,6 +430,9 @@ function Attendance() {
                         }`}
                       >
                         {record.status}
+                      </span>
+                      <span className={`ml-1 inline-flex rounded-full px-2 py-0.5 text-xs font-medium capitalize ${approvalBadge[record.approvalStatus]}`}>
+                        {record.approvalStatus}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-neutral-700">{formatTime(record.checkInTime)}</td>

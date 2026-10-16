@@ -25,4 +25,8 @@ const chatSchema = new mongoose.Schema({
   }
 });
 
+// Loading a conversation, and counting unread messages per recipient
+chatSchema.index({ sender: 1, receiver: 1, timestamp: -1 });
+chatSchema.index({ receiver: 1, isRead: 1 });
+
 export default mongoose.model('Chat', chatSchema);

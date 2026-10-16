@@ -12,6 +12,31 @@ export const sendServerError = (res, error) => {
   });
 };
 
+const DEFAULT_PAGE_SIZE = 50;
+const MAX_PAGE_SIZE = 200;
+
+// Response body for a list endpoint, with opt-in pagination (?page=2&limit=50).
+// Without `page` every match is returned. `query` is the built find() for `filter`.
+export const listResponse = async (model, filter, query, params = {}) => {
+  if (params.page === undefined) {
+    const data = await query;
+    return { success: true, count: data.length, data };
+  }
+
+  const page = Math.max(1, parseInt(params.page, 10) || 1);
+  const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, parseInt(params.limit, 10) || DEFAULT_PAGE_SIZE));
+  const [data, total] = await Promise.all([
+    query.skip((page - 1) * limit).limit(limit),
+    model.countDocuments(filter),
+  ]);
+  return {
+    success: true,
+    count: data.length,
+    data,
+    pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+  };
+};
+
 // Copies only the allowed keys that are present in source, so request bodies
 // can't set fields the route doesn't intend to change
 export const pick = (source = {}, keys) =>

@@ -1,5 +1,8 @@
 import User from '../models/User.js';
-import { pick, sendServerError } from '../utils/http.js';
+import Task from '../models/Task.js';
+import Attendance from '../models/Attendance.js';
+import Chat from '../models/Chat.js';
+import { listResponse, pick, sendServerError } from '../utils/http.js';
 
 // Fields a user may change on their own profile
 const SELF_EDITABLE_FIELDS = ['name', 'email', 'phone', 'department', 'profileImage'];
@@ -18,7 +21,7 @@ const disconnectUserSockets = (req, userId) => {
 export const getChatUsers = async (req, res) => {
   try {
     const users = await User.find({ _id: { $ne: req.user._id }, isActive: { $ne: false } })
-      .select('_id name email profileImage');
+      .select('_id name email');
     res.json({ success: true, data: users });
   } catch (error) {
     sendServerError(res, error);
@@ -37,13 +40,9 @@ export const getUsers = async (req, res) => {
     if (department) filter.department = department;
     if (isActive !== undefined) filter.isActive = isActive === 'true';
 
-    const users = await User.find(filter).select('-password');
+    const query = User.find(filter).select('-password');
 
-    res.json({
-      success: true,
-      count: users.length,
-      data: users,
-    });
+    res.json(await listResponse(User, filter, query, req.query));
   } catch (error) {
     sendServerError(res, error);
   }
@@ -151,11 +150,22 @@ export const deleteUser = async (req, res) => {
     if (req.user.id === req.params.id) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Cannot delete your own account' 
+        message: 'Cannot delete your own account'
       });
     }
 
+    // Remove what belongs to the user so nothing points at a missing account.
+    // Tasks are kept (other assignees may share them); the user is just unassigned.
+    await Promise.all([
+      Task.updateMany(
+        { assignedTo: user._id },
+        { $pull: { assignedTo: user._id, assigneeProgress: { user: user._id } } }
+      ),
+      Attendance.deleteMany({ user: user._id }),
+      Chat.deleteMany({ $or: [{ sender: user._id }, { receiver: user._id }] }),
+    ]);
     await user.deleteOne();
+    disconnectUserSockets(req, user._id);
 
     res.json({
       success: true,

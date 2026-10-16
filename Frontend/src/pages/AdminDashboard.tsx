@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
-import { attendanceAPI } from '../api/attendanceAPI'
+import { attendanceAPI, type AttendanceRecord } from '../api/attendanceAPI'
 import { userAPI } from '../api/userAPI'
 import { getErrorMessage } from '../api/axios'
 import { useAuth } from '../context/AuthContext'
 import Tasksadd, { type TaskInput } from '../components/Tasksadd'
+import { todayKey } from '../utils/date'
 
 type DashboardTask = TaskInput & {
   _id: string
@@ -13,17 +14,6 @@ type DashboardTask = TaskInput & {
   updatedAt?: string
   completionRequestedBy?: { _id: string; name: string }
   completionRequestedAt?: string
-}
-
-// Field names match the Attendance model in the backend
-type AttendanceRecord = {
-  _id: string
-  user: { _id: string; name: string }
-  date: string
-  checkInTime?: string
-  checkOutTime?: string
-  workHours?: number
-  status: 'present' | 'absent' | 'late' | 'half-day' | 'leave' | 'requested' | 'approved' | 'rejected'
 }
 
 type DashboardUser = {
@@ -81,7 +71,7 @@ export default function AdminDashboard() {
       setPendingApprovalTasks(Array.isArray(pendingTaskRes?.data) ? pendingTaskRes.data : [])
       const allAttendance = Array.isArray(attendanceRes?.data) ? attendanceRes.data : []
       setAttendanceRecords(allAttendance)
-      const requested = allAttendance.filter((item: AttendanceRecord) => item.status === 'requested')
+      const requested = allAttendance.filter((item: AttendanceRecord) => item.approvalStatus === 'pending')
       setAttendanceRequests(requested)
       setUsers(Array.isArray(userRes?.data) ? userRes.data : [])
     } catch (error) {
@@ -156,7 +146,11 @@ export default function AdminDashboard() {
 
   const handleAttendanceDecision = async (requestId: string, decision: 'approved' | 'rejected') => {
     try {
-      await attendanceAPI.updateAttendance(requestId, { status: decision })
+      if (decision === 'approved') {
+        await attendanceAPI.approveAttendance(requestId)
+      } else {
+        await attendanceAPI.rejectAttendance(requestId)
+      }
       setProcessedAttendance((prev) => ({ ...prev, [requestId]: true }))
       setAttendanceRequests((prev) => prev.filter((item) => item._id !== requestId))
     } catch (error) {
@@ -224,19 +218,15 @@ export default function AdminDashboard() {
     return dueDate < today
   })
 
-  // Today's check-ins, compared in local time (today is local midnight)
-  const tomorrow = new Date(today)
-  tomorrow.setDate(today.getDate() + 1)
-  const todaysCheckIns = attendanceRecords.filter((record) => {
-    const recordDate = new Date(record.date)
-    return recordDate >= today && recordDate < tomorrow && record.checkInTime
-  })
+  // Today's check-ins
+  const todayDay = todayKey()
+  const todaysCheckIns = attendanceRecords.filter((record) => record.day === todayDay && record.checkInTime)
 
-  // Average work hours
-  const approvedThisMonth = attendanceRecords.filter((record) => {
-    const recordDate = new Date(record.date)
-    return record.status === 'approved' && recordDate >= startOfMonth && record.workHours
-  })
+  // Average work hours over this month's approved records
+  const thisMonth = todayDay.slice(0, 7)
+  const approvedThisMonth = attendanceRecords.filter((record) =>
+    record.approvalStatus === 'approved' && record.day?.startsWith(thisMonth) && record.workHours
+  )
   const avgWorkHours = approvedThisMonth.length > 0
     ? (approvedThisMonth.reduce((sum, r) => sum + (r.workHours || 0), 0) / approvedThisMonth.length).toFixed(1)
     : '—'

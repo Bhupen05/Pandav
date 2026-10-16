@@ -67,44 +67,38 @@ export default function Tasks() {
       return
     }
 
+    // Results come from the server: with several assignees, requesting
+    // completion may only mark the caller's part as done
+    const replaceTask = (updated: TaskInput) => {
+      setTasks(prev => prev.map(t => (t._id === updated._id ? updated : t)))
+    }
+
     // For completion-requested, use the special API endpoint
     if (newStatus === 'completion-requested') {
-      // Optimistically update UI
-      const updatedTasks = [...tasks]
-      updatedTasks[originalIndex] = { ...updatedTasks[originalIndex], status: newStatus }
-      setTasks(updatedTasks)
-
       try {
         const response = await taskAPI.requestCompletion(task._id)
         if (response.success) {
-          console.log('Task completion requested successfully')
-          alert('Completion request sent! Waiting for admin approval.')
+          replaceTask(response.data)
+          alert(response.message || 'Completion request sent! Waiting for admin approval.')
         }
       } catch (err) {
         console.error('Failed to request task completion:', err)
         alert(getErrorMessage(err, 'Failed to request task completion'))
-        // Revert on error
-        setTasks(tasks)
       }
       return
     }
 
     // Admin approving task completion
     if (isAdmin && newStatus === 'completed' && task.status === 'completion-requested') {
-      const updatedTasks = [...tasks]
-      updatedTasks[originalIndex] = { ...updatedTasks[originalIndex], status: newStatus }
-      setTasks(updatedTasks)
-
       try {
         const response = await taskAPI.approveCompletion(task._id)
         if (response.success) {
-          console.log('Task completion approved')
+          replaceTask(response.data)
           alert('Task approved successfully!')
         }
       } catch (err) {
         console.error('Failed to approve task:', err)
         alert(getErrorMessage(err, 'Failed to approve task'))
-        setTasks(tasks)
       }
       return
     }
@@ -118,20 +112,12 @@ export default function Tasks() {
     }
 
     // For other status changes (like starting a task)
-    const updatedTasks = [...tasks]
-    updatedTasks[originalIndex] = { ...updatedTasks[originalIndex], status: newStatus }
-    setTasks(updatedTasks)
-
     try {
       const response = await taskAPI.updateTask(task._id, { status: newStatus })
-      if (response.success) {
-        console.log('Task status updated successfully:', newStatus)
-      }
+      if (response.success) replaceTask(response.data)
     } catch (err) {
       console.error('Failed to update task status:', err)
       alert(getErrorMessage(err, 'Failed to update task status'))
-      // Revert on error
-      setTasks(tasks)
     }
   }
 
@@ -464,6 +450,7 @@ export default function Tasks() {
               onEdit={handleEdit}
               onDelete={handleDelete}
               isAdmin={isAdmin}
+              currentUserId={user?._id}
             />
           </div>
         )}

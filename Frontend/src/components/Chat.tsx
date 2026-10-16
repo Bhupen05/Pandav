@@ -12,7 +12,8 @@ const participantId = (participant: Participant) =>
   typeof participant === 'string' ? participant : participant?._id;
 
 export default function Chat({ receiverId, receiverName }: ChatProps) {
-  const { messages, sendMessage, fetchMessages, closeChat, loadingMessages } = useChat();
+  const { messages, sendMessage, fetchMessages, closeChat, loadingMessages, hasMoreMessages, loadOlderMessages } = useChat();
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const { user } = useAuth();
   const [inputMessage, setInputMessage] = useState('');
   const [sending, setSending] = useState(false);
@@ -39,9 +40,17 @@ export default function Chat({ receiverId, receiverName }: ChatProps) {
     }
   };
 
+  // Scroll to the bottom for new messages, but not when older ones are prepended
+  const newestMessageId = messages[messages.length - 1]?._id;
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [newestMessageId]);
+
+  const handleLoadOlder = async () => {
+    setLoadingOlder(true);
+    await loadOlderMessages();
+    setLoadingOlder(false);
+  };
 
   const currentUserId = user?._id;
 
@@ -51,6 +60,17 @@ export default function Chat({ receiverId, receiverName }: ChatProps) {
         {receiverName}
       </div>
       <div className="flex-1 overflow-y-auto p-4 space-y-2">
+        {!loadingMessages && hasMoreMessages && (
+          <div className="flex justify-center">
+            <button
+              onClick={handleLoadOlder}
+              disabled={loadingOlder}
+              className="rounded-full border px-3 py-1 text-xs text-neutral-600 hover:bg-neutral-50 disabled:opacity-50"
+            >
+              {loadingOlder ? 'Loading...' : 'Load earlier messages'}
+            </button>
+          </div>
+        )}
         {loadingMessages ? (
           <div className="flex flex-col gap-3 animate-pulse">
             {[...Array(4)].map((_, i) => (

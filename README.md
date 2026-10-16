@@ -256,6 +256,28 @@ to choose them yourself.
 Self-registration (`POST /api/auth/register`) always creates a regular user; the `role`
 field is ignored. An admin can promote a user with `PUT /api/users/:id` and `{ "role": "admin" }`.
 
+## ⬆️ Upgrading an Existing Database
+
+After deploying a version that changes the data models, run the migration once against the
+production database (it is safe to run again):
+
+```bash
+cd Backend
+npm run migrate
+```
+
+It fills in new fields on existing records (attendance `day` and `approvalStatus`, per-assignee
+task progress), replaces outdated indexes, and lists anything that needs a decision:
+
+- **Duplicate attendance days**: a user with two records on one day. Delete all but one, then
+  run the migration again so the one-record-per-day rule can be enforced by the database.
+- **Data of deleted users**: run `npm run migrate -- --clean-orphans` to remove it.
+- **Oversized profile images**: run `npm run migrate -- --drop-oversized-images` to clear them;
+  those users can upload a new picture (the app now resizes uploads).
+
+Attendance days follow `APP_TIMEZONE` (default `Asia/Kolkata`); set it in `Backend/.env` if
+your team works in a different timezone.
+
 ## 🎨 Key Features Implementation
 
 ### Profile Picture Upload

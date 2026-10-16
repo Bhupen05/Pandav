@@ -3,6 +3,7 @@ import { taskAPI } from '../api/taskAPI'
 import { userAPI } from '../api/userAPI'
 import { getErrorMessage, type ApiError } from '../api/axios'
 import { useAuth } from '../context/AuthContext'
+import type { AssigneeProgress } from '../utils/taskProgress'
 
 // The API returns populated users; freshly built inputs hold plain ids
 export type UserRef = { _id: string; name?: string; email?: string; profileImage?: string }
@@ -20,6 +21,7 @@ export type TaskInput = {
 	tags?: string[]
 	notes?: string
 	createdBy?: string | UserRef
+	assigneeProgress?: AssigneeProgress[]
 }
 
 type AssigneeOption = { _id: string; name: string; email: string }
@@ -144,6 +146,12 @@ function Tasksadd({ isOpen, onClose, onCreate, task }: Props) {
 
 		if (!dueDate) {
 			setError('Due date is required.')
+			return
+		}
+
+		// Both are YYYY-MM-DD, so string comparison is date order
+		if (dueDate < startDate) {
+			setError('Due date cannot be before the start date.')
 			return
 		}
 

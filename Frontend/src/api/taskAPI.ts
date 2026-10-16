@@ -54,4 +54,10 @@ export const taskAPI = {
     const response = await api.get('/tasks/pending-approval')
     return response.data
   },
+
+  // Completed vs assigned tasks per team member
+  getLeaderboard: async () => {
+    const response = await api.get('/tasks/leaderboard')
+    return response.data
+  },
 }

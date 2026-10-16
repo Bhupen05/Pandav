@@ -25,7 +25,15 @@ interface ChatContextType {
   // Rejects if the message could not be sent
   sendMessage: (receiverId: string, message: string) => Promise<void>;
   fetchMessages: (userId: string) => Promise<void>;
+  // Whether the open conversation has older messages than those loaded
+  hasMoreMessages: boolean;
+  loadOlderMessages: () => Promise<void>;
   closeChat: () => void;
+}
+
+interface MessagesPage {
+  data: Message[];
+  hasMore: boolean;
 }
 
 const participantId = (participant: Participant) =>
@@ -41,6 +49,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [activeUsers, setActiveUsers] = useState<string[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
   // The conversation on screen. A ref, so the socket handler always sees the current value.
   const openChatUserIdRef = useRef<string | null>(null);
 
@@ -56,11 +65,17 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       console.error('Chat connection failed:', error.message);
     });
 
+    // Unread counts are stored on the server, so they survive a page reload
+    api.get<{ data: Record<string, number> }>('/chat/unread')
+      .then(({ data }) => setUnreadCounts(data.data || {}))
+      .catch((error) => console.error('Error loading unread counts:', error));
+
     newSocket.on('receive_message', (data: Message) => {
       const senderId = participantId(data.sender);
       // Show the message only in its own conversation; anything else counts as unread
       if (senderId === openChatUserIdRef.current) {
         setMessages(prev => [...prev, data]);
+        api.put(`/chat/read/${senderId}`).catch((error) => console.error('Error marking messages read:', error));
       } else {
         setUnreadCounts(prev => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
       }
@@ -99,11 +114,14 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     clearUnread(chatUserId);
     setLoadingMessages(true);
     setMessages([]);
+    setHasMoreMessages(false);
     try {
-      const { data } = await api.get<Message[]>(`/chat/messages/${chatUserId}`);
+      // Loading the latest page also marks the conversation read on the server
+      const { data } = await api.get<MessagesPage>(`/chat/messages/${chatUserId}`);
       // Ignore the response if the user switched to another conversation meanwhile
       if (openChatUserIdRef.current === chatUserId) {
-        setMessages(Array.isArray(data) ? data : []);
+        setMessages(Array.isArray(data.data) ? data.data : []);
+        setHasMoreMessages(!!data.hasMore);
       }
     } catch (error) {
       console.error('Error fetching messages:', error);
@@ -112,13 +130,32 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [clearUnread]);
 
+  const loadOlderMessages = useCallback(async () => {
+    const chatUserId = openChatUserIdRef.current;
+    const oldest = messages[0];
+    if (!chatUserId || !oldest) return;
+
+    try {
+      const { data } = await api.get<MessagesPage>(`/chat/messages/${chatUserId}`, {
+        params: { before: oldest.timestamp },
+      });
+      if (openChatUserIdRef.current === chatUserId) {
+        setMessages(prev => [...data.data, ...prev]);
+        setHasMoreMessages(!!data.hasMore);
+      }
+    } catch (error) {
+      console.error('Error loading older messages:', error);
+    }
+  }, [messages]);
+
   const closeChat = useCallback(() => {
     openChatUserIdRef.current = null;
     setMessages([]);
+    setHasMoreMessages(false);
   }, []);
 
   return (
-    <ChatContext.Provider value={{ socket, messages, activeUsers, loadingMessages, unreadCounts, clearUnread, sendMessage, fetchMessages, closeChat }}>
+    <ChatContext.Provider value={{ socket, messages, activeUsers, loadingMessages, unreadCounts, clearUnread, sendMessage, fetchMessages, hasMoreMessages, loadOlderMessages, closeChat }}>
       {children}
     </ChatContext.Provider>
   );

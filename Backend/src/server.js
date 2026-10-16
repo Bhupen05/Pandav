@@ -109,8 +109,9 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Largest legitimate body is a profile image, capped at ~200 KB by the User model
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use(sanitizeInput);
 
 // Routes
@@ -130,6 +131,14 @@ app.get('/api/health', (req, res) => {
 
 // Error handling middleware
 app.use((err, req, res, next) => {
+  // Body parsing errors (too large, malformed JSON) are the client's, with their own 4xx status
+  if (err.status >= 400 && err.status < 500) {
+    return res.status(err.status).json({
+      success: false,
+      message: err.type === 'entity.too.large' ? 'Request is too large' : 'Invalid request body',
+    });
+  }
+
   console.error(err.stack);
   res.status(500).json({
     success: false,

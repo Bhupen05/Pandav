@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { authAPI } from '../api/authAPI'
 import { getErrorMessage } from '../api/axios'
+import { resizeImage } from '../utils/resizeImage'
 
 function Register() {
   const [formData, setFormData] = useState({
@@ -41,16 +42,12 @@ function Register() {
     setUploadingImage(true)
     setError(null)
     try {
-      const reader = new FileReader()
-      reader.onloadend = () => {
-        const base64String = reader.result as string
-        setFormData({ ...formData, profileImage: base64String })
-        setUploadingImage(false)
-      }
-      reader.readAsDataURL(file)
-    } catch (error) {
-      setUploadingImage(false)
+      const profileImage = await resizeImage(file)
+      setFormData((prev) => ({ ...prev, profileImage }))
+    } catch {
       setError('Failed to process image')
+    } finally {
+      setUploadingImage(false)
     }
   }
 

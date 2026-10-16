@@ -1,5 +1,5 @@
 import Contact from '../models/Contact.js';
-import { pick, sendServerError } from '../utils/http.js';
+import { listResponse, pick, sendServerError } from '../utils/http.js';
 
 // @desc    Get all contact messages
 // @route   GET /api/contact
@@ -11,15 +11,11 @@ export const getContacts = async (req, res) => {
 
     if (status) filter.status = status;
 
-    const contacts = await Contact.find(filter)
+    const query = Contact.find(filter)
       .populate('resolvedBy', 'name email')
       .sort('-createdAt');
 
-    res.json({
-      success: true,
-      count: contacts.length,
-      data: contacts,
-    });
+    res.json(await listResponse(Contact, filter, query, req.query));
   } catch (error) {
     sendServerError(res, error);
   }

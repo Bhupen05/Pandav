@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
-import { attendanceAPI } from '../api/attendanceAPI'
 import { useAuth } from '../context/AuthContext'
 import { getErrorMessage } from '../api/axios'
+import { canRequestCompletion, canStart, isWaitingForTeammates, type AssigneeProgress } from '../utils/taskProgress'
 
 type Task = {
   _id: string
@@ -14,20 +14,13 @@ type Task = {
   dueDate?: string
   priority?: 'low' | 'medium' | 'high' | 'urgent'
   assignedTo?: Array<string | { _id: string; name?: string; email?: string }>
+  assigneeProgress?: AssigneeProgress[]
   tags?: string[]
-}
-
-type AttendanceRecord = {
-  _id: string
-  date: string
-  status: 'requested' | 'approved' | 'rejected'
-  user?: { _id: string }
 }
 
 type LeaderboardUser = {
   _id: string
   name: string
-  email: string
   profileImage?: string
   completedTasks: number
   totalTasks: number
@@ -53,7 +46,6 @@ export default function UserDashboard() {
   const navigate = useNavigate()
   const { isAuthenticated, user } = useAuth()
   const [tasks, setTasks] = useState<Task[]>([])
-  const [, setAttendanceHistory] = useState<AttendanceRecord[]>([])
   const [leaderboard, setLeaderboard] = useState<LeaderboardUser[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [checkingSession, setCheckingSession] = useState(true)
@@ -73,68 +65,21 @@ export default function UserDashboard() {
   const loadData = useCallback(async () => {
     setIsLoading(true)
     try {
-      const [taskRes, attendanceRes, allTasksRes] = await Promise.all([
+      // The leaderboard is computed on the server: a regular user's task list
+      // only contains their own tasks, so it can't be built from that
+      const [taskRes, leaderboardRes] = await Promise.all([
         taskAPI.getTasks(),
-        attendanceAPI.getAttendance(),
-        taskAPI.getTasks().catch(() => ({ data: [] })),
+        taskAPI.getLeaderboard().catch(() => ({ data: [] })),
       ])
 
-      const myTasks = Array.isArray(taskRes?.data) ? taskRes.data : []
-
-      const myAttendance = Array.isArray(attendanceRes?.data)
-        ? attendanceRes.data.filter(
-            (record: AttendanceRecord) => record.user?._id === user?._id,
-          )
-        : []
-
-      setTasks(myTasks)
-      setAttendanceHistory(
-        myAttendance.sort(
-          (a: AttendanceRecord, b: AttendanceRecord) => new Date(b.date).getTime() - new Date(a.date).getTime(),
-        ),
-      )
-
-      // Build leaderboard from tasks only (don't fetch users)
-      const allTasks = Array.isArray(allTasksRes?.data) ? allTasksRes.data : []
-      
-      // Get unique user IDs from tasks
-      const userMap = new Map()
-      allTasks.forEach((task: any) => {
-        const assignees = task.assignedTo || []
-        assignees.forEach((assignee: any) => {
-          const userId = typeof assignee === 'string' ? assignee : assignee._id
-          const userData = typeof assignee === 'string' ? { _id: userId, name: 'Unknown' } : assignee
-          userMap.set(userId, userData)
-        })
-      })
-
-      const leaderboardData: LeaderboardUser[] = Array.from(userMap.values()).map((u: any) => {
-        const userTasks = allTasks.filter((t: any) => {
-          const assignees = t.assignedTo || []
-          return assignees.some((a: any) => 
-            (typeof a === 'string' ? a : a._id) === u._id
-          )
-        })
-        const completedCount = userTasks.filter((t: any) => t.status === 'completed').length
-        const totalCount = userTasks.length
-        return {
-          _id: u._id,
-          name: u.name || 'Unknown',
-          email: u.email || '',
-          profileImage: u.profileImage,
-          completedTasks: completedCount,
-          totalTasks: totalCount,
-          completionRate: totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0,
-        }
-      }).sort((a: LeaderboardUser, b: LeaderboardUser) => b.completedTasks - a.completedTasks)
-      
-      setLeaderboard(leaderboardData)
+      setTasks(Array.isArray(taskRes?.data) ? taskRes.data : [])
+      setLeaderboard(Array.isArray(leaderboardRes?.data) ? (leaderboardRes.data as LeaderboardUser[]) : [])
     } catch (error) {
       console.error('Failed to load user dashboard', error)
     } finally {
       setIsLoading(false)
     }
-  }, [user?._id])
+  }, [])
 
   useEffect(() => {
     if (!checkingSession && isAuthenticated && user?._id) {
@@ -174,14 +119,15 @@ export default function UserDashboard() {
     return 'Good evening'
   }
 
+  // Swap in the task the API sends back; it carries everyone's progress
+  const replaceTask = (updated: Task) => {
+    setTasks((prev) => prev.map((task) => (task._id === updated._id ? updated : task)))
+  }
+
   const handleCompleteTask = async (taskId: string) => {
     try {
-      await taskAPI.requestCompletion(taskId)
-      setTasks((prev) =>
-        prev.map((task) =>
-          task._id === taskId ? { ...task, status: 'completion-requested' } : task,
-        ),
-      )
+      const response = await taskAPI.requestCompletion(taskId)
+      replaceTask(response.data)
     } catch (error) {
       console.error('Unable to request task completion', error)
       alert(getErrorMessage(error, 'Unable to request task completion'))
@@ -190,12 +136,8 @@ export default function UserDashboard() {
 
   const handleStartTask = async (taskId: string) => {
     try {
-      await taskAPI.updateTask(taskId, { status: 'in-progress' })
-      setTasks((prev) =>
-        prev.map((task) =>
-          task._id === taskId ? { ...task, status: 'in-progress' } : task,
-        ),
-      )
+      const response = await taskAPI.updateTask(taskId, { status: 'in-progress' })
+      replaceTask(response.data)
     } catch (error) {
       console.error('Unable to start task', error)
       alert(getErrorMessage(error, 'Unable to start task'))
@@ -457,7 +399,7 @@ export default function UserDashboard() {
                     <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${config.bg} ${config.text}`}>
                       {task.status.replace('-', ' ')}
                     </span>
-                    {task.status === 'pending' && (
+                    {canStart(task, user?._id) && (
                       <button
                         onClick={() => handleStartTask(task._id)}
                         className="rounded-lg bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
@@ -465,13 +407,16 @@ export default function UserDashboard() {
                         Start
                       </button>
                     )}
-                    {task.status === 'in-progress' && (
+                    {!canStart(task, user?._id) && canRequestCompletion(task, user?._id) && (
                       <button
                         onClick={() => handleCompleteTask(task._id)}
                         className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700"
                       >
                         Complete
                       </button>
+                    )}
+                    {isWaitingForTeammates(task, user?._id) && (
+                      <span className="text-xs text-purple-600">Waiting for teammates</span>
                     )}
                   </div>
                 </div>

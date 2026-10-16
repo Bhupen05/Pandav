@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
-import { attendanceAPI } from '../api/attendanceAPI'
+import { attendanceAPI, type AttendanceRecord } from '../api/attendanceAPI'
 import { userAPI } from '../api/userAPI'
 import { useAuth } from '../context/AuthContext'
 
@@ -15,20 +15,6 @@ type Task = {
   priority?: 'low' | 'medium' | 'high' | 'urgent'
   assignedTo?: Array<string | { _id: string; name?: string; email?: string }>
   tags?: string[]
-}
-
-type AttendanceRecord = {
-  _id: string
-  user: {
-    _id: string
-    name: string
-    email: string
-  }
-  date: string
-  status: 'present' | 'absent' | 'late' | 'half-day' | 'leave' | 'requested' | 'approved' | 'rejected'
-  checkInTime?: string
-  checkOutTime?: string
-  workHours?: number
 }
 
 type User = {
@@ -109,13 +95,14 @@ export default function Userview() {
     requested: tasks.filter(t => t.status === 'completion-requested').length,
   }
 
-  // Attendance stats
+  // Attendance stats; only approved records count
+  const approvedAttendance = attendance.filter(a => a.approvalStatus === 'approved')
   const attendanceStats = {
     total: attendance.length,
-    present: attendance.filter(a => a.status === 'present' || a.status === 'approved').length,
-    late: attendance.filter(a => a.status === 'late').length,
-    absent: attendance.filter(a => a.status === 'absent').length,
-    totalHours: attendance.reduce((sum, a) => sum + (a.workHours || 0), 0),
+    present: approvedAttendance.filter(a => a.status === 'present').length,
+    late: approvedAttendance.filter(a => a.status === 'late').length,
+    absent: approvedAttendance.filter(a => a.status === 'absent').length,
+    totalHours: approvedAttendance.reduce((sum, a) => sum + (a.workHours || 0), 0),
   }
 
   const formatDate = (date?: string) => {
@@ -492,6 +479,9 @@ export default function Userview() {
                         <td className="px-4 py-3">
                           <span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium capitalize ${getStatusColor(record.status)}`}>
                             {record.status}
+                          </span>
+                          <span className={`ml-1 inline-flex rounded-full px-2 py-1 text-xs font-medium capitalize ${getStatusColor(record.approvalStatus)}`}>
+                            {record.approvalStatus}
                           </span>
                         </td>
                         <td className="px-4 py-3 text-neutral-700">{formatTime(record.checkInTime)}</td>
