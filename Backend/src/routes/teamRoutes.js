@@ -1,5 +1,5 @@
 import express from 'express';
-import { protect, authorize, adminOrLeader } from '../middleware/auth.js';
+import { protect, authorize, adminOrLeader, isLeaderOfTeam } from '../middleware/auth.js';
 import {
   createTeam,
   getTeams,
@@ -41,11 +41,11 @@ router.route('/')
 
 router.route('/:id')
   .get(protect, getTeam)
-  .put(protect, adminOrLeader, updateTeam)
+  .put(protect, adminOrLeader, isLeaderOfTeam, updateTeam)
   .delete(protect, authorize('admin'), deleteTeam);
 
 // ── Member management ─────────────────────────────────────────────────────────
-router.post('/:teamId/invite', protect, adminOrLeader, inviteMember);
+router.post('/:teamId/invite', protect, adminOrLeader, isLeaderOfTeam, inviteMember);
 router.post('/:teamId/leaders', protect, authorize('admin'), addLeader);
 router.delete('/:teamId/members/:userId', protect, adminOrLeader, removeMember);
 

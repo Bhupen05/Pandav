@@ -53,6 +53,7 @@ The Attendance Management API provides endpoints to track employee attendance wi
 **Query Parameters:**
 - `user` (optional): Filter by user ID
 - `status` (optional): Filter by attendance status (present, absent, late, half-day, leave)
+- `approvalStatus` (optional): Filter by review state (pending, approved, rejected). Admins use `?approvalStatus=pending` for the records awaiting review.
 - `startDate` (optional): Filter from date (ISO format)
 - `endDate` (optional): Filter to date (ISO format)
 
@@ -576,71 +577,7 @@ curl -X PUT http://localhost:5000/api/attendance/607f1f77bcf86cd799439011/disapp
 
 ---
 
-### 9. Get Pending Attendance Records
-
-**Endpoint:** `GET /api/attendance/pending`
-
-**Authentication:** Required (Private)
-
-**Authorization:** Admin only
-
-**Response:**
-```json
-{
-  "success": true,
-  "count": 2,
-  "data": [
-    {
-      "_id": "607f1f77bcf86cd799439011",
-      "user": {
-        "_id": "607f1f77bcf86cd799439012",
-        "name": "John Doe",
-        "email": "john@example.com",
-        "department": "Frontend",
-        "profileImage": "https://example.com/image.jpg"
-      },
-      "date": "2024-01-18T00:00:00.000Z",
-      "status": "late",
-      "checkInTime": "2024-01-18T10:15:00.000Z",
-      "checkOutTime": "2024-01-18T17:30:00.000Z",
-      "workHours": 7.25,
-      "remarks": "Traffic delay",
-      "approvedBy": null,
-      "createdAt": "2024-01-18T10:30:00.000Z",
-      "updatedAt": "2024-01-18T10:30:00.000Z"
-    },
-    {
-      "_id": "607f1f77bcf86cd799439014",
-      "user": {
-        "_id": "607f1f77bcf86cd799439015",
-        "name": "Jane Smith",
-        "email": "jane@example.com",
-        "department": "Backend",
-        "profileImage": "https://example.com/image.jpg"
-      },
-      "date": "2024-01-18T00:00:00.000Z",
-      "status": "half-day",
-      "checkInTime": "2024-01-18T09:00:00.000Z",
-      "checkOutTime": "2024-01-18T13:00:00.000Z",
-      "workHours": 4,
-      "remarks": "Medical appointment",
-      "approvedBy": null,
-      "createdAt": "2024-01-18T13:15:00.000Z",
-      "updatedAt": "2024-01-18T13:15:00.000Z"
-    }
-  ]
-}
-```
-
-**Example Request:**
-```bash
-curl -X GET http://localhost:5000/api/attendance/pending \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
----
-
-### 10. Delete Attendance Record
+### 9. Delete Attendance Record
 
 **Endpoint:** `DELETE /api/attendance/:id`
 

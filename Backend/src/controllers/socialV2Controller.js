@@ -8,6 +8,7 @@ import SocialPublishJobV2 from '../models/SocialPublishJobV2.js';
 import Chat from '../models/Chat.js';
 import User from '../models/User.js';
 import { logAuditEventV2 } from '../utils/auditLoggerV2.js';
+import { sendServerError } from '../utils/http.js';
 
 const LINKEDIN_API_BASE = process.env.LINKEDIN_API_BASE || 'https://api.linkedin.com';
 const GITHUB_API_BASE = process.env.GITHUB_API_BASE || 'https://api.github.com';
@@ -402,7 +403,7 @@ export const createPost = async (req, res) => {
     });
     return res.status(201).json({ success: true, data: populatedPost });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -458,7 +459,7 @@ export const generatePostFromPersonalTask = async (req, res) => {
     });
     return res.status(201).json({ success: true, data: populatedPost });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -478,7 +479,7 @@ export const getFeed = async (req, res) => {
 
     return res.json({ success: true, count: visiblePosts.length, data: visiblePosts });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -491,7 +492,7 @@ export const getMyPosts = async (req, res) => {
 
     return res.json({ success: true, count: posts.length, data: posts });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -526,7 +527,7 @@ export const toggleLike = async (req, res) => {
       likesCount: post.likes.length,
     });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -556,7 +557,7 @@ export const addComment = async (req, res) => {
 
     return res.status(201).json({ success: true, data: post.comments[post.comments.length - 1] });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -601,7 +602,7 @@ export const requestConnection = async (req, res) => {
     });
     return res.status(201).json({ success: true, data: created });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -633,7 +634,7 @@ export const respondConnection = async (req, res) => {
 
     return res.json({ success: true, data: connection });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -657,7 +658,7 @@ export const getConnections = async (req, res) => {
       },
     });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -708,7 +709,7 @@ export const sendNetworkMessage = async (req, res) => {
     });
     return res.status(201).json({ success: true, data: newMessage });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -734,7 +735,7 @@ export const getNetworkMessages = async (req, res) => {
 
     return res.json({ success: true, count: messages.length, data: messages });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -757,7 +758,7 @@ export const discoverUsers = async (req, res) => {
 
     return res.json({ success: true, count: users.length, data: users });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -800,7 +801,7 @@ export const approvePost = async (req, res) => {
     });
     return res.json({ success: true, data: post });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -829,7 +830,7 @@ export const createPersonalTask = async (req, res) => {
     });
     return res.status(201).json({ success: true, data: task });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -842,7 +843,7 @@ export const getPersonalTasks = async (req, res) => {
     const tasks = await PersonalTask.find(filter).sort({ createdAt: -1 });
     return res.json({ success: true, count: tasks.length, data: tasks });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -888,7 +889,7 @@ export const updatePersonalTask = async (req, res) => {
     });
     return res.json({ success: true, data: task, autoShare });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -920,7 +921,7 @@ export const togglePersonalTaskComplete = async (req, res) => {
     });
     return res.json({ success: true, data: task, autoShare });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -940,7 +941,7 @@ export const deletePersonalTask = async (req, res) => {
     });
     return res.json({ success: true, message: 'Personal task deleted' });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -988,7 +989,7 @@ export const linkProviderAccount = async (req, res) => {
     });
     return res.json({ success: true, data: integration });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -1000,7 +1001,7 @@ export const getSocialIntegrations = async (req, res) => {
 
     return res.json({ success: true, count: integrations.length, data: integrations });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -1022,7 +1023,7 @@ export const getProviderProfile = async (req, res) => {
 
     return res.json({ success: true, data: profile });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -1044,7 +1045,7 @@ export const fetchProviderPosts = async (req, res) => {
 
     return res.json({ success: true, provider, count: posts.length, data: posts });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -1094,7 +1095,7 @@ export const publishPostToTargets = async (req, res) => {
       publishedAt: toIso(new Date()),
     });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -1330,7 +1331,7 @@ export const getProviderOAuthStart = async (req, res) => {
 
     return res.json({ success: true, data: { provider, authUrl, state, redirectUri: cfg.redirectUri } });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -1392,7 +1393,7 @@ export const completeProviderOAuth = async (req, res) => {
 
     return res.json({ success: true, data: integration });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -1459,7 +1460,7 @@ export const createPublishJobs = async (req, res) => {
 
     return res.status(201).json({ success: true, count: jobs.length, data: jobs });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -1481,7 +1482,7 @@ export const getPublishJobs = async (req, res) => {
 
     return res.json({ success: true, count: jobs.length, data: jobs });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -1517,7 +1518,7 @@ export const processPublishJob = async (req, res) => {
     const refreshed = await SocialPublishJobV2.findById(job._id);
     return res.json({ success: runResult.success, data: refreshed, error: runResult.error || null });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -1551,7 +1552,7 @@ export const retryPublishJob = async (req, res) => {
 
     return res.json({ success: true, data: job });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -1585,7 +1586,7 @@ export const processDuePublishJobs = async (req, res) => {
 
     return res.json({ success: true, count: outcomes.length, data: outcomes });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -1611,7 +1612,7 @@ export const getModerationPosts = async (req, res) => {
 
     return res.json({ success: true, count: posts.length, data: posts });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };
 
@@ -1647,6 +1648,6 @@ export const moderatePost = async (req, res) => {
 
     return res.json({ success: true, data: post });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    return sendServerError(res, error);
   }
 };

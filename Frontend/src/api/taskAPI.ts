@@ -1,8 +1,16 @@
 import api from './axios'
+import type { TaskInput } from '../components/Tasksadd'
+
+// Query filters for GET /tasks; regular users only ever get their own tasks
+export interface TaskFilters {
+  status?: TaskInput['status']
+  priority?: TaskInput['priority']
+  assignedTo?: string
+}
 
 export const taskAPI = {
   // Get all tasks
-  getTasks: async (filters?: any) => {
+  getTasks: async (filters?: TaskFilters) => {
     const response = await api.get('/tasks', { params: filters })
     return response.data
   },
@@ -14,13 +22,13 @@ export const taskAPI = {
   },
 
   // Create task
-  createTask: async (data: any) => {
+  createTask: async (data: TaskInput) => {
     const response = await api.post('/tasks', data)
     return response.data
   },
 
   // Update task
-  updateTask: async (id: string, data: any) => {
+  updateTask: async (id: string, data: Partial<TaskInput>) => {
     const response = await api.put(`/tasks/${id}`, data)
     return response.data
   },
@@ -52,6 +60,12 @@ export const taskAPI = {
   // Get pending approval tasks (admin only)
   getPendingApprovalTasks: async () => {
     const response = await api.get('/tasks/pending-approval')
+    return response.data
+  },
+
+  // Completed vs assigned tasks per team member
+  getLeaderboard: async () => {
+    const response = await api.get('/tasks/leaderboard')
     return response.data
   },
 }

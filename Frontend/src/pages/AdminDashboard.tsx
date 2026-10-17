@@ -1,43 +1,29 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
-import { attendanceAPI } from '../api/attendanceAPI'
+import { attendanceAPI, type AttendanceRecord } from '../api/attendanceAPI'
 import { userAPI } from '../api/userAPI'
+import { getErrorMessage } from '../api/axios'
 import { socialV2API } from '../api/socialV2API'
-import { useAuth } from '../context/AuthContext'
-import Tasksadd from '../components/Tasksadd'
+import { useAuth } from '../context/useAuth'
+import Tasksadd, { type TaskInput } from '../components/Tasksadd'
+import { todayKey } from '../utils/date'
+import { useFeedback } from '../context/useFeedback'
 
 type ModerationPost = {
   _id: string
   content: string
-  author: { _id: string; name: string }
-  status?: 'pending' | 'approved' | 'rejected'
+  author?: { _id: string; name: string }
+  moderationStatus?: 'clean' | 'flagged' | 'hidden' | 'removed'
   createdAt: string
 }
 
-type DashboardTask = {
+type DashboardTask = TaskInput & {
   _id: string
-  title: string
-  description?: string
-  assignedTo?: Array<string | { _id: string; name: string; email?: string }>
-  status: 'pending' | 'in-progress' | 'completed' | 'cancelled' | 'completion-requested' | 'rejected'
-  priority?: 'low' | 'medium' | 'high' | 'urgent'
-  startDate?: string
-  dueDate?: string
-  completedAt?: string
+  completedDate?: string
   updatedAt?: string
   completionRequestedBy?: { _id: string; name: string }
   completionRequestedAt?: string
-}
-
-type AttendanceRecord = {
-  _id: string
-  user: { _id: string; name: string }
-  date: string
-  checkIn?: string
-  checkOut?: string
-  totalHours?: number
-  status: 'requested' | 'approved' | 'rejected'
 }
 
 type DashboardUser = {
@@ -49,7 +35,7 @@ type DashboardUser = {
 }
 
 export default function AdminDashboard() {
-  const navigate = useNavigate()
+  const { notify, confirm, prompt } = useFeedback()
   const { isAdmin, isAuthenticated, user } = useAuth()
 
   const [tasks, setTasks] = useState<DashboardTask[]>([])
@@ -61,20 +47,13 @@ export default function AdminDashboard() {
   const [processedAttendance, setProcessedAttendance] = useState<Record<string, boolean>>({})
   const [processedTasks, setProcessedTasks] = useState<Record<string, boolean>>({})
   const [showTaskModal, setShowTaskModal] = useState(false)
+  const [editingTask, setEditingTask] = useState<DashboardTask | null>(null)
   const [activeTab, setActiveTab] = useState<'overview' | 'tasks' | 'attendance' | 'users' | 'moderation'>('overview')
   const [moderationPosts, setModerationPosts] = useState<ModerationPost[]>([])
   const [showRejectModal, setShowRejectModal] = useState(false)
   const [rejectionReason, setRejectionReason] = useState('')
   const [rejectingTaskId, setRejectingTaskId] = useState<string | null>(null)
   const [isRejectSubmitting, setIsRejectSubmitting] = useState(false)
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      navigate('/login')
-    } else if (!isAdmin) {
-      navigate('/')
-    }
-  }, [isAuthenticated, isAdmin, navigate])
 
   const fetchAllData = useCallback(async () => {
     setIsLoading(true)
@@ -84,16 +63,16 @@ export default function AdminDashboard() {
         taskAPI.getPendingApprovalTasks(),
         attendanceAPI.getAttendance(),
         userAPI.getUsers(),
-        socialV2API.getModerationPosts?.('pending').catch(() => []),
+        socialV2API.getModerationPosts('flagged').catch(() => ({ data: [] })),
       ])
       setTasks(Array.isArray(taskRes?.data) ? taskRes.data : [])
       setPendingApprovalTasks(Array.isArray(pendingTaskRes?.data) ? pendingTaskRes.data : [])
       const allAttendance = Array.isArray(attendanceRes?.data) ? attendanceRes.data : []
       setAttendanceRecords(allAttendance)
-      const requested = allAttendance.filter((item: AttendanceRecord) => item.status === 'requested')
+      const requested = allAttendance.filter((item: AttendanceRecord) => item.approvalStatus === 'pending')
       setAttendanceRequests(requested)
       setUsers(Array.isArray(userRes?.data) ? userRes.data : [])
-      setModerationPosts(Array.isArray(moderationRes) ? moderationRes : [])
+      setModerationPosts(Array.isArray(moderationRes?.data) ? (moderationRes.data as ModerationPost[]) : [])
     } catch (error) {
       console.error('Failed to load dashboard data', error)
     } finally {
@@ -125,6 +104,7 @@ export default function AdminDashboard() {
       await fetchAllData()
     } catch (error) {
       console.error('Failed to approve task completion', error)
+      notify(getErrorMessage(error, 'Failed to approve task'), 'error')
     }
   }
 
@@ -152,19 +132,20 @@ export default function AdminDashboard() {
       await fetchAllData()
     } catch (error) {
       console.error('Failed to reject task completion', error)
-      alert('Failed to reject task')
+      notify(getErrorMessage(error, 'Failed to reject task'), 'error')
     } finally {
       setIsRejectSubmitting(false)
     }
   }
 
   const handleDeleteTask = async (taskId: string) => {
-    if (!confirm('Delete this task?')) return
+    if (!(await confirm({ title: 'Delete this task?', message: "It will be removed for everyone. This can't be undone.", confirmLabel: 'Delete', danger: true }))) return
     try {
       await taskAPI.deleteTask(taskId)
       setTasks((prev) => prev.filter((task) => task._id !== taskId))
     } catch (error) {
       console.error('Failed to delete task', error)
+      notify(getErrorMessage(error, 'Failed to delete task'), 'error')
     }
   }
 
@@ -173,32 +154,54 @@ export default function AdminDashboard() {
       if (decision === 'approved') {
         await attendanceAPI.approveAttendance(requestId)
       } else {
-        await attendanceAPI.disapproveAttendance(requestId)
+        await attendanceAPI.rejectAttendance(requestId)
       }
       setProcessedAttendance((prev) => ({ ...prev, [requestId]: true }))
       setAttendanceRequests((prev) => prev.filter((item) => item._id !== requestId))
     } catch (error) {
       console.error('Failed to update attendance request', error)
+      notify(getErrorMessage(error, 'Failed to update attendance request'), 'error')
     }
   }
 
   const handleToggleUser = async (targetUser: DashboardUser) => {
     try {
-      await userAPI.toggleUserActive(targetUser._id)
+      const response = await userAPI.toggleUserActive(targetUser._id)
       setUsers((prev) =>
-        prev.map((item) => (item._id === targetUser._id ? { ...item, isActive: !item.isActive } : item)),
+        prev.map((item) => (item._id === targetUser._id ? { ...item, isActive: response.data.isActive } : item)),
       )
     } catch (error) {
       console.error('Failed to toggle user status', error)
+      notify(getErrorMessage(error, 'Failed to change user status'), 'error')
+    }
+  }
+
+  // Users who forgot their password get a new one from an admin
+  const handleResetPassword = async (targetUser: DashboardUser) => {
+    const newPassword = await prompt({
+      title: `Reset password for ${targetUser.name}`,
+      message: 'They will be signed out everywhere and need this password to sign in again.',
+      label: 'New password (at least 6 characters)',
+      type: 'password',
+      minLength: 6,
+      confirmLabel: 'Reset password',
+    })
+    if (newPassword === null) return
+    try {
+      await userAPI.resetPassword(targetUser._id, newPassword)
+      notify(`Password reset. Share the new password with ${targetUser.name}; they have been signed out everywhere.`, 'success')
+    } catch (error) {
+      notify(getErrorMessage(error, 'Failed to reset password'), 'error')
     }
   }
 
   const handleModerationAction = async (postId: string, action: 'approve' | 'reject', reason?: string) => {
     try {
-      await socialV2API.moderatePost(postId, action, reason)
+      // Approving clears the flag; rejecting takes the post down
+      await socialV2API.moderatePost(postId, action === 'approve' ? 'unflag' : 'remove', reason)
       setModerationPosts((prev) => prev.filter((post) => post._id !== postId))
     } catch (error) {
-      console.error('Failed to moderate post', error)
+      notify(getErrorMessage(error, 'Failed to moderate post'), 'error')
     }
   }
 
@@ -218,13 +221,13 @@ export default function AdminDashboard() {
   // Tasks completed this week/month
   const tasksCompletedThisWeek = tasks.filter((task) => {
     if (task.status !== 'completed') return false
-    const completedDate = new Date(task.completedAt || task.updatedAt || '')
+    const completedDate = new Date(task.completedDate || task.updatedAt || '')
     return completedDate >= startOfWeek
   }).length
 
   const tasksCompletedThisMonth = tasks.filter((task) => {
     if (task.status !== 'completed') return false
-    const completedDate = new Date(task.completedAt || task.updatedAt || '')
+    const completedDate = new Date(task.completedDate || task.updatedAt || '')
     return completedDate >= startOfMonth
   }).length
 
@@ -238,19 +241,16 @@ export default function AdminDashboard() {
   })
 
   // Today's check-ins
-  const todayStr = today.toISOString().split('T')[0]
-  const todaysCheckIns = attendanceRecords.filter((record) => {
-    const recordDate = new Date(record.date).toISOString().split('T')[0]
-    return recordDate === todayStr && record.checkIn
-  })
+  const todayDay = todayKey()
+  const todaysCheckIns = attendanceRecords.filter((record) => record.day === todayDay && record.checkInTime)
 
-  // Average work hours
-  const approvedThisMonth = attendanceRecords.filter((record) => {
-    const recordDate = new Date(record.date)
-    return record.status === 'approved' && recordDate >= startOfMonth && record.totalHours
-  })
+  // Average work hours over this month's approved records
+  const thisMonth = todayDay.slice(0, 7)
+  const approvedThisMonth = attendanceRecords.filter((record) =>
+    record.approvalStatus === 'approved' && record.day?.startsWith(thisMonth) && record.workHours
+  )
   const avgWorkHours = approvedThisMonth.length > 0
-    ? (approvedThisMonth.reduce((sum, r) => sum + (r.totalHours || 0), 0) / approvedThisMonth.length).toFixed(1)
+    ? (approvedThisMonth.reduce((sum, r) => sum + (r.workHours || 0), 0) / approvedThisMonth.length).toFixed(1)
     : '—'
 
   // Active vs inactive users
@@ -264,14 +264,6 @@ export default function AdminDashboard() {
   // Greeting based on time
   const hour = new Date().getHours()
   const greeting = hour < 12 ? 'Good Morning' : hour < 17 ? 'Good Afternoon' : 'Good Evening'
-
-  if (!isAuthenticated || !isAdmin) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-50 text-sm text-neutral-600">
-        Checking access...
-      </div>
-    )
-  }
 
   if (isLoading) {
     return (
@@ -555,8 +547,8 @@ export default function AdminDashboard() {
                       <div className="flex-1 min-w-0">
                         <p className="font-medium text-neutral-900 truncate">{record.user.name}</p>
                         <p className="text-xs text-neutral-500">
-                          {record.checkIn ? new Date(record.checkIn).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
-                          {record.checkOut && ` - ${new Date(record.checkOut).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`}
+                          {record.checkInTime ? new Date(record.checkInTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
+                          {record.checkOutTime && ` - ${new Date(record.checkOutTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`}
                         </p>
                       </div>
                     </div>
@@ -724,6 +716,12 @@ export default function AdminDashboard() {
                             </>
                           )}
                           <button
+                            onClick={() => setEditingTask(task)}
+                            className="rounded border border-neutral-300 px-2 py-1 text-xs text-neutral-700 hover:bg-neutral-50"
+                          >
+                            Edit
+                          </button>
+                          <button
                             onClick={() => handleDeleteTask(task._id)}
                             className="rounded border border-red-500 px-2 py-1 text-xs text-red-600 hover:bg-red-50"
                           >
@@ -849,7 +847,7 @@ export default function AdminDashboard() {
                         <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
                           u.role === 'admin' ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'
                         }`}>
-                          {u.role || 'employee'}
+                          {u.role || 'user'}
                         </span>
                       </td>
                       <td className="px-3 py-2">
@@ -860,17 +858,26 @@ export default function AdminDashboard() {
                           {u.isActive ? 'Active' : 'Inactive'}
                         </span>
                       </td>
-                      <td className="px-3 py-2 text-right">
+                      <td className="px-3 py-2 text-right space-x-1">
                         <button
-                          onClick={() => handleToggleUser(u)}
-                          className={`rounded border px-3 py-1 text-xs font-medium ${
-                            u.isActive
-                              ? 'border-red-300 text-red-600 hover:bg-red-50'
-                              : 'border-emerald-300 text-emerald-600 hover:bg-emerald-50'
-                          }`}
+                          onClick={() => handleResetPassword(u)}
+                          className="rounded border border-neutral-300 px-3 py-1 text-xs font-medium text-neutral-700 hover:bg-neutral-50"
                         >
-                          {u.isActive ? 'Disable' : 'Enable'}
+                          Reset password
                         </button>
+                        {/* Admins can't disable their own account */}
+                        {u._id !== user?._id && (
+                          <button
+                            onClick={() => handleToggleUser(u)}
+                            className={`rounded border px-3 py-1 text-xs font-medium ${
+                              u.isActive
+                                ? 'border-red-300 text-red-600 hover:bg-red-50'
+                                : 'border-emerald-300 text-emerald-600 hover:bg-emerald-50'
+                            }`}
+                          >
+                            {u.isActive ? 'Disable' : 'Enable'}
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))
@@ -900,15 +907,15 @@ export default function AdminDashboard() {
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-2">
-                        <p className="font-medium text-neutral-900">{post.author.name}</p>
+                        <p className="font-medium text-neutral-900">{post.author?.name || 'Unknown'}</p>
                         <span className="text-xs text-neutral-500">
                           {new Date(post.createdAt).toLocaleDateString()}
                         </span>
                       </div>
                       <p className="text-sm text-neutral-700 break-words">{post.content}</p>
-                      {post.status && (
+                      {post.moderationStatus && (
                         <p className="text-xs mt-2 text-neutral-500">
-                          Status: <span className="font-medium">{post.status}</span>
+                          Status: <span className="font-medium">{post.moderationStatus}</span>
                         </p>
                       )}
                     </div>
@@ -984,11 +991,13 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {/* Task Creation Modal */}
+      {/* Task Create / Edit Modal */}
       <Tasksadd
-        isOpen={showTaskModal}
+        isOpen={showTaskModal || !!editingTask}
+        task={editingTask}
         onClose={() => {
           setShowTaskModal(false)
+          setEditingTask(null)
           fetchAllData()
         }}
       />

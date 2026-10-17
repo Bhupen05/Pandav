@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Link } from "react-router-dom";
 import { motion } from "motion/react";
 import { 
   CheckCircle2, 
@@ -36,12 +37,12 @@ const Hero = () => (
           Break the spreadsheet trap. Manage tasks, attendance, and team communication in a high-end architectural workspace designed for structural clarity.
         </p>
         <div className="flex flex-wrap gap-4">
-          <button className="bg-primary-gradient text-white px-8 py-4 rounded-xl font-bold text-lg shadow-xl shadow-primary/20 active:scale-95 transition-all">
+          <Link to="/register" className="bg-primary-gradient text-white px-8 py-4 rounded-xl font-bold text-lg shadow-xl shadow-primary/20 active:scale-95 transition-all">
             Get Started for Free
-          </button>
-          <button className="bg-surface-container-highest text-slate-900 px-8 py-4 rounded-xl font-bold text-lg hover:bg-slate-200 transition-colors active:scale-95">
+          </Link>
+          <Link to="/contact" className="bg-surface-container-highest text-slate-900 px-8 py-4 rounded-xl font-bold text-lg hover:bg-slate-200 transition-colors active:scale-95">
             Request a Demo
-          </button>
+          </Link>
         </div>
       </motion.div>
       
@@ -238,27 +239,11 @@ const CTA = () => (
             </div>
           </div>
         </div>
-        <form className="space-y-4" onSubmit={(e) => e.preventDefault()}>
-          <div className="space-y-2">
-            <label className="text-xs font-bold uppercase tracking-widest text-slate-500 px-1">Full Name</label>
-            <input 
-              className="w-full bg-slate-100 border-none rounded-xl focus:ring-2 focus:ring-primary/20 py-3 px-4 outline-none" 
-              placeholder="Alex Carter" 
-              type="text"
-            />
-          </div>
-          <div className="space-y-2">
-            <label className="text-xs font-bold uppercase tracking-widest text-slate-500 px-1">Work Email</label>
-            <input 
-              className="w-full bg-slate-100 border-none rounded-xl focus:ring-2 focus:ring-primary/20 py-3 px-4 outline-none" 
-              placeholder="alex@company.com" 
-              type="email"
-            />
-          </div>
-          <button className="w-full bg-primary-gradient text-white py-4 rounded-xl font-bold shadow-lg shadow-primary/20 hover:opacity-90 transition-opacity mt-4 flex items-center justify-center gap-2">
+        <div className="flex md:justify-end">
+          <Link to="/contact" className="w-full bg-primary-gradient text-white py-4 rounded-xl font-bold shadow-lg shadow-primary/20 hover:opacity-90 transition-opacity flex items-center justify-center gap-2">
             Request a Demo <ArrowRight className="w-5 h-5" />
-          </button>
-        </form>
+          </Link>
+        </div>
       </div>
     </div>
   </section>

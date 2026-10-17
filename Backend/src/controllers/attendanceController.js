@@ -1,60 +1,62 @@
 import Attendance from '../models/Attendance.js';
-import Team from '../models/Team.js';
 import User from '../models/User.js';
+import { listResponse, pick, sendServerError } from '../utils/http.js';
+import { toDayKey } from '../utils/dates.js';
+import { canReviewFor, ledUserIds } from '../utils/teams.js';
+
+// Fields an admin (or the user's team leader) may set on a record. Regular
+// users can only submit a request (date, kind of day, remarks) that a
+// reviewer then approves or rejects.
+const ADMIN_EDITABLE_FIELDS = ['date', 'status', 'approvalStatus', 'checkInTime', 'checkOutTime', 'remarks'];
+
+const DUPLICATE_DAY_MESSAGE = 'Attendance already recorded for this user on that day';
+
+const withUser = (query) =>
+  query
+    .populate('user', 'name email department profileImage')
+    .populate('team', 'name');
+
+// Team a new record belongs to, so team leaders can find it
+const teamOf = async (userId) => (await User.findById(userId).select('teamId'))?.teamId || null;
 
 // @desc    Get all attendance records
 // @route   GET /api/attendance
 // @access  Private
 export const getAttendance = async (req, res) => {
   try {
-    const { user, status, startDate, endDate } = req.query;
+    const { user, status, approvalStatus, startDate, endDate } = req.query;
     const filter = {};
 
     if (user) filter.user = user;
     if (status) filter.status = status;
-    
+    if (approvalStatus) filter.approvalStatus = approvalStatus;
+
+    // Both ends inclusive, compared as calendar days
     if (startDate || endDate) {
-      filter.date = {};
-      if (startDate) filter.date.$gte = new Date(startDate);
-      if (endDate) filter.date.$lte = new Date(endDate);
+      filter.day = {};
+      if (startDate) filter.day.$gte = toDayKey(startDate);
+      if (endDate) filter.day.$lte = toDayKey(endDate);
     }
 
-    // Scope attendance based on role
+    // Admins see everyone, team leaders their teams, everyone else themselves
     if (req.user.role === 'team_leader') {
-      const team = await Team.findOne({ leaders: req.user.id });
-      if (team) {
-        filter.team = team._id;
-      } else {
-        // If not a leader of any team, show only their own
+      const led = await ledUserIds(req.user.id);
+      if (led.length === 0) {
         filter.user = req.user.id;
-      }
-    } else if (req.user.role === 'team_member') {
-      const user = await User.findById(req.user.id);
-      if (user && user.teamId) {
-        filter.team = user.teamId;
       } else {
-        filter.user = req.user.id;
+        filter.user = { $in: user ? led.filter((id) => id === user) : led };
       }
     } else if (req.user.role !== 'admin') {
       filter.user = req.user.id;
     }
 
-    const attendance = await Attendance.find(filter)
-      .populate('user', 'name email department profileImage')
-      .populate('team', 'name')
+    const query = withUser(Attendance.find(filter))
       .populate('approvedBy', 'name email')
       .sort('-date');
 
-    res.json({
-      success: true,
-      count: attendance.length,
-      data: attendance,
-    });
+    res.json(await listResponse(Attendance, filter, query, req.query));
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -63,22 +65,22 @@ export const getAttendance = async (req, res) => {
 // @access  Private
 export const getAttendanceById = async (req, res) => {
   try {
-    const attendance = await Attendance.findById(req.params.id)
-      .populate('user', 'name email department profileImage')
+    const attendance = await withUser(Attendance.findById(req.params.id))
       .populate('approvedBy', 'name email');
 
     if (!attendance) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Attendance record not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Attendance record not found'
       });
     }
 
-    // Check if user has access
-    if (req.user.role !== 'admin' && attendance.user._id.toString() !== req.user.id) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Not authorized to access this record' 
+    // The user themselves, an admin, or their team leader
+    const isOwn = attendance.user?._id.toString() === req.user.id;
+    if (!isOwn && !(await canReviewFor(req.user, [attendance.user]))) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to access this record'
       });
     }
 
@@ -87,10 +89,7 @@ export const getAttendanceById = async (req, res) => {
       data: attendance,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -99,57 +98,50 @@ export const getAttendanceById = async (req, res) => {
 // @access  Private
 export const createAttendance = async (req, res) => {
   try {
-    // Set user from logged in user if not admin
-    if (req.user.role !== 'admin') {
-      req.body.user = req.user.id
-    }
+    const isAdmin = req.user.role === 'admin'
+    const data = isAdmin
+      ? { approvalStatus: 'approved', ...pick(req.body, ['user', ...ADMIN_EDITABLE_FIELDS]), approvedBy: req.user.id }
+      : { ...pick(req.body, ['date', 'status', 'remarks']), user: req.user.id, approvalStatus: 'pending' }
 
-    // Set team if user belongs to a team
-    if (!req.body.team) {
-      const user = await User.findById(req.body.user);
-      if (user && user.teamId) {
-        req.body.team = user.teamId;
-      }
-    }
-
-    // Check if record already exists for today
-    const today = new Date().toISOString().split('T')[0]
-    const existingRecord = await Attendance.findOne({
-      user: req.body.user,
-      date: { 
-        $gte: new Date(today), 
-        $lt: new Date(new Date(today).getTime() + 24 * 60 * 60 * 1000) 
-      }
-    })
-
-    if (existingRecord) {
+    // Without this the duplicate check below would match any user's record
+    if (!data.user) {
       return res.status(400).json({
         success: false,
-        message: 'Attendance already recorded for this user today'
+        message: 'Please choose which user this record is for'
       })
     }
 
-    // If status is provided, use it. Otherwise default to 'present'
-    // This allows users to request with status 'requested'
-    if (!req.body.status) {
-      req.body.status = 'requested'
+    data.date = data.date || new Date()
+    data.day = toDayKey(data.date)
+    if (!data.day) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid date'
+      })
     }
 
-    const attendance = await Attendance.create(req.body)
+    if (await Attendance.exists({ user: data.user, day: data.day })) {
+      return res.status(400).json({
+        success: false,
+        message: DUPLICATE_DAY_MESSAGE
+      })
+    }
 
-    const populatedAttendance = await Attendance.findById(attendance._id)
-      .populate('user', 'name email profileImage')
-      .populate('team', 'name')
+    data.team = await teamOf(data.user)
+
+    const attendance = await Attendance.create(data)
+    const populatedAttendance = await withUser(Attendance.findById(attendance._id))
 
     res.status(201).json({
       success: true,
       data: populatedAttendance
     })
   } catch (error) {
+    // Two requests for the same day can both pass the check above
     if (error.code === 11000) {
       return res.status(400).json({
         success: false,
-        message: 'Attendance already recorded for this user today'
+        message: DUPLICATE_DAY_MESSAGE
       })
     }
     res.status(400).json({
@@ -164,75 +156,69 @@ export const createAttendance = async (req, res) => {
 // @access  Private
 export const updateAttendance = async (req, res) => {
   try {
-    let attendance = await Attendance.findById(req.params.id);
+    const attendance = await Attendance.findById(req.params.id);
 
     if (!attendance) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Attendance record not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Attendance record not found'
       });
     }
 
-    // Only admin, the user themselves, or their team leader can update
-    if (req.user.role !== 'admin' && attendance.user.toString() !== req.user.id) {
-      if (req.user.role === 'team_leader') {
-        const team = await Team.findOne({ leaders: req.user.id });
-        const isTeamMember = team &&
-          (team.members.some(m => m.toString() === attendance.user.toString()) ||
-           team.leaders.some(l => l.toString() === attendance.user.toString()));
-        if (!isTeamMember) {
-          return res.status(403).json({ success: false, message: 'Not authorized to update this record' });
+    // Admins and the user's team leader can edit the record; the user
+    // themselves only the remarks on a request that hasn't been reviewed
+    const isOwn = attendance.user.toString() === req.user.id;
+    const isReviewer = await canReviewFor(req.user, [attendance.user]);
+
+    if (!isOwn && !isReviewer) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to update this record'
+      });
+    }
+
+    if (isReviewer) {
+      const updates = pick(req.body, ADMIN_EDITABLE_FIELDS);
+      if (updates.date !== undefined) {
+        updates.day = toDayKey(updates.date);
+        if (!updates.day) {
+          return res.status(400).json({
+            success: false,
+            message: 'Please provide a valid date'
+          });
         }
-      } else {
-        return res.status(403).json({ 
-          success: false, 
-          message: 'Not authorized to update this record' 
+      }
+      attendance.set({ ...updates, approvedBy: req.user.id });
+    } else {
+      if (attendance.approvalStatus !== 'pending') {
+        return res.status(403).json({
+          success: false,
+          message: 'This record has already been reviewed and can no longer be edited'
         });
       }
+      attendance.set(pick(req.body, ['remarks']));
     }
 
-    // Restrict what regular users can update
-    if (req.user.role !== 'admin' && req.user.role !== 'team_leader') {
-      // Regular users can only update status and remarks, not dates/times
-      const allowedUpdates = ['status', 'remarks'];
-      const updateData = {};
-      
-      Object.keys(req.body).forEach(key => {
-        if (allowedUpdates.includes(key)) {
-          updateData[key] = req.body[key];
-        }
-      });
-      
-      req.body = updateData;
-    }
+    // save() rather than findByIdAndUpdate so `day` and `workHours` are recalculated
+    await attendance.save();
 
-    // If admin or team_leader is updating, set approvedBy
-    if (req.user.role === 'admin' || req.user.role === 'team_leader') {
-      req.body.approvedBy = req.user.id;
-    }
-
-    console.log('Updating attendance with:', req.body); // Debug log
-
-    attendance = await Attendance.findByIdAndUpdate(
-      req.params.id, 
-      req.body, 
-      {
-        new: true,
-        runValidators: true,
-      }
-    )
-      .populate('user', 'name email department profileImage')
+    const populatedAttendance = await withUser(Attendance.findById(attendance._id))
       .populate('approvedBy', 'name email');
 
     res.json({
       success: true,
-      data: attendance,
+      data: populatedAttendance,
     });
   } catch (error) {
-    console.error('Update attendance error:', error); // Debug log
-    res.status(400).json({ 
-      success: false, 
-      message: error.message 
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: DUPLICATE_DAY_MESSAGE
+      });
+    }
+    res.status(400).json({
+      success: false,
+      message: error.message
     });
   }
 };
@@ -245,9 +231,9 @@ export const deleteAttendance = async (req, res) => {
     const attendance = await Attendance.findById(req.params.id);
 
     if (!attendance) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Attendance record not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Attendance record not found'
       });
     }
 
@@ -258,10 +244,7 @@ export const deleteAttendance = async (req, res) => {
       message: 'Attendance record deleted successfully',
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -270,40 +253,44 @@ export const deleteAttendance = async (req, res) => {
 // @access  Private
 export const checkIn = async (req, res) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const day = toDayKey();
 
     // Check if already checked in today
-    const existingAttendance = await Attendance.findOne({
-      user: req.user.id,
-      date: { $gte: today },
-    });
-
-    if (existingAttendance) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Already checked in today' 
+    if (await Attendance.exists({ user: req.user.id, day })) {
+      return res.status(400).json({
+        success: false,
+        message: 'Already checked in today'
       });
     }
 
+    const now = new Date();
     const attendance = await Attendance.create({
       user: req.user.id,
-      date: new Date(),
-      checkInTime: new Date(),
-      status: 'requested',
+      team: req.user.teamId || null,
+      date: now,
+      day,
+      checkInTime: now,
+      status: 'present',
+      approvalStatus: 'pending',
     });
 
-    const populatedAttendance = await Attendance.findById(attendance._id)
-      .populate('user', 'name email department profileImage');
+    const populatedAttendance = await withUser(Attendance.findById(attendance._id));
 
     res.status(201).json({
       success: true,
       data: populatedAttendance,
     });
   } catch (error) {
-    res.status(400).json({ 
-      success: false, 
-      message: error.message 
+    // A double-click can send two check-ins at once; the unique index rejects the second
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'Already checked in today'
+      });
+    }
+    res.status(400).json({
+      success: false,
+      message: error.message
     });
   }
 };
@@ -313,140 +300,88 @@ export const checkIn = async (req, res) => {
 // @access  Private
 export const checkOut = async (req, res) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
     const attendance = await Attendance.findOne({
       user: req.user.id,
-      date: { $gte: today },
+      day: toDayKey(),
     });
 
-    if (!attendance) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'No check-in record found for today' 
+    if (!attendance || !attendance.checkInTime) {
+      return res.status(404).json({
+        success: false,
+        message: 'No check-in record found for today'
       });
     }
 
     if (attendance.checkOutTime) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Already checked out today' 
+      return res.status(400).json({
+        success: false,
+        message: 'Already checked out today'
       });
     }
 
     attendance.checkOutTime = new Date();
     await attendance.save();
 
-    const populatedAttendance = await Attendance.findById(attendance._id)
-      .populate('user', 'name email department profileImage');
+    const populatedAttendance = await withUser(Attendance.findById(attendance._id));
 
     res.json({
       success: true,
       data: populatedAttendance,
     });
   } catch (error) {
-    res.status(400).json({ 
-      success: false, 
-      message: error.message 
+    res.status(400).json({
+      success: false,
+      message: error.message
     });
+  }
+};
+
+// Sets the review outcome of a record and returns the updated record
+const review = async (req, res, approvalStatus, message) => {
+  try {
+    const attendance = await Attendance.findById(req.params.id);
+
+    if (!attendance) {
+      return res.status(404).json({
+        success: false,
+        message: 'Attendance record not found'
+      });
+    }
+
+    if (!(await canReviewFor(req.user, [attendance.user]))) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to review this record'
+      });
+    }
+
+    attendance.approvalStatus = approvalStatus;
+    attendance.approvedBy = req.user.id;
+    if (req.body.remarks) attendance.remarks = req.body.remarks;
+
+    await attendance.save();
+
+    const populatedAttendance = await withUser(Attendance.findById(attendance._id))
+      .populate('approvedBy', 'name email');
+
+    res.json({
+      success: true,
+      message,
+      data: populatedAttendance,
+    });
+  } catch (error) {
+    sendServerError(res, error);
   }
 };
 
 // @desc    Approve attendance record
 // @route   PUT /api/attendance/:id/approve
-// @access  Private (Admin only)
-export const approveAttendance = async (req, res) => {
-  try {
-    const attendance = await Attendance.findById(req.params.id);
+// @access  Private (Admin or the user's team leader)
+export const approveAttendance = (req, res) =>
+  review(req, res, 'approved', 'Attendance approved successfully');
 
-    if (!attendance) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Attendance record not found' 
-      });
-    }
-
-    // Update attendance with approval
-    attendance.approvedBy = req.user.id;
-    attendance.remarks = req.body.remarks || attendance.remarks;
-    
-    await attendance.save();
-
-    const populatedAttendance = await Attendance.findById(attendance._id)
-      .populate('user', 'name email department profileImage')
-      .populate('approvedBy', 'name email');
-
-    res.json({
-      success: true,
-      message: 'Attendance approved successfully',
-      data: populatedAttendance,
-    });
-  } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
-  }
-};
-
-// @desc    Disapprove attendance record
+// @desc    Reject attendance record
 // @route   PUT /api/attendance/:id/disapprove
-// @access  Private (Admin only)
-export const disapproveAttendance = async (req, res) => {
-  try {
-    const attendance = await Attendance.findById(req.params.id);
-
-    if (!attendance) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Attendance record not found' 
-      });
-    }
-
-    // Update attendance with disapproval
-    attendance.status = 'absent'; // or keep original status
-    attendance.approvedBy = null; // Remove approval
-    attendance.remarks = req.body.remarks || 'Disapproved by admin';
-    
-    await attendance.save();
-
-    const populatedAttendance = await Attendance.findById(attendance._id)
-      .populate('user', 'name email department profileImage');
-
-    res.json({
-      success: true,
-      message: 'Attendance disapproved successfully',
-      data: populatedAttendance,
-    });
-  } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
-  }
-};
-
-// @desc    Get pending attendance records (for admin approval)
-// @route   GET /api/attendance/pending
-// @access  Private (Admin only)
-export const getPendingAttendance = async (req, res) => {
-  try {
-    const pendingAttendance = await Attendance.find({
-      approvedBy: { $exists: false }
-    })
-      .populate('user', 'name email department profileImage')
-      .sort('-date');
-
-    res.json({
-      success: true,
-      count: pendingAttendance.length,
-      data: pendingAttendance,
-    });
-  } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
-  }
-};
+// @access  Private (Admin or the user's team leader)
+export const disapproveAttendance = (req, res) =>
+  review(req, res, 'rejected', 'Attendance rejected');

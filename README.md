@@ -180,17 +180,39 @@ npm run preview
 | `JWT_SECRET` | Secret key for JWT signing | `your_secret_key` |
 | `JWT_EXPIRE` | JWT token expiration | `7d` |
 | `NODE_ENV` | Environment mode | `development` or `production` |
+| `CLIENT_URL` | Deployed frontend origin(s) allowed by CORS, comma-separated (required in production) | `https://your-app.vercel.app` |
+| `APP_TIMEZONE` | Timezone that decides an attendance record's day | `Asia/Kolkata` |
 
-### Frontend
-Update the API base URL in `Frontend/src/api/axios.ts`:
-```typescript
-const api = axios.create({
-  baseURL: 'http://localhost:5000/api',
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
+### Frontend (`Frontend/.env`, or the host's environment settings)
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `VITE_API_URL` | Backend API URL, including the version prefix (`/api/v2` serves every module, including the Social Hub) | `http://localhost:5000/api/v2` |
+| `VITE_CONTACT_EMAIL` | Email shown on the Contact page (hidden if unset) | `support@example.com` |
+| `VITE_CONTACT_PHONE` | Phone number shown on the Contact page (hidden if unset) | `+91 98765 43210` |
+| `VITE_CONTACT_WHATSAPP` | WhatsApp number shown on the Contact page (hidden if unset) | `+91 98765 43210` |
+
+## 🧪 Tests and CI
+
+The backend has end-to-end tests in `Backend/test/`. Each suite starts the real server on its own
+throwaway database (`pandav_test_<suite>`, dropped before every run) and exercises the API the way
+the app uses it: security, everyday workflows, data integrity, and the migration script.
+
+They need Node.js 22 or newer and a running MongoDB server:
+
+```bash
+cd Backend
+npm test                                              # MongoDB on 127.0.0.1:27017
+TEST_MONGODB_URL=mongodb://127.0.0.1:27999 npm test   # any other server
 ```
+
+On Windows PowerShell, set the variable with `$env:TEST_MONGODB_URL = "mongodb://..."` first.
+The tests never read `Backend/.env`, so they can't touch your development or production database.
+
+GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push and pull request:
+- **Backend:** the test suites against a MongoDB 7 service, then `npm audit` of production dependencies
+- **Frontend:** `npm run lint`, then `npm run build` (type-check and bundle), then `npm audit` of production dependencies
+
+The audit steps fail on high or critical advisories.
 
 ## 📡 API Endpoints
 
@@ -220,6 +242,9 @@ const api = axios.create({
 - `PUT /api/attendance/:id` - Update attendance
 - `DELETE /api/attendance/:id` - Delete attendance (admin only)
 
+### Health
+- `GET /api/health` - `200` when the server and database are up, `503` while the database is unreachable
+
 ### Contact
 - `GET /api/contact` - Get all messages (admin only)
 - `POST /api/contact` - Submit contact form
@@ -248,27 +273,35 @@ router.delete('/tasks/:id', protect, authorize('admin'), deleteTask);  // Admin 
 
 ## 👤 Default Users
 
-After setting up the database, you can create users:
+After setting up the database, run `node create-users.js` in `Backend/`. It creates an
+admin (`admin@example.com`) and a regular user (`user@example.com`) and prints a random
+password for each, once. Set `SEED_ADMIN_PASSWORD` / `SEED_USER_PASSWORD` in `Backend/.env`
+to choose them yourself.
 
-### Admin User
-```json
-{
-  "name": "Admin User",
-  "email": "admin@pandav.com",
-  "password": "admin123",
-  "role": "admin"
-}
+Self-registration (`POST /api/auth/register`) always creates a regular user; the `role`
+field is ignored. An admin can promote a user with `PUT /api/users/:id` and `{ "role": "admin" }`.
+
+## ⬆️ Upgrading an Existing Database
+
+After deploying a version that changes the data models, run the migration once against the
+production database (it is safe to run again):
+
+```bash
+cd Backend
+npm run migrate
 ```
 
-### Regular User
-```json
-{
-  "name": "John Doe",
-  "email": "john@example.com",
-  "password": "password123",
-  "role": "user"
-}
-```
+It fills in new fields on existing records (attendance `day` and `approvalStatus`, per-assignee
+task progress), replaces outdated indexes, and lists anything that needs a decision:
+
+- **Duplicate attendance days**: a user with two records on one day. Delete all but one, then
+  run the migration again so the one-record-per-day rule can be enforced by the database.
+- **Data of deleted users**: run `npm run migrate -- --clean-orphans` to remove it.
+- **Oversized profile images**: run `npm run migrate -- --drop-oversized-images` to clear them;
+  those users can upload a new picture (the app now resizes uploads).
+
+Attendance days follow `APP_TIMEZONE` (default `Asia/Kolkata`); set it in `Backend/.env` if
+your team works in a different timezone.
 
 ## 🎨 Key Features Implementation
 
@@ -331,7 +364,7 @@ kill -9 <PID>
 **Axios Network Error**
 - Ensure backend is running on correct port
 - Check CORS settings in backend
-- Verify API base URL in `axios.ts`
+- Verify `VITE_API_URL` in `Frontend/.env`
 
 **Task/Attendance Not Displaying**
 - Check browser console for errors

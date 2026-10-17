@@ -1,4 +1,5 @@
 import type { TaskInput } from './Tasksadd'
+import { canRequestCompletion, canStart, isWaitingForTeammates, progressOf } from '../utils/taskProgress'
 
 interface ExtendedTask extends TaskInput {
   rejectionReason?: string
@@ -12,7 +13,15 @@ type Props = {
   onDelete?: (index: number) => void
   onStatusChange?: (index: number, next: TaskInput['status']) => void
   isAdmin?: boolean
+  // Decides which actions the viewer gets on their own part of a task
+  currentUserId?: string
 }
+
+const assigneeName = (assignee: TaskInput['assignedTo'][number]) =>
+  typeof assignee === 'string' ? 'Unknown' : assignee.name || 'Unknown'
+
+const assigneeId = (assignee: TaskInput['assignedTo'][number]) =>
+  typeof assignee === 'string' ? assignee : assignee._id
 
 function formatDate(date?: string) {
   if (!date) return null
@@ -84,7 +93,7 @@ function statusIcon(status: TaskInput['status']) {
   }
 }
 
-export default function Taskscard({ tasks, onStatusChange, isAdmin = false }: Props) {
+export default function Taskscard({ tasks, onStatusChange, onEdit, onDelete, isAdmin = false, currentUserId }: Props) {
   if (!tasks || tasks.length === 0) {
     return (
       <div className="mx-auto max-w-4xl rounded-xl border bg-white p-12 text-center shadow-sm">
@@ -110,7 +119,7 @@ export default function Taskscard({ tasks, onStatusChange, isAdmin = false }: Pr
 
         return (
           <article
-            key={idx}
+            key={task._id ?? idx}
             className={`group rounded-xl border bg-white p-5 shadow-sm transition-all hover:shadow-md ${
               isRejected ? 'border-red-200 bg-red-50' : ''
             }`}
@@ -179,6 +188,24 @@ export default function Taskscard({ tasks, onStatusChange, isAdmin = false }: Pr
                   Overdue
                 </div>
               )}
+              {task.assignedTo.length > 1 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {task.assignedTo.map((assignee) => {
+                    const done = ['completion-requested', 'completed'].includes(progressOf(task, assigneeId(assignee)))
+                    return (
+                      <span
+                        key={assigneeId(assignee)}
+                        className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs ${
+                          done ? 'bg-emerald-50 text-emerald-700' : 'bg-neutral-100 text-neutral-600'
+                        }`}
+                        title={done ? 'Finished their part' : 'Still working'}
+                      >
+                        {done ? '✓' : '…'} {assigneeName(assignee)}
+                      </span>
+                    )
+                  })}
+                </div>
+              )}
               {task.tags && task.tags.length > 0 && (
                 <div className="flex flex-wrap items-center gap-1.5">
                   {task.tags.map((t, i) => (
@@ -195,7 +222,7 @@ export default function Taskscard({ tasks, onStatusChange, isAdmin = false }: Pr
               {onStatusChange && (
                 <>
                   {/* User actions */}
-                  {!isAdmin && task.status === 'pending' && (
+                  {!isAdmin && canStart(task, currentUserId) && (
                     <button
                       className="flex-1 rounded-lg px-3 py-2 text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 transition-colors"
                       onClick={() => onStatusChange(idx, 'in-progress')}
@@ -203,21 +230,20 @@ export default function Taskscard({ tasks, onStatusChange, isAdmin = false }: Pr
                       ▶️ Start Task
                     </button>
                   )}
-                  {!isAdmin && task.status === 'in-progress' && !isRejected && (
+                  {!isAdmin && !canStart(task, currentUserId) && canRequestCompletion(task, currentUserId) && (
                     <button
-                      className="flex-1 rounded-lg px-3 py-2 text-xs font-semibold bg-purple-600 text-white hover:bg-purple-700 transition-colors"
+                      className={`flex-1 rounded-lg px-3 py-2 text-xs font-semibold text-white transition-colors ${
+                        isRejected ? 'bg-orange-600 hover:bg-orange-700' : 'bg-purple-600 hover:bg-purple-700'
+                      }`}
                       onClick={() => onStatusChange(idx, 'completion-requested')}
                     >
-                      🔔 Request Completion
+                      {isRejected ? '🔄 Request Again' : '🔔 Request Completion'}
                     </button>
                   )}
-                  {!isAdmin && task.status === 'in-progress' && isRejected && (
-                    <button
-                      className="flex-1 rounded-lg px-3 py-2 text-xs font-semibold bg-orange-600 text-white hover:bg-orange-700 transition-colors"
-                      onClick={() => onStatusChange(idx, 'completion-requested')}
-                    >
-                      🔄 Request Again
-                    </button>
+                  {!isAdmin && isWaitingForTeammates(task, currentUserId) && (
+                    <span className="flex-1 text-center text-xs text-purple-600 font-medium py-2">
+                      ✓ Your part is done. Waiting for teammates
+                    </span>
                   )}
                   {!isAdmin && task.status === 'completion-requested' && (
                     <span className="flex-1 text-center text-xs text-purple-600 font-medium py-2">
@@ -253,6 +279,22 @@ export default function Taskscard({ tasks, onStatusChange, isAdmin = false }: Pr
                     </>
                   )}
                 </>
+              )}
+              {isAdmin && onEdit && (
+                <button
+                  className="rounded-lg border border-neutral-300 px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-neutral-50 transition-colors"
+                  onClick={() => onEdit(idx)}
+                >
+                  Edit
+                </button>
+              )}
+              {isAdmin && onDelete && (
+                <button
+                  className="rounded-lg border border-red-300 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50 transition-colors"
+                  onClick={() => onDelete(idx)}
+                >
+                  Delete
+                </button>
               )}
             </div>
           </article>

@@ -3,6 +3,23 @@ import TeamInvite from '../models/TeamInvite.js';
 import User from '../models/User.js';
 import Task from '../models/Task.js';
 import Attendance from '../models/Attendance.js';
+import { escapeRegex, pick, sendServerError } from '../utils/http.js';
+import { toDayKey } from '../utils/dates.js';
+import { canReviewFor, teamUserIds } from '../utils/teams.js';
+
+// Fields a leader may set when creating a team task; progress and approval
+// go through the task workflow
+const TEAM_TASK_FIELDS = [
+  'title',
+  'description',
+  'assignedTo',
+  'priority',
+  'startDate',
+  'dueDate',
+  'estimatedDays',
+  'tags',
+  'notes',
+];
 
 // ─── Team CRUD ────────────────────────────────────────────────────────────────
 
@@ -58,7 +75,7 @@ export const createTeam = async (req, res) => {
     if (error.code === 11000) {
       return res.status(400).json({ success: false, message: 'A team with this name already exists' });
     }
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -75,7 +92,7 @@ export const getTeams = async (req, res) => {
 
     res.json({ success: true, count: teams.length, data: teams });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -100,7 +117,7 @@ export const getMyTeam = async (req, res) => {
 
     res.json({ success: true, data: team });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -129,7 +146,7 @@ export const getTeam = async (req, res) => {
 
     res.json({ success: true, data: team });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -156,7 +173,7 @@ export const updateTeam = async (req, res) => {
 
     res.json({ success: true, data: populated });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -189,7 +206,7 @@ export const deleteTeam = async (req, res) => {
 
     res.json({ success: true, message: 'Team deleted successfully' });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -208,7 +225,7 @@ export const inviteMember = async (req, res) => {
 
     // If username provided instead of userId, look up the user
     if (!userId && username) {
-      const userByName = await User.findOne({ name: { $regex: username, $options: 'i' } });
+      const userByName = await User.findOne({ name: { $regex: `^${escapeRegex(String(username).trim())}$`, $options: 'i' } });
       if (!userByName) {
         return res.status(404).json({ success: false, message: `User "${username}" not found` });
       }
@@ -249,7 +266,7 @@ export const inviteMember = async (req, res) => {
 
     res.status(201).json({ success: true, data: populated });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -293,7 +310,7 @@ export const acceptInvite = async (req, res) => {
 
     res.json({ success: true, message: 'Invite accepted. You are now part of the team.' });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -319,7 +336,7 @@ export const declineInvite = async (req, res) => {
 
     res.json({ success: true, message: 'Invite declined' });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -335,7 +352,7 @@ export const getMyInvites = async (req, res) => {
 
     res.json({ success: true, count: invites.length, data: invites });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -378,7 +395,7 @@ export const removeMember = async (req, res) => {
 
     res.json({ success: true, data: populated });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -411,7 +428,7 @@ export const addLeader = async (req, res) => {
 
     res.json({ success: true, data: populated });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -445,7 +462,7 @@ export const getTeamTasks = async (req, res) => {
 
     res.json({ success: true, count: tasks.length, data: tasks });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -479,7 +496,7 @@ export const createTeamTask = async (req, res) => {
     }
 
     const task = await Task.create({
-      ...req.body,
+      ...pick(req.body, TEAM_TASK_FIELDS),
       createdBy: req.user.id,
       team: teamId,
     });
@@ -512,7 +529,10 @@ export const getTeamPendingApprovalTasks = async (req, res) => {
       }
     }
 
-    const tasks = await Task.find({ team: teamId, status: 'completion-requested' })
+    const filter = { team: teamId, status: 'completion-requested' };
+    if (req.user.role !== 'admin') filter.assignedTo = { $ne: req.user._id };
+
+    const tasks = await Task.find(filter)
       .populate('assignedTo', 'name email profileImage')
       .populate('createdBy', 'name email')
       .populate('completionRequestedBy', 'name email')
@@ -520,7 +540,7 @@ export const getTeamPendingApprovalTasks = async (req, res) => {
 
     res.json({ success: true, count: tasks.length, data: tasks });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -544,14 +564,15 @@ export const approveTeamTask = async (req, res) => {
     const task = await Task.findOne({ _id: taskId, team: teamId });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found in this team' });
 
-    if (task.status !== 'completion-requested') {
+    if (!(await canReviewFor(req.user, task.assignedTo))) {
+      return res.status(403).json({ success: false, message: 'You cannot approve a task assigned to you' });
+    }
+
+    if (!task.hasCompletionRequest()) {
       return res.status(400).json({ success: false, message: 'Task completion has not been requested' });
     }
 
-    task.status = 'completed';
-    task.approvedBy = req.user.id;
-    task.approvedAt = new Date();
-    task.completedDate = new Date();
+    task.approveCompletion(req.user.id);
     await task.save();
 
     const populated = await Task.findById(task._id)
@@ -562,7 +583,7 @@ export const approveTeamTask = async (req, res) => {
 
     res.json({ success: true, message: 'Task completion approved', data: populated });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -586,16 +607,15 @@ export const rejectTeamTask = async (req, res) => {
     const task = await Task.findOne({ _id: taskId, team: teamId });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found in this team' });
 
-    if (task.status !== 'completion-requested') {
+    if (!(await canReviewFor(req.user, task.assignedTo))) {
+      return res.status(403).json({ success: false, message: 'You cannot reject a task assigned to you' });
+    }
+
+    if (!task.hasCompletionRequest()) {
       return res.status(400).json({ success: false, message: 'Task completion has not been requested' });
     }
 
-    task.status = 'in-progress';
-    task.rejectionReason = req.body.rejectionReason || 'Task completion rejected';
-    task.rejectedBy = req.user.id;
-    task.rejectedAt = new Date();
-    task.completionRequestedBy = undefined;
-    task.completionRequestedAt = undefined;
+    task.rejectCompletion(req.user.id, req.body.rejectionReason);
     await task.save();
 
     const populated = await Task.findById(task._id)
@@ -605,7 +625,7 @@ export const rejectTeamTask = async (req, res) => {
 
     res.json({ success: true, message: 'Task completion rejected', data: populated });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -629,12 +649,19 @@ export const getTeamAttendance = async (req, res) => {
       }
     }
 
-    const filter = { team: teamId };
-    if (status) filter.status = status;
+    // Matched by member rather than the record's team, so check-ins from
+    // before someone joined the team (or without a team set) still show
+    const filter = { user: { $in: teamUserIds(team) } };
+    if (status) {
+      // Accept the approval states the team dashboard filters by as well as day types
+      const approval = { requested: 'pending', pending: 'pending', approved: 'approved', rejected: 'rejected' }[status];
+      if (approval) filter.approvalStatus = approval;
+      else filter.status = status;
+    }
     if (startDate || endDate) {
-      filter.date = {};
-      if (startDate) filter.date.$gte = new Date(startDate);
-      if (endDate) filter.date.$lte = new Date(endDate);
+      filter.day = {};
+      if (startDate) filter.day.$gte = toDayKey(startDate);
+      if (endDate) filter.day.$lte = toDayKey(endDate);
     }
 
     const attendance = await Attendance.find(filter)
@@ -645,7 +672,7 @@ export const getTeamAttendance = async (req, res) => {
 
     res.json({ success: true, count: attendance.length, data: attendance });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -666,17 +693,17 @@ export const getTeamPendingAttendance = async (req, res) => {
       }
     }
 
-    const attendance = await Attendance.find({
-      team: teamId,
-      status: 'requested',
-    })
+    const filter = { user: { $in: teamUserIds(team) }, approvalStatus: 'pending' };
+    if (req.user.role !== 'admin') filter.user.$ne = req.user._id;
+
+    const attendance = await Attendance.find(filter)
       .populate('user', 'name email department profileImage')
       .populate('team', 'name')
       .sort('-date');
 
     res.json({ success: true, count: attendance.length, data: attendance });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -700,12 +727,16 @@ export const approveTeamAttendance = async (req, res) => {
     const attendance = await Attendance.findById(attendanceId);
     if (!attendance) return res.status(404).json({ success: false, message: 'Attendance record not found' });
 
-    // Make sure this attendance belongs to the team
-    if (attendance.team.toString() !== teamId) {
+    // Make sure this attendance belongs to someone in the team
+    if (!teamUserIds(team).includes(attendance.user.toString())) {
       return res.status(403).json({ success: false, message: 'This attendance does not belong to your team' });
     }
 
-    attendance.status = 'approved';
+    if (!(await canReviewFor(req.user, [attendance.user]))) {
+      return res.status(403).json({ success: false, message: 'You cannot review your own attendance' });
+    }
+
+    attendance.approvalStatus = 'approved';
     attendance.approvedBy = req.user.id;
     await attendance.save();
 
@@ -716,7 +747,7 @@ export const approveTeamAttendance = async (req, res) => {
 
     res.json({ success: true, data: populated });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -740,12 +771,16 @@ export const disapproveTeamAttendance = async (req, res) => {
     const attendance = await Attendance.findById(attendanceId);
     if (!attendance) return res.status(404).json({ success: false, message: 'Attendance record not found' });
 
-    // Make sure this attendance belongs to the team
-    if (attendance.team.toString() !== teamId) {
+    // Make sure this attendance belongs to someone in the team
+    if (!teamUserIds(team).includes(attendance.user.toString())) {
       return res.status(403).json({ success: false, message: 'This attendance does not belong to your team' });
     }
 
-    attendance.status = 'rejected';
+    if (!(await canReviewFor(req.user, [attendance.user]))) {
+      return res.status(403).json({ success: false, message: 'You cannot review your own attendance' });
+    }
+
+    attendance.approvalStatus = 'rejected';
     attendance.approvedBy = req.user.id;
     await attendance.save();
 
@@ -756,6 +791,6 @@ export const disapproveTeamAttendance = async (req, res) => {
 
     res.json({ success: true, data: populated });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };

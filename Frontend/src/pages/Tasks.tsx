@@ -1,21 +1,23 @@
 import { useState, useEffect, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
-import { useAuth } from '../context/AuthContext'
+import { getErrorMessage } from '../api/axios'
+import { useAuth } from '../context/useAuth'
 import { usePagination } from '../utils/usePagination'
 import Taskscard from '../components/Taskscard'
 import Tasksadd from '../components/Tasksadd'
 import Pagination from '../components/Pagination'
 import type { TaskInput } from '../components/Tasksadd'
+import { useFeedback } from '../context/useFeedback'
 
 export default function Tasks() {
-  const navigate = useNavigate()
+  const { notify, confirm } = useFeedback()
   const [tasks, setTasks] = useState<TaskInput[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<'all' | TaskInput['status']>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [showAddModal, setShowAddModal] = useState(false)
+  const [editingTask, setEditingTask] = useState<TaskInput | null>(null)
   const [showRejectModal, setShowRejectModal] = useState(false)
   const [rejectionReason, setRejectionReason] = useState('')
   const [rejectingTaskId, setRejectingTaskId] = useState<string | null>(null)
@@ -26,9 +28,9 @@ export default function Tasks() {
     if (isAuthenticated && user) {
       loadTasks()
       
-      // Auto-refresh every 30 seconds
+      // Auto-refresh every 30 seconds, without the loading spinner
       const refreshInterval = setInterval(() => {
-        loadTasks()
+        loadTasks(true)
       }, 30000)
       
       return () => clearInterval(refreshInterval)
@@ -39,14 +41,14 @@ export default function Tasks() {
     if (!silent) setLoading(true)
     setError(null)
     try {
-      const filters = !isAdmin && user?.role !== 'team_leader' && user?._id ? { assignedTo: user._id } : {}
-      const response = await taskAPI.getTasks(filters)
+      // The API scopes the list: own tasks for users, the team's for leaders, all for admins
+      const response = await taskAPI.getTasks()
       if (response.success && Array.isArray(response.data)) {
         setTasks(response.data)
       } else {
         setTasks([])
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to load tasks:', err)
       if (!silent) {
         setError('Failed to load tasks from server. Please make sure the backend is running.')
@@ -57,7 +59,7 @@ export default function Tasks() {
   }
 
   const handleStatusChange = async (index: number, newStatus: TaskInput['status']) => {
-    const task = filteredTasks[index]
+    const task = pagination.paginatedData[index]
     const originalIndex = tasks.findIndex(t => t === task)
     
     if (originalIndex === -1) return
@@ -67,44 +69,38 @@ export default function Tasks() {
       return
     }
 
+    // Results come from the server: with several assignees, requesting
+    // completion may only mark the caller's part as done
+    const replaceTask = (updated: TaskInput) => {
+      setTasks(prev => prev.map(t => (t._id === updated._id ? updated : t)))
+    }
+
     // For completion-requested, use the special API endpoint
     if (newStatus === 'completion-requested') {
-      // Optimistically update UI
-      const updatedTasks = [...tasks]
-      updatedTasks[originalIndex] = { ...updatedTasks[originalIndex], status: newStatus }
-      setTasks(updatedTasks)
-
       try {
         const response = await taskAPI.requestCompletion(task._id)
         if (response.success) {
-          console.log('Task completion requested successfully')
-          alert('Completion request sent! Waiting for admin approval.')
+          replaceTask(response.data)
+          notify(response.message || 'Completion request sent. Waiting for admin approval.', 'success')
         }
-      } catch (err: any) {
+      } catch (err) {
         console.error('Failed to request task completion:', err)
-        alert(err.response?.data?.message || 'Failed to request task completion')
-        // Revert on error
-        setTasks(tasks)
+        notify(getErrorMessage(err, 'Failed to request task completion'), 'error')
       }
       return
     }
 
     // Admin approving task completion
     if (isAdmin && newStatus === 'completed' && task.status === 'completion-requested') {
-      const updatedTasks = [...tasks]
-      updatedTasks[originalIndex] = { ...updatedTasks[originalIndex], status: newStatus }
-      setTasks(updatedTasks)
-
       try {
         const response = await taskAPI.approveCompletion(task._id)
         if (response.success) {
-          console.log('Task completion approved')
-          alert('Task approved successfully!')
+          replaceTask(response.data)
+          notify('Task approved.', 'success')
         }
-      } catch (err: any) {
+      } catch (err) {
         console.error('Failed to approve task:', err)
-        alert(err.response?.data?.message || 'Failed to approve task')
-        setTasks(tasks)
+        notify(getErrorMessage(err, 'Failed to approve task'), 'error')
       }
       return
     }
@@ -118,32 +114,21 @@ export default function Tasks() {
     }
 
     // For other status changes (like starting a task)
-    const updatedTasks = [...tasks]
-    updatedTasks[originalIndex] = { ...updatedTasks[originalIndex], status: newStatus }
-    setTasks(updatedTasks)
-
     try {
       const response = await taskAPI.updateTask(task._id, { status: newStatus })
-      if (response.success) {
-        console.log('Task status updated successfully:', newStatus)
-      }
-    } catch (err: any) {
+      if (response.success) replaceTask(response.data)
+    } catch (err) {
       console.error('Failed to update task status:', err)
-      alert(err.response?.data?.message || 'Failed to update task status')
-      // Revert on error
-      setTasks(tasks)
+      notify(getErrorMessage(err, 'Failed to update task status'), 'error')
     }
   }
 
   const handleEdit = (index: number) => {
-    const task = filteredTasks[index]
-    console.log('Edit task:', task)
-    // TODO: Open edit modal
-    alert('Edit functionality coming soon!')
+    setEditingTask(pagination.paginatedData[index])
   }
 
   const handleDelete = async (index: number) => {
-    const task = filteredTasks[index]
+    const task = pagination.paginatedData[index]
     const originalIndex = tasks.findIndex(t => t === task)
     
     if (originalIndex === -1) return
@@ -153,20 +138,17 @@ export default function Tasks() {
       return
     }
 
-    if (!confirm('Are you sure you want to delete this task?')) return
+    if (!(await confirm({ title: 'Delete this task?', message: `"${task.title}" will be removed for everyone. This can't be undone.`, confirmLabel: 'Delete', danger: true }))) return
 
     // Optimistically remove from UI
     const updatedTasks = tasks.filter((_, i) => i !== originalIndex)
     setTasks(updatedTasks)
 
     try {
-      const response = await taskAPI.deleteTask(task._id)
-      if (response.success) {
-        console.log('Task deleted successfully')
-      }
-    } catch (err: any) {
+      await taskAPI.deleteTask(task._id)
+    } catch (err) {
       console.error('Failed to delete task:', err)
-      alert(err.response?.data?.message || 'Failed to delete task')
+      notify(getErrorMessage(err, 'Failed to delete task'), 'error')
       // Revert on error
       setTasks(tasks)
     }
@@ -194,11 +176,11 @@ export default function Tasks() {
         setShowRejectModal(false)
         setRejectionReason('')
         setRejectingTaskId(null)
-        alert('Task rejected successfully')
+        notify('Task rejected.', 'success')
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to reject task:', err)
-      alert(err.response?.data?.message || 'Failed to reject task')
+      notify(getErrorMessage(err, 'Failed to reject task'), 'error')
     } finally {
       setIsRejectSubmitting(false)
     }
@@ -241,26 +223,6 @@ export default function Tasks() {
 
   const urgentTasks = tasks.filter(t => t.priority === 'urgent' && t.status !== 'completed')
 
-  if (!isAuthenticated) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-linear-to-br from-neutral-50 to-neutral-100 px-4">
-        <div className="text-center">
-          <div className="mb-6 inline-flex h-20 w-20 items-center justify-center rounded-full bg-neutral-900 text-3xl text-white">
-            🔐
-          </div>
-          <h2 className="mb-2 text-2xl font-bold text-neutral-900">Access Required</h2>
-          <p className="mb-6 text-neutral-600">You need to be logged in to view your tasks.</p>
-          <button 
-            onClick={() => navigate('/login')}
-            className="rounded-lg bg-neutral-900 px-6 py-3 text-sm font-semibold text-white shadow-lg hover:opacity-90 transition-all"
-          >
-            Login to Continue
-          </button>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <div className="min-h-screen bg-linear-to-br from-neutral-50 via-white to-neutral-100">
       {/* Hero Header */}
@@ -275,7 +237,7 @@ export default function Tasks() {
                   </svg>
                 </div>
                 <div>
-                  <h1 className="text-2xl font-bold md:text-3xl">My Tasks</h1>
+                  <h1 className="text-2xl font-bold md:text-3xl">{isAdmin ? 'All Tasks' : 'My Tasks'}</h1>
                   <p className="text-sm text-neutral-300">Welcome back, {user?.name?.split(' ')[0] || 'User'}</p>
                 </div>
               </div>
@@ -374,7 +336,7 @@ export default function Tasks() {
           ].map((status) => (
             <button
               key={status.key}
-              onClick={() => setFilter(status.key as any)}
+              onClick={() => setFilter(status.key as typeof filter)}
               className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-all ${
                 filter === status.key
                   ? status.color === 'amber' ? 'bg-amber-600 text-white shadow-lg shadow-amber-200' :
@@ -473,7 +435,8 @@ export default function Tasks() {
               onStatusChange={handleStatusChange}
               onEdit={handleEdit}
               onDelete={handleDelete}
-              isAdmin={isAdmin || user?.role === 'team_leader'}
+              isAdmin={isAdmin}
+              currentUserId={user?._id}
             />
             
             {/* Pagination Controls */}
@@ -493,12 +456,16 @@ export default function Tasks() {
         )}
       </div>
 
-      {/* Add Task Modal */}
+      {/* Add / Edit Task Modal */}
       <Tasksadd
-        isOpen={showAddModal}
-        onClose={() => setShowAddModal(false)}
+        isOpen={showAddModal || !!editingTask}
+        task={editingTask}
+        onClose={() => {
+          setShowAddModal(false)
+          setEditingTask(null)
+        }}
         onCreate={() => {
-          loadTasks()
+          loadTasks(true)
         }}
       />
 

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 
 function Navbar() {
   const [open, setOpen] = useState(false)
@@ -10,7 +10,7 @@ function Navbar() {
   const navigate = useNavigate()
   const location = useLocation()
 
-  const { isAuthenticated, isAdmin, isTeamLeader, isTeamMember, logout, user } = useAuth()
+  const { isAuthenticated, isAdmin, isTeamLeader, isTeamMember, logout, user, loading } = useAuth()
 
   const isPublicRoute = useMemo(() => {
     const publicPaths = ['/', '/about', '/service', '/pricing', '/login', '/register', '/contact']
@@ -54,6 +54,12 @@ function Navbar() {
             <NavLink to="/pricing" className="text-sm font-medium text-slate-600 transition-colors hover:text-[--color-primary]">
               Pricing
             </NavLink>
+            <NavLink to="/about" className="text-sm font-medium text-slate-600 transition-colors hover:text-[--color-primary]">
+              About
+            </NavLink>
+            <NavLink to="/contact" className="text-sm font-medium text-slate-600 transition-colors hover:text-[--color-primary]">
+              Contact
+            </NavLink>
           </div>
 
           <div className="flex items-center gap-3">
@@ -73,13 +79,17 @@ function Navbar() {
     return null
   }
 
-  const navItems = isAdmin
+  // Links depend on the role, which is confirmed with the server first
+  const navItems = loading
+    ? []
+    : isAdmin
     ? [
         { to: '/dashboard', label: 'Dashboard' },
         { to: '/social', label: 'Social Hub' },
         { to: '/admin/teams', label: 'Teams' },
         { to: '/admin/users', label: 'Users' },
         { to: '/admin/attendance', label: 'Attendance' },
+        { to: '/admin/messages', label: 'Messages' },
         { to: '/tasks', label: 'Tasks' },
         { to: '/chat', label: 'Chat' },
       ]

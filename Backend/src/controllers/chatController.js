@@ -1,24 +1,68 @@
 import mongoose from 'mongoose';
 import Chat from '../models/Chat.js';
+import User from '../models/User.js';
 import Team from '../models/Team.js';
 import TeamChatMessage from '../models/TeamChatMessage.js';
 import { logAuditEventV2 } from '../utils/auditLoggerV2.js';
+import { sendServerError } from '../utils/http.js';
+
+const MAX_MESSAGE_LENGTH = 2000;
+const MESSAGE_PAGE_SIZE = 50;
+
+// Only expose what the chat UI needs about each participant
+const participants = [
+  { path: 'sender', select: 'name' },
+  { path: 'receiver', select: 'name' },
+];
+
+// Marks what senderId sent to readerId as read and tells the sender, so an
+// open conversation on their side shows the messages as read
+const markConversationRead = async (req, senderId, readerId) => {
+  const { modifiedCount } = await Chat.updateMany(
+    { sender: senderId, receiver: readerId, isRead: false },
+    { isRead: true }
+  );
+  const io = req.app.get('io');
+  if (modifiedCount > 0 && io) {
+    io.to(senderId.toString()).emit('messages_read', { readerId: readerId.toString() });
+  }
+};
 
 export const sendMessage = async (req, res) => {
   try {
     const { receiverId, message } = req.body;
     const senderId = req.user._id;
 
+    if (!mongoose.isObjectIdOrHexString(receiverId)) {
+      return res.status(400).json({ success: false, message: 'Invalid receiver' });
+    }
+
+    if (typeof message !== 'string' || !message.trim()) {
+      return res.status(400).json({ success: false, message: 'Message cannot be empty' });
+    }
+
+    if (message.length > MAX_MESSAGE_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        message: `Message cannot be longer than ${MAX_MESSAGE_LENGTH} characters`,
+      });
+    }
+
+    const receiver = await User.exists({ _id: receiverId, isActive: true });
+    if (!receiver) {
+      return res.status(404).json({ success: false, message: 'Recipient not found' });
+    }
+
     const newMessage = new Chat({
       sender: senderId,
       receiver: receiverId,
-      message
+      message: message.trim()
     });
 
     await newMessage.save();
-    await newMessage.populate('sender receiver');
+    await newMessage.populate(participants);
 
-    // Emit the fully populated message to receiver's room in real-time
+    // Emit the populated message to receiver's room in real-time
     const io = req.app.get('io');
     if (io) {
       io.to(receiverId.toString()).emit('receive_message', newMessage);
@@ -26,89 +70,112 @@ export const sendMessage = async (req, res) => {
 
     res.status(201).json(newMessage);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendServerError(res, error);
   }
 };
 
+// Latest page of a conversation, oldest first. Pass ?before=<timestamp of the
+// oldest message shown> to load the page before it.
 export const getMessages = async (req, res) => {
   try {
     const { userId } = req.params;
     const currentUserId = req.user.id;
 
-    const messages = await Chat.find({
+    if (!mongoose.isObjectIdOrHexString(userId)) {
+      return res.status(400).json({ success: false, message: 'Invalid user' });
+    }
+
+    const filter = {
       $or: [
         { sender: currentUserId, receiver: userId },
         { sender: userId, receiver: currentUserId }
       ]
-    })
-      .populate(['sender', 'receiver'])
-      .sort({ timestamp: 1 });
+    };
 
-    res.json(messages);
+    if (req.query.before) {
+      const before = new Date(req.query.before);
+      if (Number.isNaN(before.getTime())) {
+        return res.status(400).json({ success: false, message: 'Invalid before date' });
+      }
+      filter.timestamp = { $lt: before };
+    }
+
+    // One extra tells us whether there is an older page
+    const newestFirst = await Chat.find(filter)
+      .populate(participants)
+      .sort({ timestamp: -1 })
+      .limit(MESSAGE_PAGE_SIZE + 1);
+
+    const hasMore = newestFirst.length > MESSAGE_PAGE_SIZE;
+    const messages = newestFirst.slice(0, MESSAGE_PAGE_SIZE).reverse();
+
+    // Opening the conversation reads everything the other person sent
+    if (!req.query.before) {
+      await markConversationRead(req, userId, currentUserId);
+      messages.forEach((m) => {
+        if (m.sender?._id?.toString() === userId) m.isRead = true;
+      });
+    }
+
+    res.json({ success: true, data: messages, hasMore });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendServerError(res, error);
   }
 };
 
-export const getChats = async (req, res) => {
+// Marks everything from :userId to the current user as read (a new message
+// arrived while their conversation was open)
+export const markAsRead = async (req, res) => {
   try {
-    const userId = req.user.id;
+    const { userId } = req.params;
 
-    const chats = await Chat.aggregate([
-      {
-        $match: {
-          $or: [{ sender: new mongoose.Types.ObjectId(userId) }, { receiver: new mongoose.Types.ObjectId(userId) }]
-        }
-      },
-      {
-        $sort: { timestamp: -1 }
-      },
-      {
-        $group: {
-          _id: {
-            $cond: [
-              { $eq: ['$sender', new mongoose.Types.ObjectId(userId)] },
-              '$receiver',
-              '$sender'
-            ]
-          },
-          lastMessage: { $first: '$message' },
-          timestamp: { $first: '$timestamp' }
-        }
-      },
-      {
-        $lookup: {
-          from: 'users',
-          localField: '_id',
-          foreignField: '_id',
-          as: 'user'
-        }
-      }
+    if (!mongoose.isObjectIdOrHexString(userId)) {
+      return res.status(400).json({ success: false, message: 'Invalid user' });
+    }
+
+    await markConversationRead(req, userId, req.user.id);
+    res.json({ success: true });
+  } catch (error) {
+    sendServerError(res, error);
+  }
+};
+
+// Unread message counts for the current user, keyed by sender id
+export const getUnreadCounts = async (req, res) => {
+  try {
+    const rows = await Chat.aggregate([
+      { $match: { receiver: new mongoose.Types.ObjectId(req.user.id), isRead: false } },
+      { $group: { _id: '$sender', count: { $sum: 1 } } }
     ]);
 
-    res.json(chats);
+    const counts = Object.fromEntries(rows.map(({ _id, count }) => [_id.toString(), count]));
+    res.json({ success: true, data: counts });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    sendServerError(res, error);
   }
 };
 
+// Marks one message sent to the current user as read and tells the sender
 export const markMessageAsRead = async (req, res) => {
   try {
     const { messageId } = req.params;
 
+    if (!mongoose.isObjectIdOrHexString(messageId)) {
+      return res.status(400).json({ success: false, message: 'Invalid message' });
+    }
+
     const message = await Chat.findOne({
       _id: messageId,
       receiver: req.user._id,
-    }).populate(['sender', 'receiver']);
+    }).populate(participants);
 
     if (!message) {
-      return res.status(404).json({ message: 'Message not found' });
+      return res.status(404).json({ success: false, message: 'Message not found' });
     }
 
     if (!message.isRead) {
       message.isRead = true;
       await message.save();
-      await message.populate(['sender', 'receiver']);
 
       const io = req.app.get('io');
       if (io) {
@@ -118,7 +185,7 @@ export const markMessageAsRead = async (req, res) => {
 
     return res.json(message);
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -143,8 +210,15 @@ export const sendTeamMessage = async (req, res) => {
     const { teamId } = req.params;
     const { message } = req.body;
 
-    if (!message || !String(message).trim()) {
+    if (typeof message !== 'string' || !message.trim()) {
       return res.status(400).json({ success: false, message: 'Message is required' });
+    }
+
+    if (message.length > MAX_MESSAGE_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        message: `Message cannot be longer than ${MAX_MESSAGE_LENGTH} characters`,
+      });
     }
 
     const team = await Team.findById(teamId).select('name leaders members isActive');
@@ -187,7 +261,7 @@ export const sendTeamMessage = async (req, res) => {
 
     return res.status(201).json({ success: true, data: teamMessage });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -211,7 +285,7 @@ export const getTeamMessages = async (req, res) => {
 
     return res.json({ success: true, count: messages.length, data: messages });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -267,7 +341,7 @@ export const markTeamMessagesAsRead = async (req, res) => {
 
     return res.json({ success: true, count: updatedMessages.length, data: updatedMessages });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -311,6 +385,6 @@ export const getMyTeamChats = async (req, res) => {
 
     return res.json({ success: true, count: chats.length, data: chats });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };

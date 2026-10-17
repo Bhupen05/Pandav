@@ -91,7 +91,7 @@ export const teamAPI = {
   },
 
   // Leader/Admin: create a task for the team
-  createTeamTask: async (teamId: string, data: any) => {
+  createTeamTask: async (teamId: string, data: Record<string, unknown>) => {
     const response = await api.post(`/teams/${teamId}/tasks`, data);
     return response.data;
   },

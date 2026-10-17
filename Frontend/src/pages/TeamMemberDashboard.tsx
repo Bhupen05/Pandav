@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { teamAPI } from '../api/teamAPI'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 
 type Invite = {
   _id: string

@@ -1,183 +1,56 @@
-import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import io, { Socket } from 'socket.io-client';
-import { useAuth } from './AuthContext';
+import api, { socketBaseUrl } from '../api/axios';
+import { useAuth } from './useAuth';
+import { ChatContext, participantId, type Message, type TypingStatus } from './useChat';
 
-interface Message {
-  _id: string;
-  sender: any;
-  receiver: any;
-  message: string;
-  timestamp: string;
-  isRead: boolean;
-  createdAt?: string;
-  team?: any;
-  readBy?: Array<{
-    user: any;
-    readAt: string;
-  }>;
+interface MessagesPage {
+  data: Message[];
+  hasMore: boolean;
 }
 
-interface TypingStatus {
-  userId: string;
-  userName: string;
-  isTyping: boolean;
-}
+const teamIdOf = (message: Message) =>
+  typeof message.team === 'string' ? message.team : message.team?._id;
 
-interface ChatContextType {
-  socket: Socket | null;
-  messages: Message[];
-  activeUsers: string[];
-  loadingMessages: boolean;
-  unreadCounts: Record<string, number>;
-  typingUsers: TypingStatus[];
-  clearUnread: (userId: string) => void;
-  sendMessage: (receiverId: string, message: string) => void;
-  fetchMessages: (userId: string) => Promise<void>;
-  sendTeamMessage: (teamId: string, message: string) => void;
-  fetchTeamMessages: (teamId: string) => Promise<void>;
-  markTeamMessagesAsRead: (teamId: string) => Promise<void>;
-  setTyping: (isTyping: boolean, recipientId: string) => void;
-  markMessageAsRead: (messageId: string) => void;
-}
-
-export const ChatContext = createContext<ChatContextType | undefined>(undefined);
-
-const apiBaseUrl = (import.meta.env.VITE_API_URL || '/api/v2').replace(/\/+$/, '');
-const socketBaseUrl = /^https?:\/\//.test(apiBaseUrl)
-  ? apiBaseUrl.replace(/\/api(?:\/v\d+)?$/, '')
-  : window.location.origin;
-
-const getMessageId = (message: Partial<Message> & Record<string, any>) => {
-  if (!message) return null;
-  return typeof message._id === 'string' && message._id.trim() ? message._id : null;
-};
-
+// Adds messages, replacing any already shown (the sender's own copy, a read
+// receipt) instead of showing them twice
 const mergeMessages = (current: Message[], incoming: Message | Message[]) => {
-  const nextMessages = Array.isArray(incoming) ? incoming : [incoming];
   const merged = [...current];
-  const indexById = new Map(
-    current
-      .map((message, index) => [getMessageId(message), index] as const)
-      .filter(([messageId]) => Boolean(messageId))
-  );
+  const indexById = new Map(current.map((message, index) => [message._id, index]));
 
-  nextMessages.forEach((message) => {
-    const messageId = getMessageId(message);
-
-    if (messageId && indexById.has(messageId)) {
-      merged[indexById.get(messageId)!] = {
-        ...merged[indexById.get(messageId)!],
-        ...message,
-      };
-      return;
+  (Array.isArray(incoming) ? incoming : [incoming]).forEach((message) => {
+    if (!message?._id) return;
+    const index = indexById.get(message._id);
+    if (index !== undefined) {
+      merged[index] = { ...merged[index], ...message };
+    } else {
+      indexById.set(message._id, merged.length);
+      merged.push(message);
     }
-
-    if (messageId) indexById.set(messageId, merged.length);
-    merged.push(message);
   });
 
   return merged;
 };
 
-const normalizeMessages = (incoming: unknown) => {
-  const list = Array.isArray(incoming) ? incoming : [];
-  return mergeMessages([], list as Message[]);
-};
-
 export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user } = useAuth();
+  const { user, token, loading } = useAuth();
+  const userId = user?._id;
   const [socket, setSocket] = useState<Socket | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [activeUsers, setActiveUsers] = useState<string[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [typingUsers, setTypingUsers] = useState<TypingStatus[]>([]);
-  const [, setOpenChatUserId] = useState<string | null>(null);
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
+  // The conversation on screen: a person or a team. Refs, so the socket
+  // handlers always see the current value.
+  const openChatUserIdRef = useRef<string | null>(null);
   const openTeamIdRef = useRef<string | null>(null);
 
-  const sendMessage = useCallback(async (receiverId: string, message: string) => {
-    if (!user) return;
-    const token = sessionStorage.getItem('token') || localStorage.getItem('token');
-
-    try {
-      const response = await fetch(`${apiBaseUrl}/chat/send`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ receiverId, message })
-      });
-      const saved = await response.json();
-      if (response.ok) {
-        // add sender's own message immediately; receiver gets it via socket
-        setMessages(prev => mergeMessages(prev, saved));
-      }
-    } catch (error) {
-      console.error('Error sending message:', error);
-    }
-  }, [user]);
-
-  const clearUnread = useCallback((userId: string) => {
-    setUnreadCounts(prev => ({ ...prev, [userId]: 0 }));
-  }, []);
-
-  const fetchMessages = useCallback(async (userId: string) => {
-    setOpenChatUserId(userId);
-    setUnreadCounts(prev => ({ ...prev, [userId]: 0 }));
-    setLoadingMessages(true);
-    setMessages([]);
-    try {
-      const token = sessionStorage.getItem('token') || localStorage.getItem('token');
-      const response = await fetch(`${apiBaseUrl}/chat/messages/${userId}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      const data = await response.json();
-      setMessages(normalizeMessages(data));
-    } catch (error) {
-      console.error('Error fetching messages:', error);
-    } finally {
-      setLoadingMessages(false);
-    }
-  }, []);
-
-  const sendTeamMessage = useCallback(async (teamId: string, message: string) => {
-    if (!user) return;
-    const token = sessionStorage.getItem('token') || localStorage.getItem('token');
-
-    try {
-      const response = await fetch(`${apiBaseUrl}/chat/teams/${teamId}/send`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ message })
-      });
-      const saved = await response.json();
-      if (response.ok) {
-        setMessages(prev => mergeMessages(prev, saved?.data || saved));
-      }
-    } catch (error) {
-      console.error('Error sending team message:', error);
-    }
-  }, [user]);
-
   const markTeamMessagesAsRead = useCallback(async (teamId: string) => {
-    const token = sessionStorage.getItem('token') || localStorage.getItem('token');
-
     try {
-      const response = await fetch(`${apiBaseUrl}/chat/teams/${teamId}/read`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-
-      const data = await response.json();
-      if (response.ok && Array.isArray(data?.data) && data.data.length > 0) {
+      const { data } = await api.patch<{ data: Message[] }>(`/chat/teams/${teamId}/read`);
+      if (openTeamIdRef.current === teamId && Array.isArray(data.data) && data.data.length > 0) {
         setMessages((prev) => mergeMessages(prev, data.data));
       }
     } catch (error) {
@@ -185,85 +58,72 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
-  const fetchTeamMessages = useCallback(async (teamId: string) => {
-    openTeamIdRef.current = teamId;
-    setLoadingMessages(true);
-    setMessages([]);
-    try {
-      const token = sessionStorage.getItem('token') || localStorage.getItem('token');
-      const response = await fetch(`${apiBaseUrl}/chat/teams/${teamId}/messages`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      const data = await response.json();
-      setMessages(normalizeMessages(Array.isArray(data) ? data : data?.data));
-      await markTeamMessagesAsRead(teamId);
-    } catch (error) {
-      console.error('Error fetching team messages:', error);
-    } finally {
-      setLoadingMessages(false);
-    }
-  }, [markTeamMessagesAsRead]);
-
   useEffect(() => {
-    if (!user) return;
+    // Wait until a stored session has been confirmed: a rejected token would
+    // otherwise fail these requests and redirect to the login page
+    if (!userId || !token || loading) return;
 
-    const newSocket = io(socketBaseUrl);
-    
-    newSocket.on('connect', () => {
-      newSocket.emit('user_online', user._id);
+    // The server identifies the user from this token and joins their room itself
+    const newSocket = io(socketBaseUrl, {
+      auth: { token },
     });
 
-    newSocket.on('receive_message', (data) => {
-      setMessages(prev => mergeMessages(prev, data));
-      const senderId = data.sender?._id || data.sender;
-      setOpenChatUserId(current => {
-        if (current !== senderId) {
-          setUnreadCounts(prev => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
-        }
-        return current;
-      });
+    newSocket.on('connect_error', (error) => {
+      console.error('Chat connection failed:', error.message);
     });
 
-    newSocket.on('message_read', (message) => {
+    // Unread counts are stored on the server, so they survive a page reload
+    api.get<{ data: Record<string, number> }>('/chat/unread')
+      .then(({ data }) => setUnreadCounts(data.data || {}))
+      .catch((error) => console.error('Error loading unread counts:', error));
+
+    newSocket.on('receive_message', (data: Message) => {
+      const senderId = participantId(data.sender);
+      if (!senderId) return;
+      // Show the message only in its own conversation; anything else counts as unread
+      if (senderId === openChatUserIdRef.current) {
+        setMessages((prev) => mergeMessages(prev, data));
+        api.put(`/chat/read/${senderId}`).catch((error) => console.error('Error marking messages read:', error));
+      } else {
+        setUnreadCounts((prev) => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
+      }
+      setTypingUsers((prev) => prev.filter((t) => t.userId !== senderId));
+    });
+
+    // Read receipts for messages this user sent
+    newSocket.on('message_read', (message: Message) => {
+      setMessages((prev) => (prev.some((m) => m._id === message._id) ? mergeMessages(prev, message) : prev));
+    });
+    newSocket.on('messages_read', ({ readerId }: { readerId: string }) => {
+      setMessages((prev) => prev.map((m) => (participantId(m.receiver) === readerId ? { ...m, isRead: true } : m)));
+    });
+
+    newSocket.on('receive_team_message', (payload: Message | { data: Message }) => {
+      const message = 'data' in payload ? payload.data : payload;
+      const teamId = teamIdOf(message);
+      if (!teamId || openTeamIdRef.current !== teamId) return;
+
       setMessages((prev) => mergeMessages(prev, message));
-    });
-
-    newSocket.on('receive_team_message', (payload) => {
-      const message = payload?.data || payload;
-      const payloadTeamId = message?.team?._id || message?.team;
-
-      if (openTeamIdRef.current && payloadTeamId && openTeamIdRef.current === payloadTeamId) {
-        setMessages((prev) => mergeMessages(prev, message));
-        if ((message?.sender?._id || message?.sender) !== user._id) {
-          void markTeamMessagesAsRead(payloadTeamId);
-        }
+      if (participantId(message.sender) !== userId) {
+        void markTeamMessagesAsRead(teamId);
       }
     });
 
-    newSocket.on('team_message_read', (message) => {
-      const payloadTeamId = message?.team?._id || message?.team;
-
-      if (!openTeamIdRef.current || !payloadTeamId || openTeamIdRef.current !== payloadTeamId) {
-        return;
-      }
-
+    newSocket.on('team_message_read', (message: Message) => {
+      const teamId = teamIdOf(message);
+      if (!teamId || openTeamIdRef.current !== teamId) return;
       setMessages((prev) => mergeMessages(prev, message));
     });
 
-    newSocket.on('user_typing', (data) => {
-      setTypingUsers(prev => {
-        const filtered = prev.filter(t => t.userId !== data.userId);
-        return [...filtered, { ...data, isTyping: true }];
-      });
+    newSocket.on('user_typing', (data: TypingStatus) => {
+      setTypingUsers((prev) => [...prev.filter((t) => t.userId !== data.userId), data]);
     });
 
-    newSocket.on('user_stopped_typing', (data) => {
-      setTypingUsers(prev => prev.filter(t => t.userId !== data.userId));
+    newSocket.on('user_stopped_typing', ({ userId: typingUserId }: { userId: string }) => {
+      setTypingUsers((prev) => prev.filter((t) => t.userId !== typingUserId));
     });
 
-    newSocket.on('update_active_users', (users) => {
+    newSocket.on('update_active_users', (users: string[]) => {
       setActiveUsers(users);
     });
 
@@ -271,56 +131,128 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     return () => {
       newSocket.close();
+      // Don't leave one account's messages in memory for the next login
+      setSocket(null);
+      setMessages([]);
+      setUnreadCounts({});
+      setTypingUsers([]);
+      openChatUserIdRef.current = null;
+      openTeamIdRef.current = null;
     };
-  }, [markTeamMessagesAsRead, user]);
+  }, [userId, token, loading, markTeamMessagesAsRead]);
 
-  const setTyping = useCallback((isTyping: boolean, recipientId: string) => {
-    if (!socket) return;
-    if (isTyping) {
-      socket.emit('typing', { recipientId, userName: user?.name });
-    } else {
-      socket.emit('stopped_typing', { recipientId });
-    }
-  }, [socket, user?.name]);
-
-  const markMessageAsRead = useCallback(async (messageId: string) => {
-    const token = sessionStorage.getItem('token') || localStorage.getItem('token');
-    try {
-      await fetch(`${apiBaseUrl}/chat/messages/${messageId}/read`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-    } catch (error) {
-      console.error('Error marking message as read:', error);
+  const sendMessage = useCallback(async (receiverId: string, message: string) => {
+    const { data } = await api.post<Message>('/chat/send', { receiverId, message });
+    // The receiver gets it over the socket; add the sender's own copy here
+    if (receiverId === openChatUserIdRef.current) {
+      setMessages((prev) => mergeMessages(prev, data));
     }
   }, []);
 
+  const sendTeamMessage = useCallback(async (teamId: string, message: string) => {
+    const { data } = await api.post<{ data: Message }>(`/chat/teams/${teamId}/send`, { message });
+    // Everyone in the team, the sender included, also gets it over the socket
+    if (teamId === openTeamIdRef.current) {
+      setMessages((prev) => mergeMessages(prev, data.data));
+    }
+  }, []);
+
+  const clearUnread = useCallback((chatUserId: string) => {
+    setUnreadCounts((prev) => ({ ...prev, [chatUserId]: 0 }));
+  }, []);
+
+  const fetchMessages = useCallback(async (chatUserId: string) => {
+    openChatUserIdRef.current = chatUserId;
+    openTeamIdRef.current = null;
+    clearUnread(chatUserId);
+    setLoadingMessages(true);
+    setMessages([]);
+    setHasMoreMessages(false);
+    try {
+      // Loading the latest page also marks the conversation read on the server
+      const { data } = await api.get<MessagesPage>(`/chat/messages/${chatUserId}`);
+      // Ignore the response if the user switched to another conversation meanwhile
+      if (openChatUserIdRef.current === chatUserId) {
+        setMessages(Array.isArray(data.data) ? data.data : []);
+        setHasMoreMessages(!!data.hasMore);
+      }
+    } catch (error) {
+      console.error('Error fetching messages:', error);
+    } finally {
+      setLoadingMessages(false);
+    }
+  }, [clearUnread]);
+
+  const fetchTeamMessages = useCallback(async (teamId: string) => {
+    openTeamIdRef.current = teamId;
+    openChatUserIdRef.current = null;
+    setLoadingMessages(true);
+    setMessages([]);
+    setHasMoreMessages(false);
+    try {
+      const { data } = await api.get<{ data: Message[] }>(`/chat/teams/${teamId}/messages`);
+      if (openTeamIdRef.current === teamId) {
+        setMessages(Array.isArray(data.data) ? data.data : []);
+        await markTeamMessagesAsRead(teamId);
+      }
+    } catch (error) {
+      console.error('Error fetching team messages:', error);
+    } finally {
+      setLoadingMessages(false);
+    }
+  }, [markTeamMessagesAsRead]);
+
+  const loadOlderMessages = useCallback(async () => {
+    const chatUserId = openChatUserIdRef.current;
+    const oldest = messages[0];
+    if (!chatUserId || !oldest) return;
+
+    try {
+      const { data } = await api.get<MessagesPage>(`/chat/messages/${chatUserId}`, {
+        params: { before: oldest.timestamp },
+      });
+      if (openChatUserIdRef.current === chatUserId) {
+        setMessages((prev) => [...data.data, ...prev]);
+        setHasMoreMessages(!!data.hasMore);
+      }
+    } catch (error) {
+      console.error('Error loading older messages:', error);
+    }
+  }, [messages]);
+
+  const setTyping = useCallback((isTyping: boolean, recipientId: string) => {
+    socket?.emit(isTyping ? 'typing' : 'stopped_typing', { recipientId });
+  }, [socket]);
+
+  const closeChat = useCallback(() => {
+    openChatUserIdRef.current = null;
+    openTeamIdRef.current = null;
+    setMessages([]);
+    setHasMoreMessages(false);
+  }, []);
+
   return (
-    <ChatContext.Provider value={{ 
-      socket, 
-      messages, 
-      activeUsers, 
-      loadingMessages, 
-      unreadCounts, 
-      typingUsers,
-      clearUnread, 
-      sendMessage, 
-      fetchMessages,
-      sendTeamMessage,
-      fetchTeamMessages,
-      markTeamMessagesAsRead,
-      setTyping,
-      markMessageAsRead
-    }}>
+    <ChatContext.Provider
+      value={{
+        socket,
+        messages,
+        activeUsers,
+        loadingMessages,
+        unreadCounts,
+        typingUsers,
+        clearUnread,
+        sendMessage,
+        sendTeamMessage,
+        fetchMessages,
+        fetchTeamMessages,
+        markTeamMessagesAsRead,
+        setTyping,
+        hasMoreMessages,
+        loadOlderMessages,
+        closeChat,
+      }}
+    >
       {children}
     </ChatContext.Provider>
   );
-};
-
-export const useChat = () => {
-  const context = useContext(ChatContext);
-  if (!context) throw new Error('useChat must be used within ChatProvider');
-  return context;
 };

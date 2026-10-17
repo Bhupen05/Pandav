@@ -1,34 +1,54 @@
-import { useState, useEffect } from 'react'
-import { attendanceAPI } from '../api/attendanceAPI'
-import { useAuth } from '../context/AuthContext'
+import { useCallback, useState, useEffect } from 'react'
+import { attendanceAPI, type AttendanceRecord, type AttendanceStatus } from '../api/attendanceAPI'
+import { userAPI } from '../api/userAPI'
+import { getErrorMessage } from '../api/axios'
+import { useAuth } from '../context/useAuth'
+import { todayKey } from '../utils/date'
+import { useFeedback } from '../context/useFeedback'
 
-export type AttendanceRecord = {
-  _id: string
-  user: {
-    _id: string
-    name: string
-    email: string
-    profileImage?: string
-  }
-  date: string
-  status: 'present' | 'absent' | 'late' | 'half-day' | 'leave' | 'requested' | 'approved' | 'rejected'
-  checkInTime?: string
-  checkOutTime?: string
-  workHours?: number
-  remarks?: string
+const approvalBadge = {
+  pending: 'bg-purple-50 text-purple-700 ring-1 ring-purple-200',
+  approved: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200',
+  rejected: 'bg-red-50 text-red-700 ring-1 ring-red-200',
 }
 
 function Attendance() {
+  const { confirm } = useFeedback()
   const [records, setRecords] = useState<AttendanceRecord[]>([])
   const [date, setDate] = useState('')
-  const [status, setStatus] = useState<'present' | 'absent' | 'late' | 'half-day' | 'leave' | 'requested'>('requested')
+  const [status, setStatus] = useState<AttendanceStatus>('present')
   const [remarks, setRemarks] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [filterStatus, setFilterStatus] = useState<'all' | AttendanceRecord['status']>('all')
-  
+  const [employees, setEmployees] = useState<{ _id: string; name: string }[]>([])
+  const [employeeId, setEmployeeId] = useState('')
+
   const { isAdmin, user } = useAuth()
+
+  // Admins choose who a new record is for
+  useEffect(() => {
+    if (!isAdmin) return
+    userAPI.getUsers({ isActive: true })
+      .then((response) => setEmployees(Array.isArray(response.data) ? response.data : []))
+      .catch((err) => console.error('Failed to load employees:', err))
+  }, [isAdmin])
+
+  const loadAttendance = useCallback(async (silent = false) => {
+    try {
+      // Team leaders can see their team's records; this page is only their own
+      const response = await attendanceAPI.getAttendance(!isAdmin && user?._id ? { user: user._id } : undefined)
+      if (response.success) {
+        const data: AttendanceRecord[] = Array.isArray(response.data) ? response.data : []
+        setRecords(isAdmin ? data : data.filter((record) => record.user?._id === user?._id))
+      }
+    } catch (err) {
+      if (!silent) {
+        console.error('Failed to load attendance:', err)
+      }
+    }
+  }, [isAdmin, user?._id])
 
   useEffect(() => {
     loadAttendance()
@@ -39,21 +59,7 @@ function Attendance() {
     }, 30000)
     
     return () => clearInterval(refreshInterval)
-  }, [isAdmin, user?._id])
-
-  const loadAttendance = async (silent = false) => {
-    try {
-      const response = await attendanceAPI.getAttendance(!isAdmin && user?._id ? { user: user._id } : undefined)
-      if (response.success) {
-        const data = Array.isArray(response.data) ? response.data : []
-        setRecords(isAdmin ? data : data.filter((record: AttendanceRecord) => record.user?._id === user?._id))
-      }
-    } catch (err) {
-      if (!silent) {
-        console.error('Failed to load attendance:', err)
-      }
-    }
-  }
+  }, [loadAttendance])
 
   const handleCheckIn = async () => {
     setError(null)
@@ -62,17 +68,15 @@ function Attendance() {
 
     try {
       const response = await attendanceAPI.checkIn()
-      console.log('Check-in response:', response)
       if (response.success) {
         setSuccess('Checked in successfully. Your attendance is pending approval.')
         loadAttendance()
       } else {
         setError(response.message || 'Failed to check in')
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Check-in error:', err)
-      const errorMsg = err.response?.data?.message || err.message || 'Failed to check in. You may have already checked in today.'
-      setError(errorMsg)
+      setError(getErrorMessage(err, 'Failed to check in. You may have already checked in today.'))
     } finally {
       setLoading(false)
     }
@@ -85,17 +89,15 @@ function Attendance() {
 
     try {
       const response = await attendanceAPI.checkOut()
-      console.log('Check-out response:', response)
       if (response.success) {
-        setSuccess('Checked out successfully. Your attendance record has been updated.')
+        setSuccess('Checked out successfully! Your work hours have been recorded.')
         loadAttendance()
       } else {
         setError(response.message || 'Failed to check out')
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Check-out error:', err)
-      const errorMsg = err.response?.data?.message || err.message || 'Failed to check out. Make sure you have checked in first.'
-      setError(errorMsg)
+      setError(getErrorMessage(err, 'Failed to check out. Make sure you have checked in first.'))
     } finally {
       setLoading(false)
     }
@@ -106,6 +108,11 @@ function Attendance() {
     setError(null)
     setSuccess(null)
 
+    if (!employeeId) {
+      setError('Please choose an employee.')
+      return
+    }
+
     if (!date) {
       setError('Date is required.')
       return
@@ -114,33 +121,35 @@ function Attendance() {
     setLoading(true)
     try {
       const response = await attendanceAPI.createAttendance({
+        user: employeeId,
         date,
         status,
         remarks: remarks.trim() || undefined,
       })
-      
+
       if (response.success) {
         setSuccess('Attendance record added successfully!')
+        setEmployeeId('')
         setDate('')
-        setStatus('requested')
+        setStatus('present')
         setRemarks('')
         loadAttendance()
       }
-    } catch (err: any) {
-      setError(err.message || 'Failed to add attendance record.')
+    } catch (err) {
+      setError(getErrorMessage(err, 'Failed to add attendance record.'))
     } finally {
       setLoading(false)
     }
   }
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm('Delete this attendance record?')) return
+    if (!(await confirm({ title: 'Delete this attendance record?', message: "This can't be undone.", confirmLabel: 'Delete', danger: true }))) return
 
     try {
       await attendanceAPI.deleteAttendance(id)
       loadAttendance()
-    } catch (err: any) {
-      setError(err.message || 'Failed to delete attendance record.')
+    } catch (err) {
+      setError(getErrorMessage(err, 'Failed to delete attendance record.'))
     }
   }
 
@@ -158,11 +167,14 @@ function Attendance() {
   }
 
   // Find today's attendance record
-  const today = new Date().toISOString().split('T')[0]
-  const todayRecord = records.find(r => r.date.startsWith(today))
+  const today = todayKey()
+  const todayRecord = records.find(r => r.day === today)
 
-  // Calculate total hours this week/month
-  const totalHoursThisMonth = records.reduce((sum, r) => sum + (r.workHours || 0), 0)
+  // Hours worked in the current calendar month
+  const thisMonth = today.slice(0, 7)
+  const totalHoursThisMonth = records
+    .filter(r => r.day?.startsWith(thisMonth))
+    .reduce((sum, r) => sum + (r.workHours || 0), 0)
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8">
@@ -178,14 +190,18 @@ function Attendance() {
         <div className="rounded-xl border bg-white p-4 shadow-sm">
           <p className="text-xs text-neutral-500">Today's Status</p>
           <p className={`mt-1 text-lg font-semibold ${
-            todayRecord?.status === 'present' || todayRecord?.status === 'approved' ? 'text-green-600' :
+            todayRecord?.status === 'present' ? 'text-green-600' :
             todayRecord?.status === 'late' ? 'text-yellow-600' :
-            todayRecord?.status === 'requested' ? 'text-purple-600' :
             todayRecord?.status === 'absent' ? 'text-red-600' :
             'text-neutral-600'
           }`}>
             {todayRecord?.status ? todayRecord.status.charAt(0).toUpperCase() + todayRecord.status.slice(1) : 'Not Checked In'}
           </p>
+          {todayRecord && (
+            <span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-xs font-medium capitalize ${approvalBadge[todayRecord.approvalStatus]}`}>
+              {todayRecord.approvalStatus === 'pending' ? 'Awaiting approval' : todayRecord.approvalStatus}
+            </span>
+          )}
         </div>
         <div className="rounded-xl border bg-white p-4 shadow-sm">
           <p className="text-xs text-neutral-500">Check In Time</p>
@@ -215,7 +231,7 @@ function Attendance() {
       <div className="mb-6 rounded-xl border bg-linear-to-r from-blue-500 to-emerald-500 p-6 text-white shadow-sm">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-sm opacity-90">Total Working Hours (This Period)</p>
+            <p className="text-sm opacity-90">Total Working Hours (This Month)</p>
             <p className="mt-1 text-3xl font-bold">{totalHoursThisMonth.toFixed(2)} hrs</p>
           </div>
           <div className="text-5xl opacity-80">⏱️</div>
@@ -260,7 +276,25 @@ function Attendance() {
         <div className="mb-6 rounded-xl border bg-white p-6 shadow-sm">
           <h2 className="mb-4 text-lg font-semibold text-neutral-900">Add Attendance Record</h2>
           <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
+              <div>
+                <label htmlFor="employee" className="mb-1 block text-sm font-medium text-neutral-800">
+                  Employee
+                </label>
+                <select
+                  id="employee"
+                  value={employeeId}
+                  onChange={(e) => setEmployeeId(e.target.value)}
+                  required
+                  className="block w-full rounded-md border px-3 py-2 text-sm outline-none focus:border-neutral-900"
+                >
+                  <option value="">Select employee</option>
+                  {employees.map((employee) => (
+                    <option key={employee._id} value={employee._id}>{employee.name}</option>
+                  ))}
+                </select>
+              </div>
+
               <div>
                 <label htmlFor="date" className="mb-1 block text-sm font-medium text-neutral-800">
                   Date
@@ -282,10 +316,9 @@ function Attendance() {
                 <select
                   id="status"
                   value={status}
-                  onChange={(e) => setStatus(e.target.value as any)}
+                  onChange={(e) => setStatus(e.target.value as AttendanceStatus)}
                   className="block w-full rounded-md border px-3 py-2 text-sm outline-none focus:border-neutral-900"
                 >
-                  <option value="requested">Requested</option>
                   <option value="present">Present</option>
                   <option value="absent">Absent</option>
                   <option value="late">Late</option>
@@ -330,14 +363,11 @@ function Attendance() {
             <select
               id="filter"
               value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value as any)}
+              onChange={(e) => setFilterStatus(e.target.value as 'all' | AttendanceStatus)}
               className="rounded-md border px-3 py-1.5 text-sm outline-none"
             >
               <option value="all">All</option>
               <option value="present">Present</option>
-              <option value="approved">Approved</option>
-              <option value="requested">Requested</option>
-              <option value="rejected">Rejected</option>
               <option value="absent">Absent</option>
               <option value="late">Late</option>
               <option value="half-day">Half Day</option>
@@ -390,13 +420,9 @@ function Attendance() {
                     <td className="px-4 py-3">
                       <span
                         className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
-                          record.status === 'present' || record.status === 'approved'
+                          record.status === 'present'
                             ? 'bg-green-100 text-green-800'
-                            : record.status === 'requested'
-                            ? 'bg-purple-100 text-purple-800'
                             : record.status === 'absent'
-                            ? 'bg-red-100 text-red-800'
-                            : record.status === 'rejected'
                             ? 'bg-red-100 text-red-800'
                             : record.status === 'late'
                             ? 'bg-yellow-100 text-yellow-800'
@@ -406,6 +432,9 @@ function Attendance() {
                         }`}
                       >
                         {record.status}
+                      </span>
+                      <span className={`ml-1 inline-flex rounded-full px-2 py-0.5 text-xs font-medium capitalize ${approvalBadge[record.approvalStatus]}`}>
+                        {record.approvalStatus}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-neutral-700">{formatTime(record.checkInTime)}</td>

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
-import { useChat } from '../context/ChatContext';
-import { useAuth } from '../context/AuthContext';
+import { participantId, useChat, type Message, type Participant } from '../context/useChat';
+import { useAuth } from '../context/useAuth';
+import { getErrorMessage } from '../api/axios';
 
 interface ChatProps {
   receiverId: string;
@@ -8,10 +9,10 @@ interface ChatProps {
   teamId?: string;
 }
 
-type ChatMessage = Record<string, any>;
+type ChatMessage = Message;
 
 const getMessageDate = (message: ChatMessage) => {
-  const rawValue = message.timestamp || message.createdAt || message.updatedAt;
+  const rawValue = message.timestamp || message.createdAt;
 
   if (!rawValue) return null;
 
@@ -38,7 +39,7 @@ const formatMessageDateTime = (message: ChatMessage) => {
 };
 
 const getSenderName = (message: ChatMessage, fallbackName: string) => {
-  if (typeof message.sender === 'object' && message.sender?.name) {
+  if (typeof message.sender === 'object' && message.sender.name) {
     return message.sender.name;
   }
 
@@ -50,13 +51,14 @@ const getTeamReaders = (message: ChatMessage, currentUserId?: string) => {
 
   return readByList
     .map((entry) => entry?.user)
-    .filter((reader) => reader && reader._id && reader._id !== currentUserId);
+    .filter((reader): reader is Exclude<Participant, string> =>
+      typeof reader === 'object' && reader !== null && reader._id !== currentUserId);
 };
 
 const getMessageStatus = (message: ChatMessage, isMine: boolean, isTeamChat: boolean) => {
   if (!isMine) return null;
   if (isTeamChat) {
-    const readerCount = getTeamReaders(message).length;
+    const readerCount = getTeamReaders(message, participantId(message.sender)).length;
     return readerCount > 0 ? `Seen by ${readerCount}` : 'Team sent';
   }
   return message.isRead ? 'Read' : 'Sent';
@@ -89,16 +91,20 @@ export default function Chat({ receiverId, receiverName, teamId }: ChatProps) {
     messages,
     sendMessage,
     fetchMessages,
+    closeChat,
     loadingMessages,
+    hasMoreMessages,
+    loadOlderMessages,
     typingUsers,
     setTyping,
     sendTeamMessage,
     fetchTeamMessages,
-    markMessageAsRead,
   } = useChat();
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const { user } = useAuth();
   const [inputMessage, setInputMessage] = useState('');
   const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const [isTypingLocally, setIsTypingLocally] = useState(false);
   const [selectedMessage, setSelectedMessage] = useState<ChatMessage | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -108,35 +114,38 @@ export default function Chat({ receiverId, receiverName, teamId }: ChatProps) {
   useEffect(() => {
     if (teamId) {
       fetchTeamMessages(teamId);
-    } else {
+    } else if (receiverId) {
       fetchMessages(receiverId);
     }
-  }, [fetchMessages, fetchTeamMessages, receiverId, teamId]);
+    // Leaving the conversation makes new messages from it count as unread
+    return () => closeChat();
+  }, [fetchMessages, fetchTeamMessages, closeChat, receiverId, teamId]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setInputMessage(value);
+    if (isTeamChat) return;
 
     if (!isTypingLocally && value.length > 0) {
       setIsTypingLocally(true);
-      setTyping(true, teamId || receiverId);
+      setTyping(true, receiverId);
     }
 
+    // Stop showing as typing after a pause
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     typingTimeoutRef.current = setTimeout(() => {
-      if (value.length === 0) {
-        setIsTypingLocally(false);
-        setTyping(false, teamId || receiverId);
-      }
+      setIsTypingLocally(false);
+      setTyping(false, receiverId);
     }, 1500);
   };
 
   const handleSend = async () => {
     if (!inputMessage.trim() || sending) return;
     setSending(true);
+    setSendError(null);
     setIsTypingLocally(false);
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    setTyping(false, teamId || receiverId);
+    if (!isTeamChat) setTyping(false, receiverId);
 
     try {
       if (teamId) {
@@ -146,30 +155,33 @@ export default function Chat({ receiverId, receiverName, teamId }: ChatProps) {
       }
       setInputMessage('');
     } catch (error) {
-      console.error('Error sending message:', error);
+      setSendError(getErrorMessage(error, 'Message not sent. Please try again.'));
     } finally {
       setSending(false);
     }
   };
 
+  // Scroll to the bottom for new messages, but not when older ones are prepended
+  const newestMessageId = messages[messages.length - 1]?._id;
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    messages.forEach((msg) => {
-      if (!msg.isRead && msg.receiver?._id === user?._id) {
-        markMessageAsRead(msg._id);
-      }
-    });
-  }, [markMessageAsRead, messages, user?._id]);
+  }, [newestMessageId]);
+
+  const handleLoadOlder = async () => {
+    setLoadingOlder(true);
+    await loadOlderMessages();
+    setLoadingOlder(false);
+  };
 
   const currentUserId = user?._id;
-  const remoteTypingUsers = typingUsers.filter((t) => t.userId !== currentUserId);
+  const remoteTypingUsers = isTeamChat ? [] : typingUsers.filter((t) => t.userId === receiverId);
 
   useEffect(() => {
     if (!selectedMessage?._id) return;
 
     const updatedSelectedMessage = messages.find((message) => message._id === selectedMessage._id);
     if (updatedSelectedMessage) {
-      setSelectedMessage(updatedSelectedMessage as ChatMessage);
+      setSelectedMessage(updatedSelectedMessage);
     }
   }, [messages, selectedMessage?._id]);
 
@@ -189,6 +201,17 @@ export default function Chat({ receiverId, receiverName, teamId }: ChatProps) {
         </div>
 
         <div className="flex-1 space-y-3 overflow-y-auto bg-slate-50/60 p-4">
+          {!loadingMessages && hasMoreMessages && (
+            <div className="flex justify-center">
+              <button
+                onClick={handleLoadOlder}
+                disabled={loadingOlder}
+                className="rounded-full border bg-white px-3 py-1 text-xs text-neutral-600 hover:bg-neutral-50 disabled:opacity-50"
+              >
+                {loadingOlder ? 'Loading...' : 'Load earlier messages'}
+              </button>
+            </div>
+          )}
           {loadingMessages ? (
             <div className="flex animate-pulse flex-col gap-3">
               {[...Array(4)].map((_, i) => (
@@ -201,16 +224,16 @@ export default function Chat({ receiverId, receiverName, teamId }: ChatProps) {
             <p className="mt-8 text-center text-sm text-neutral-400">No messages yet. Say hello!</p>
           ) : (
             messages.map((msg, idx) => {
-              const isMine = (msg.sender?._id || msg.sender) === currentUserId;
-              const messageTime = formatMessageTime(msg as ChatMessage);
-              const messageStatus = getMessageStatus(msg as ChatMessage, isMine, isTeamChat);
-              const senderName = getSenderName(msg as ChatMessage, receiverName);
+              const isMine = participantId(msg.sender) === currentUserId;
+              const messageTime = formatMessageTime(msg);
+              const messageStatus = getMessageStatus(msg, isMine, isTeamChat);
+              const senderName = getSenderName(msg, receiverName);
 
               return (
                 <div key={msg._id || idx} className={`flex ${isMine ? 'justify-end' : 'justify-start'}`}>
                   <button
                     type="button"
-                    onClick={() => setSelectedMessage(msg as ChatMessage)}
+                    onClick={() => setSelectedMessage(msg)}
                     className={`max-w-md rounded-2xl px-4 py-3 text-left shadow-sm transition-transform hover:scale-[1.01] ${
                       isMine
                         ? 'bg-emerald-600 text-white'
@@ -272,6 +295,9 @@ export default function Chat({ receiverId, receiverName, teamId }: ChatProps) {
           <div ref={messagesEndRef} />
         </div>
 
+        {sendError && (
+          <p className="border-t bg-red-50 px-4 py-2 text-sm text-red-700">{sendError}</p>
+        )}
         <div className="border-t bg-white p-4">
           <div className="flex gap-2">
             <input
@@ -335,7 +361,7 @@ export default function Chat({ receiverId, receiverName, teamId }: ChatProps) {
                   <p className="mt-2 text-sm text-slate-900">
                     {getMessageStatus(
                       selectedMessage,
-                      (selectedMessage.sender?._id || selectedMessage.sender) === currentUserId,
+                      participantId(selectedMessage.sender) === currentUserId,
                       isTeamChat,
                     ) || 'Received'}
                   </p>
@@ -345,7 +371,7 @@ export default function Chat({ receiverId, receiverName, teamId }: ChatProps) {
                   <p className="mt-2 text-sm text-slate-900">
                     {getReadByLabel(
                       selectedMessage,
-                      (selectedMessage.sender?._id || selectedMessage.sender) === currentUserId,
+                      participantId(selectedMessage.sender) === currentUserId,
                       isTeamChat,
                       receiverName,
                       currentUserId,
@@ -370,7 +396,7 @@ export default function Chat({ receiverId, receiverName, teamId }: ChatProps) {
                 </div>
               ) : null}
 
-              {!isTeamChat && (selectedMessage.sender?._id || selectedMessage.sender) === currentUserId ? (
+              {!isTeamChat && participantId(selectedMessage.sender) === currentUserId ? (
                 <div
                   className={`rounded-2xl px-4 py-3 text-sm ${
                     selectedMessage.isRead
@@ -384,7 +410,7 @@ export default function Chat({ receiverId, receiverName, teamId }: ChatProps) {
                 </div>
               ) : null}
 
-              {isTeamChat && (selectedMessage.sender?._id || selectedMessage.sender) === currentUserId ? (
+              {isTeamChat && participantId(selectedMessage.sender) === currentUserId ? (
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
                   {getTeamReaders(selectedMessage, currentUserId).length > 0
                     ? `Read by ${getReadByLabel(selectedMessage, true, true, receiverName, currentUserId)}`

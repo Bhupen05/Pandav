@@ -33,12 +33,6 @@ export const chatAPI = {
     return response.data;
   },
 
-  // Get all conversations/chat list
-  getChats: async () => {
-    const response = await api.get('/chat/chats');
-    return response.data;
-  },
-
   /**
    * Team Chat - Endpoints
    */

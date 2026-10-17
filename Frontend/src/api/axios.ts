@@ -1,21 +1,38 @@
 import axios from 'axios';
 
-/**
- * Axios Instance Configuration
- *
- * Base URL: Uses VITE_API_URL environment variable, defaults to /api/v2
- * This ensures all API calls go to the correct backend V2 endpoint.
- *
- * Interceptors:
- * - Request: Adds JWT token to Authorization header
- * - Response: Handles errors globally, redirects to login on 401
- */
+// Shape of every rejected request from this instance. `response` mirrors
+// axios's error shape for callers that read error.response.status/data.
+export interface ApiError {
+  message: string;
+  status?: number;
+  data?: unknown;
+  response?: {
+    status: number;
+    statusText?: string;
+    data?: unknown;
+  };
+}
 
-const baseURL = (import.meta.env.VITE_API_URL || '/api/v2').replace(/\/+$/, '');
+// Message to show the user for any error thrown by an API call
+export const getErrorMessage = (error: unknown, fallback: string): string => {
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' && error.message) {
+    return error.message;
+  }
+  return fallback;
+};
+
+// Backend API URL including the version prefix (VITE_API_URL), e.g.
+// http://localhost:5000/api/v2. Defaults to /api/v2 on the same origin.
+export const apiBaseUrl = (import.meta.env.VITE_API_URL || '/api/v2').replace(/\/+$/, '');
+
+// Socket.io lives at the server root, without the /api or /api/vN prefix
+export const socketBaseUrl = /^https?:\/\//.test(apiBaseUrl)
+  ? apiBaseUrl.replace(/\/api(?:\/v\d+)?$/, '')
+  : window.location.origin;
 
 // Create axios instance with base configuration
 const api = axios.create({
-  baseURL,
+  baseURL: apiBaseUrl,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -44,12 +61,16 @@ api.interceptors.response.use(
   },
   (error) => {
     if (error.response) {
+      const { status, statusText, data } = error.response;
+
       // Handle 401 Unauthorized - token expired or invalid
-      // BUT skip redirect for auth endpoints (login/register) so error can be shown
-      if (error.response.status === 401) {
-        const isAuthEndpoint = error.config?.url?.includes('/auth/login') || 
-                               error.config?.url?.includes('/auth/register');
-        
+      // BUT skip redirect for login/register, so the error can be shown, and for
+      // the session check on page load, which signs out without leaving the page
+      if (status === 401) {
+        const isAuthEndpoint = error.config?.url?.includes('/auth/login') ||
+                               error.config?.url?.includes('/auth/register') ||
+                               error.config?.url?.includes('/auth/me');
+
         if (!isAuthEndpoint) {
           // Clear both storage types
           localStorage.removeItem('token');
@@ -57,47 +78,28 @@ api.interceptors.response.use(
           sessionStorage.removeItem('token');
           sessionStorage.removeItem('user');
           window.location.href = '/login';
-          return Promise.reject(error.response.data);
         }
       }
-      
-      // Log detailed error information for debugging
-      console.error('API Error:', {
-        status: error.response.status,
-        statusText: error.response.statusText,
-        data: error.response.data,
-        url: error.config?.url
-      });
-      
-      // Log the actual error message from backend
-      console.error('Backend error message:', error.response.data?.message);
-      
-      // Return error with full response object so callers can check status code
-      return Promise.reject({
-        response: {
-          status: error.response.status,
-          statusText: error.response.statusText,
-          data: error.response.data,
-        },
-        message: error.response.data?.message || error.response.data?.error || `Request failed with status ${error.response.status}`,
-      });
+
+      const apiError: ApiError = {
+        message: data?.message || data?.error || `Request failed with status ${status}`,
+        status,
+        data,
+        response: { status, statusText, data },
+      };
+      return Promise.reject(apiError);
     }
-    
+
     // Network error or CORS issue
     if (error.request) {
-      console.error('Network Error:', {
-        message: 'No response received from server',
-        url: error.config?.url,
-        method: error.config?.method
-      });
-      return Promise.reject({ 
-        message: 'Cannot connect to server. Please check your internet connection or if the backend is running.' 
-      });
+      const apiError: ApiError = {
+        message: 'Cannot connect to server. Please check your internet connection or if the backend is running.',
+      };
+      return Promise.reject(apiError);
     }
-    
+
     // Other errors
-    console.error('Request Error:', error.message);
-    return Promise.reject(error);
+    return Promise.reject({ message: error.message } as ApiError);
   }
 );
 

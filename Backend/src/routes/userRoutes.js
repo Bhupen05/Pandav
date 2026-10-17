@@ -6,6 +6,7 @@ import {
   updateUser,
   deleteUser,
   toggleUserActive,
+  resetUserPassword,
   getChatUsers,
 } from '../controllers/userController.js';
 import { protect, authorize } from '../middleware/auth.js';
@@ -28,5 +29,7 @@ router
 router
   .route('/:id/toggle-active')
   .put(protect, authorize('admin'), toggleUserActive);
+
+router.put('/:id/reset-password', protect, authorize('admin'), resetUserPassword);
 
 export default router;

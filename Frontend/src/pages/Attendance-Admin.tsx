@@ -1,24 +1,20 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { attendanceAPI } from '../api/attendanceAPI'
+import {
+  attendanceAPI,
+  ATTENDANCE_STATUSES,
+  APPROVAL_STATUSES,
+  type AttendanceRecord,
+  type AttendanceStatus,
+  type ApprovalStatus,
+} from '../api/attendanceAPI'
 import { userAPI } from '../api/userAPI'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
+import { getErrorMessage } from '../api/axios'
+import { todayKey } from '../utils/date'
+import { useFeedback } from '../context/useFeedback'
 
-type AttendanceRecord = {
-  _id: string
-  user: {
-    _id: string
-    name: string
-    email: string
-    profileImage?: string
-  }
-  date: string
-  status: 'present' | 'absent' | 'late' | 'half-day' | 'leave' | 'requested' | 'approved' | 'rejected'
-  checkInTime?: string
-  checkOutTime?: string
-  workHours?: number
-  remarks?: string
-}
+const statusLabel = (value: string) => value.charAt(0).toUpperCase() + value.slice(1).replace('-', ' ')
 
 type User = {
   _id: string
@@ -29,6 +25,7 @@ type User = {
 }
 
 export default function AttendanceAdmin() {
+  const { notify } = useFeedback()
   const navigate = useNavigate()
   const { isAdmin, isAuthenticated } = useAuth()
   
@@ -36,7 +33,8 @@ export default function AttendanceAdmin() {
   const [users, setUsers] = useState<User[]>([])
   const [loading, setLoading] = useState(true)
   const [filterUser, setFilterUser] = useState<string>('all')
-  const [filterStatus, setFilterStatus] = useState<string>('all')
+  const [filterStatus, setFilterStatus] = useState<'all' | AttendanceStatus>('all')
+  const [filterApproval, setFilterApproval] = useState<'all' | ApprovalStatus>('all')
   const [dateRange, setDateRange] = useState<{ start: string; end: string }>({ start: '', end: '' })
   const [showRejectModal, setShowRejectModal] = useState(false)
   const [rejectRemark, setRejectRemark] = useState('')
@@ -46,16 +44,9 @@ export default function AttendanceAdmin() {
   // New state variables for editing
   const [showEditModal, setShowEditModal] = useState(false)
   const [editingRecord, setEditingRecord] = useState<AttendanceRecord | null>(null)
-  const [editStatus, setEditStatus] = useState<string>('present')
+  const [editStatus, setEditStatus] = useState<AttendanceStatus>('present')
+  const [editApproval, setEditApproval] = useState<ApprovalStatus>('pending')
   const [editRemarks, setEditRemarks] = useState<string>('')
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      navigate('/login')
-    } else if (!isAdmin) {
-      navigate('/')
-    }
-  }, [isAuthenticated, isAdmin, navigate])
 
   useEffect(() => {
     if (isAuthenticated && isAdmin) {
@@ -79,12 +70,18 @@ export default function AttendanceAdmin() {
     }
   }
 
+  // Swap in the record the API sends back
+  const replaceRecord = (updated: AttendanceRecord) => {
+    setRecords(prev => prev.map(r => r._id === updated._id ? updated : r))
+  }
+
   const handleApprove = async (id: string) => {
     try {
-      await attendanceAPI.approveAttendance(id)
-      setRecords(prev => prev.map(r => r._id === id ? { ...r, status: 'approved' as const } : r))
+      const response = await attendanceAPI.approveAttendance(id)
+      replaceRecord(response.data)
     } catch (error) {
       console.error('Failed to approve:', error)
+      notify(getErrorMessage(error, 'Failed to approve attendance'), 'error')
     }
   }
 
@@ -105,17 +102,12 @@ export default function AttendanceAdmin() {
 
     setIsSubmitting(true)
     try {
-      await attendanceAPI.disapproveAttendance(selectedRecordId, {
-        remarks: rejectRemark.trim() || undefined
-      })
-      setRecords(prev => prev.map(r => 
-        r._id === selectedRecordId 
-          ? { ...r, status: 'rejected' as const, remarks: rejectRemark.trim() || r.remarks } 
-          : r
-      ))
+      const response = await attendanceAPI.rejectAttendance(selectedRecordId, rejectRemark.trim() || undefined)
+      replaceRecord(response.data)
       closeRejectModal()
     } catch (error) {
       console.error('Failed to reject:', error)
+      notify(getErrorMessage(error, 'Failed to reject attendance'), 'error')
     } finally {
       setIsSubmitting(false)
     }
@@ -125,6 +117,7 @@ export default function AttendanceAdmin() {
   const openEditModal = (record: AttendanceRecord) => {
     setEditingRecord(record)
     setEditStatus(record.status)
+    setEditApproval(record.approvalStatus)
     setEditRemarks(record.remarks || '')
     setShowEditModal(true)
   }
@@ -133,6 +126,7 @@ export default function AttendanceAdmin() {
     setShowEditModal(false)
     setEditingRecord(null)
     setEditStatus('present')
+    setEditApproval('pending')
     setEditRemarks('')
   }
 
@@ -141,20 +135,16 @@ export default function AttendanceAdmin() {
 
     setIsSubmitting(true)
     try {
-      await attendanceAPI.updateAttendance(editingRecord._id, {
+      const response = await attendanceAPI.updateAttendance(editingRecord._id, {
         status: editStatus,
+        approvalStatus: editApproval,
         remarks: editRemarks.trim() || undefined,
       })
-      setRecords(prev =>
-        prev.map(r =>
-          r._id === editingRecord._id
-            ? { ...r, status: editStatus as any, remarks: editRemarks.trim() }
-            : r
-        )
-      )
+      replaceRecord(response.data)
       closeEditModal()
     } catch (error) {
       console.error('Failed to update record:', error)
+      notify(getErrorMessage(error, 'Failed to update attendance record'), 'error')
     } finally {
       setIsSubmitting(false)
     }
@@ -164,15 +154,17 @@ export default function AttendanceAdmin() {
   const filteredRecords = records.filter(record => {
     if (filterUser !== 'all' && record.user?._id !== filterUser) return false
     if (filterStatus !== 'all' && record.status !== filterStatus) return false
-    if (dateRange.start && new Date(record.date) < new Date(dateRange.start)) return false
-    if (dateRange.end && new Date(record.date) > new Date(dateRange.end)) return false
+    if (filterApproval !== 'all' && record.approvalStatus !== filterApproval) return false
+    // Days are YYYY-MM-DD, so string comparison is date order; both ends inclusive
+    if (dateRange.start && record.day < dateRange.start) return false
+    if (dateRange.end && record.day > dateRange.end) return false
     return true
   })
 
-  // Group by user for summary
+  // Group by user for summary; only approved records count
   const userSummary = users.filter(u => u.role !== 'admin').map(user => {
-    const userRecords = records.filter(r => r.user?._id === user._id)
-    const present = userRecords.filter(r => r.status === 'present' || r.status === 'approved').length
+    const userRecords = records.filter(r => r.user?._id === user._id && r.approvalStatus === 'approved')
+    const present = userRecords.filter(r => r.status === 'present').length
     const late = userRecords.filter(r => r.status === 'late').length
     const absent = userRecords.filter(r => r.status === 'absent').length
     const totalHours = userRecords.reduce((sum, r) => sum + (r.workHours || 0), 0)
@@ -180,11 +172,9 @@ export default function AttendanceAdmin() {
   })
 
   // Stats
-  const pendingRequests = records.filter(r => r.status === 'requested').length
-  const todayRecords = records.filter(r => {
-    const today = new Date().toISOString().split('T')[0]
-    return r.date.split('T')[0] === today
-  })
+  const pendingRequests = records.filter(r => r.approvalStatus === 'pending').length
+  const today = todayKey()
+  const todayRecords = records.filter(r => r.day === today)
   const checkedInToday = todayRecords.filter(r => r.checkInTime).length
 
   const formatTime = (time?: string) => {
@@ -196,13 +186,11 @@ export default function AttendanceAdmin() {
     return new Date(date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
   }
 
-  const getStatusColor = (status: string) => {
+  const getStatusColor = (status: AttendanceStatus) => {
     switch (status) {
       case 'present':
-      case 'approved':
         return 'bg-emerald-100 text-emerald-800'
       case 'absent':
-      case 'rejected':
         return 'bg-red-100 text-red-800'
       case 'late':
         return 'bg-orange-100 text-orange-800'
@@ -210,22 +198,20 @@ export default function AttendanceAdmin() {
         return 'bg-amber-100 text-amber-800'
       case 'leave':
         return 'bg-blue-100 text-blue-800'
-      case 'requested':
-        return 'bg-purple-100 text-purple-800'
       default:
         return 'bg-neutral-100 text-neutral-800'
     }
   }
 
-  if (!isAuthenticated || !isAdmin) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-50">
-        <div className="text-center">
-          <div className="mb-4 inline-block h-8 w-8 animate-spin rounded-full border-4 border-neutral-200 border-t-neutral-900"></div>
-          <p className="text-sm text-neutral-600">Checking access...</p>
-        </div>
-      </div>
-    )
+  const getApprovalColor = (approval: ApprovalStatus) => {
+    switch (approval) {
+      case 'approved':
+        return 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
+      case 'rejected':
+        return 'bg-red-50 text-red-700 ring-1 ring-red-200'
+      default:
+        return 'bg-purple-50 text-purple-700 ring-1 ring-purple-200'
+    }
   }
 
   if (loading) {
@@ -333,7 +319,7 @@ export default function AttendanceAdmin() {
               <span>🔔</span> Pending Approval Requests
             </h2>
             <div className="space-y-2">
-              {records.filter(r => r.status === 'requested').map(record => (
+              {records.filter(r => r.approvalStatus === 'pending').map(record => (
                 <div key={record._id} className="flex flex-col gap-3 rounded-xl bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex items-center gap-3">
                     <div className="flex h-10 w-10 items-center justify-center rounded-full bg-purple-100 text-sm font-semibold text-purple-700">
@@ -341,7 +327,10 @@ export default function AttendanceAdmin() {
                     </div>
                     <div>
                       <p className="font-medium text-neutral-900">{record.user?.name || 'Unknown'}</p>
-                      <p className="text-xs text-neutral-500">{formatDate(record.date)}</p>
+                      <p className="text-xs text-neutral-500">
+                        {formatDate(record.date)} · {statusLabel(record.status)}
+                        {record.checkInTime && ` · in ${formatTime(record.checkInTime)}`}
+                      </p>
                     </div>
                   </div>
                   <div className="flex gap-2">
@@ -427,18 +416,26 @@ export default function AttendanceAdmin() {
             <label className="mb-1 block text-xs font-medium text-neutral-600">Filter by Status</label>
             <select
               value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value)}
+              onChange={(e) => setFilterStatus(e.target.value as 'all' | AttendanceStatus)}
               className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm outline-none focus:border-neutral-900 focus:ring-2 focus:ring-neutral-900/10"
             >
               <option value="all">All Status</option>
-              <option value="present">Present</option>
-              <option value="late">Late</option>
-              <option value="absent">Absent</option>
-              <option value="half-day">Half Day</option>
-              <option value="leave">Leave</option>
-              <option value="requested">Requested</option>
-              <option value="approved">Approved</option>
-              <option value="rejected">Rejected</option>
+              {ATTENDANCE_STATUSES.map(status => (
+                <option key={status} value={status}>{statusLabel(status)}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex-1">
+            <label className="mb-1 block text-xs font-medium text-neutral-600">Filter by Approval</label>
+            <select
+              value={filterApproval}
+              onChange={(e) => setFilterApproval(e.target.value as 'all' | ApprovalStatus)}
+              className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm outline-none focus:border-neutral-900 focus:ring-2 focus:ring-neutral-900/10"
+            >
+              <option value="all">All</option>
+              {APPROVAL_STATUSES.map(approval => (
+                <option key={approval} value={approval}>{statusLabel(approval)}</option>
+              ))}
             </select>
           </div>
           <div className="flex-1">
@@ -463,6 +460,7 @@ export default function AttendanceAdmin() {
             onClick={() => {
               setFilterUser('all')
               setFilterStatus('all')
+              setFilterApproval('all')
               setDateRange({ start: '', end: '' })
             }}
             className="rounded-lg border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-600 hover:bg-neutral-50 transition-colors"
@@ -514,9 +512,14 @@ export default function AttendanceAdmin() {
                       </td>
                       <td className="px-4 py-3 text-neutral-700">{formatDate(record.date)}</td>
                       <td className="px-4 py-3">
-                        <span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium capitalize ${getStatusColor(record.status)}`}>
-                          {record.status}
-                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          <span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium capitalize ${getStatusColor(record.status)}`}>
+                            {statusLabel(record.status)}
+                          </span>
+                          <span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium capitalize ${getApprovalColor(record.approvalStatus)}`}>
+                            {record.approvalStatus}
+                          </span>
+                        </div>
                       </td>
                       <td className="px-4 py-3 text-neutral-700">{formatTime(record.checkInTime)}</td>
                       <td className="px-4 py-3 text-neutral-700">{formatTime(record.checkOutTime)}</td>
@@ -528,7 +531,7 @@ export default function AttendanceAdmin() {
                       <td className="px-4 py-3 text-neutral-600 max-w-37.5 truncate">{record.remarks || '—'}</td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex justify-end gap-1">
-                          {record.status === 'requested' ? (
+                          {record.approvalStatus === 'pending' ? (
                             <>
                               <button
                                 onClick={() => handleApprove(record._id)}
@@ -628,17 +631,25 @@ export default function AttendanceAdmin() {
                 <label className="mb-2 block text-sm font-medium text-neutral-700">Status</label>
                 <select
                   value={editStatus}
-                  onChange={(e) => setEditStatus(e.target.value)}
+                  onChange={(e) => setEditStatus(e.target.value as AttendanceStatus)}
                   className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10"
                 >
-                  <option value="present">Present</option>
-                  <option value="absent">Absent</option>
-                  <option value="late">Late</option>
-                  <option value="half-day">Half Day</option>
-                  <option value="leave">Leave</option>
-                  <option value="requested">Requested</option>
-                  <option value="approved">Approved</option>
-                  <option value="rejected">Rejected</option>
+                  {ATTENDANCE_STATUSES.map(status => (
+                    <option key={status} value={status}>{statusLabel(status)}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-medium text-neutral-700">Approval</label>
+                <select
+                  value={editApproval}
+                  onChange={(e) => setEditApproval(e.target.value as ApprovalStatus)}
+                  className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10"
+                >
+                  {APPROVAL_STATUSES.map(approval => (
+                    <option key={approval} value={approval}>{statusLabel(approval)}</option>
+                  ))}
                 </select>
               </div>
 

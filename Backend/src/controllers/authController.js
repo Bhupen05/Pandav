@@ -1,5 +1,6 @@
 import User from '../models/User.js';
 import jwt from 'jsonwebtoken';
+import { sendServerError } from '../utils/http.js';
 
 // Generate JWT Token
 const generateToken = (id) => {
@@ -13,23 +14,31 @@ const generateToken = (id) => {
 // @access  Public
 export const register = async (req, res) => {
   try {
-    const { name, email, password, role, phone, department, profileImage } = req.body;
+    const { name, email, password, phone, department, profileImage } = req.body;
+
+    if (typeof email !== 'string' || typeof password !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide email and password'
+      });
+    }
+    const normalizedEmail = email.trim().toLowerCase();
 
     // Check if user exists
-    const userExists = await User.findOne({ email });
+    const userExists = await User.findOne({ email: normalizedEmail });
     if (userExists) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'User already exists' 
+      return res.status(400).json({
+        success: false,
+        message: 'User already exists'
       });
     }
 
-    // Create user
+    // Role is never taken from the request: self-registered accounts are always
+    // regular users. Admins promote users through PUT /api/users/:id.
     const user = await User.create({
       name,
-      email,
+      email: normalizedEmail,
       password,
-      role: role || 'user',
       phone,
       department,
       profileImage,
@@ -52,9 +61,15 @@ export const register = async (req, res) => {
       });
     }
   } catch (error) {
-    res.status(400).json({ 
-      success: false, 
-      message: error.message 
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'User already exists'
+      });
+    }
+    res.status(400).json({
+      success: false,
+      message: error.message
     });
   }
 };
@@ -67,15 +82,15 @@ export const login = async (req, res) => {
     const { email, password } = req.body;
 
     // Validate email & password
-    if (!email || !password) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Please provide email and password' 
+    if (typeof email !== 'string' || typeof password !== 'string' || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide email and password'
       });
     }
 
     // Check for user
-    const user = await User.findOne({ email }).select('+password');
+    const user = await User.findOne({ email: email.trim().toLowerCase() }).select('+password');
     if (!user) {
       return res.status(401).json({ 
         success: false, 
@@ -115,10 +130,7 @@ export const login = async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -134,10 +146,7 @@ export const getMe = async (req, res) => {
       data: user,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -146,17 +155,34 @@ export const getMe = async (req, res) => {
 // @access  Private
 export const updatePassword = async (req, res) => {
   try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (typeof currentPassword !== 'string' || typeof newPassword !== 'string') {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide current and new password'
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be at least 6 characters long'
+      });
+    }
+
     const user = await User.findById(req.user.id).select('+password');
 
     // Check current password
-    if (!(await user.comparePassword(req.body.currentPassword))) {
+    if (!(await user.comparePassword(currentPassword))) {
       return res.status(401).json({ 
         success: false, 
         message: 'Password is incorrect' 
       });
     }
 
-    user.password = req.body.newPassword;
+    // Saving a new password also invalidates every token issued before now
+    user.password = newPassword;
     await user.save();
 
     res.json({
@@ -170,9 +196,6 @@ export const updatePassword = async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };

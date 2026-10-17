@@ -9,6 +9,7 @@ import {
   approveTaskCompletion,
   rejectTaskCompletion,
   getPendingApprovalTasks,
+  getLeaderboard,
 } from '../controllers/taskController.js';
 import { protect, authorize, adminOrLeader } from '../middleware/auth.js';
 
@@ -16,6 +17,7 @@ const router = express.Router();
 
 // Special routes first
 router.get('/pending-approval', protect, adminOrLeader, getPendingApprovalTasks);
+router.get('/leaderboard', protect, getLeaderboard);
 router.post('/:id/request-completion', protect, requestTaskCompletion);
 router.put('/:id/approve', protect, adminOrLeader, approveTaskCompletion);
 router.put('/:id/reject', protect, adminOrLeader, rejectTaskCompletion);

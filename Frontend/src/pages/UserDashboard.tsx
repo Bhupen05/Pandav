@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
-import { attendanceAPI } from '../api/attendanceAPI'
+import { useAuth } from '../context/useAuth'
+import { getErrorMessage } from '../api/axios'
+import { canRequestCompletion, canStart, isWaitingForTeammates, type AssigneeProgress } from '../utils/taskProgress'
+import { useFeedback } from '../context/useFeedback'
 import { socialV2API } from '../api/socialV2API'
-import { useAuth } from '../context/AuthContext'
 
 type Task = {
   _id: string
@@ -14,15 +16,25 @@ type Task = {
   dueDate?: string
   priority?: 'low' | 'medium' | 'high' | 'urgent'
   assignedTo?: Array<string | { _id: string; name?: string; email?: string }>
+  assigneeProgress?: AssigneeProgress[]
   tags?: string[]
+}
+
+type LeaderboardUser = {
+  _id: string
+  name: string
+  profileImage?: string
+  completedTasks: number
+  totalTasks: number
+  completionRate: number
 }
 
 type SocialPost = {
   _id: string
   content: string
-  author: { _id: string; name: string; profileImage?: string }
-  likes: number
-  comments: number
+  author?: { _id: string; name: string; profileImage?: string }
+  likes: string[]
+  comments: unknown[]
   createdAt: string
 }
 
@@ -30,15 +42,8 @@ type PersonalTodo = {
   _id: string
   title: string
   description?: string
-  isCompleted: boolean
+  status: 'todo' | 'in_progress' | 'completed'
   createdAt: string
-}
-
-type AttendanceRecord = {
-  _id: string
-  date: string
-  status: 'requested' | 'approved' | 'rejected'
-  user?: { _id: string }
 }
 
 const priorityConfig = {
@@ -57,72 +62,45 @@ const statusConfig = {
 }
 
 export default function UserDashboard() {
+  const { notify } = useFeedback()
+  const { user } = useAuth()
   const navigate = useNavigate()
-  const { isAuthenticated, user } = useAuth()
   const [tasks, setTasks] = useState<Task[]>([])
-  const [, setAttendanceHistory] = useState<AttendanceRecord[]>([])
+  const [leaderboard, setLeaderboard] = useState<LeaderboardUser[]>([])
   const [socialPosts, setSocialPosts] = useState<SocialPost[]>([])
   const [personalTodos, setPersonalTodos] = useState<PersonalTodo[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const [checkingSession, setCheckingSession] = useState(true)
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      navigate('/login')
-      return
-    }
-    if (user?.role === 'admin') {
-      navigate('/admin')
-      return
-    }
-    setCheckingSession(false)
-  }, [isAuthenticated, user?.role, navigate])
+  // Admins have their own dashboard
+  const isAdminUser = user?.role === 'admin'
 
   const loadData = useCallback(async () => {
     setIsLoading(true)
     try {
-      const [taskRes, attendanceRes, postsRes, todosRes] = await Promise.all([
-        taskAPI.getTasks(user?._id ? { assignedTo: user._id } : {}),
-        attendanceAPI.getAttendance(user?._id ? { user: user._id } : {}),
-        socialV2API.getFeed().catch(() => []),
-        socialV2API.getPersonalTasks().catch(() => []),
+      // The leaderboard is computed on the server: a regular user's task list
+      // only contains their own tasks, so it can't be built from that
+      const [taskRes, leaderboardRes, postsRes, todosRes] = await Promise.all([
+        taskAPI.getTasks(),
+        taskAPI.getLeaderboard().catch(() => ({ data: [] })),
+        socialV2API.getFeed().catch(() => ({ data: [] })),
+        socialV2API.getPersonalTasks().catch(() => ({ data: [] })),
       ])
 
-      const myTasks = Array.isArray(taskRes?.data) ? taskRes.data : []
-
-      const myAttendance = Array.isArray(attendanceRes?.data)
-        ? attendanceRes.data.filter(
-            (record: AttendanceRecord) => record.user?._id === user?._id,
-          )
-        : []
-
-      setTasks(myTasks)
-      setAttendanceHistory(
-        myAttendance.sort(
-          (a: AttendanceRecord, b: AttendanceRecord) => new Date(b.date).getTime() - new Date(a.date).getTime(),
-        ),
-      )
-
-      // Process social data
-      const posts = Array.isArray(postsRes) ? postsRes.slice(0, 5) : []
-      setSocialPosts(posts)
-      
-      const todos = Array.isArray(todosRes) ? todosRes : []
-      setPersonalTodos(todos)
+      setTasks(Array.isArray(taskRes?.data) ? taskRes.data : [])
+      setLeaderboard(Array.isArray(leaderboardRes?.data) ? (leaderboardRes.data as LeaderboardUser[]) : [])
+      setSocialPosts(Array.isArray(postsRes?.data) ? (postsRes.data as SocialPost[]).slice(0, 5) : [])
+      setPersonalTodos(Array.isArray(todosRes?.data) ? (todosRes.data as PersonalTodo[]) : [])
     } catch (error) {
       console.error('Failed to load user dashboard', error)
     } finally {
       setIsLoading(false)
     }
-  }, [user?._id])
+  }, [])
 
   useEffect(() => {
-    if (!checkingSession && isAuthenticated && user?._id) {
+    if (!isAdminUser && user?._id) {
       loadData()
     }
-  }, [checkingSession, isAuthenticated, user?._id, loadData])
-
-  const leaderboard: any[] = []
+  }, [isAdminUser, user?._id, loadData])
 
   const pendingTasks = tasks.filter((task) => task.status === 'pending')
   const inProgressTasks = tasks.filter((task) => task.status === 'in-progress')
@@ -156,61 +134,47 @@ export default function UserDashboard() {
     return 'Good evening'
   }
 
+  // Swap in the task the API sends back; it carries everyone's progress
+  const replaceTask = (updated: Task) => {
+    setTasks((prev) => prev.map((task) => (task._id === updated._id ? updated : task)))
+  }
+
   const handleCompleteTask = async (taskId: string) => {
     try {
-      await taskAPI.requestCompletion(taskId)
-      setTasks((prev) =>
-        prev.map((task) =>
-          task._id === taskId ? { ...task, status: 'completion-requested' } : task,
-        ),
-      )
+      const response = await taskAPI.requestCompletion(taskId)
+      replaceTask(response.data)
     } catch (error) {
       console.error('Unable to request task completion', error)
+      notify(getErrorMessage(error, 'Unable to request task completion'), 'error')
     }
   }
 
   const handleStartTask = async (taskId: string) => {
     try {
-      await taskAPI.updateTask(taskId, { status: 'in-progress' })
-      setTasks((prev) =>
-        prev.map((task) =>
-          task._id === taskId ? { ...task, status: 'in-progress' } : task,
-        ),
-      )
+      const response = await taskAPI.updateTask(taskId, { status: 'in-progress' })
+      replaceTask(response.data)
     } catch (error) {
       console.error('Unable to start task', error)
+      notify(getErrorMessage(error, 'Unable to start task'), 'error')
     }
   }
 
   const handleToggleTodo = async (todoId: string) => {
     try {
-      await socialV2API.togglePersonalTask(todoId)
-      setPersonalTodos((prev) =>
-        prev.map((todo) =>
-          todo._id === todoId ? { ...todo, isCompleted: !todo.isCompleted } : todo,
-        ),
-      )
+      const response = await socialV2API.togglePersonalTask(todoId)
+      const updated = response?.data as PersonalTodo | undefined
+      if (updated) {
+        setPersonalTodos((prev) => prev.map((todo) => (todo._id === todoId ? updated : todo)))
+      }
     } catch (error) {
-      console.error('Unable to toggle todo', error)
+      notify(getErrorMessage(error, 'Unable to update todo'), 'error')
     }
   }
 
 
 
-  if (!isAuthenticated) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-50 text-sm text-neutral-600">
-        Redirecting...
-      </div>
-    )
-  }
-
-  if (checkingSession) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-50 text-sm text-neutral-600">
-        Checking session...
-      </div>
-    )
+  if (isAdminUser) {
+    return <Navigate to="/admin" replace />
   }
 
   if (isLoading) {
@@ -354,14 +318,14 @@ export default function UserDashboard() {
                 <div key={post._id} className="p-4 hover:bg-neutral-50 transition-colors">
                   <div className="flex items-start gap-3">
                     <div className="flex h-8 w-8 items-center justify-center rounded-full bg-purple-100 text-xs font-bold text-purple-600">
-                      {post.author.name.split(' ').map((n: string) => n[0]).join('').slice(0, 2)}
+                      {(post.author?.name || '?').split(' ').map((n: string) => n[0]).join('').slice(0, 2)}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-neutral-900">{post.author.name}</p>
+                      <p className="text-sm font-medium text-neutral-900">{post.author?.name || 'Unknown'}</p>
                       <p className="text-sm text-neutral-600 mt-1 line-clamp-2">{post.content}</p>
                       <div className="flex gap-4 mt-2 text-xs text-neutral-500">
-                        <span>👍 {post.likes}</span>
-                        <span>💬 {post.comments}</span>
+                        <span>👍 {post.likes?.length ?? 0}</span>
+                        <span>💬 {post.comments?.length ?? 0}</span>
                       </div>
                     </div>
                   </div>
@@ -379,7 +343,7 @@ export default function UserDashboard() {
               <h3 className="font-bold text-lg">Personal Todos</h3>
             </div>
             <p className="text-teal-100 text-sm mt-1 flex items-center gap-1">
-              {personalTodos.filter(t => !t.isCompleted).length} of {personalTodos.length} remaining
+              {personalTodos.filter(t => t.status !== 'completed').length} of {personalTodos.length} remaining
             </p>
           </div>
           {personalTodos.length === 0 ? (
@@ -399,23 +363,23 @@ export default function UserDashboard() {
                 <div
                   key={todo._id}
                   className={`p-4 flex items-start gap-3 hover:bg-neutral-50 transition-colors ${
-                    todo.isCompleted ? 'bg-neutral-50' : ''
+                    todo.status === 'completed' ? 'bg-neutral-50' : ''
                   }`}
                 >
                   <button
                     onClick={() => handleToggleTodo(todo._id)}
                     className={`mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded border-2 transition-all ${
-                      todo.isCompleted
+                      todo.status === 'completed'
                         ? 'bg-teal-500 border-teal-500'
                         : 'border-neutral-300 hover:border-teal-500'
                     }`}
                   >
-                    {todo.isCompleted && <span className="text-white text-xs">✓</span>}
+                    {todo.status === 'completed' && <span className="text-white text-xs">✓</span>}
                   </button>
                   <div className="flex-1 min-w-0">
                     <p
                       className={`text-sm font-medium ${
-                        todo.isCompleted ? 'line-through text-neutral-400' : 'text-neutral-900'
+                        todo.status === 'completed' ? 'line-through text-neutral-400' : 'text-neutral-900'
                       }`}
                     >
                       {todo.title}
@@ -555,7 +519,7 @@ export default function UserDashboard() {
                     <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${config.bg} ${config.text}`}>
                       {task.status.replace('-', ' ')}
                     </span>
-                    {task.status === 'pending' && (
+                    {canStart(task, user?._id) && (
                       <button
                         onClick={() => handleStartTask(task._id)}
                         className="rounded-lg bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
@@ -563,13 +527,16 @@ export default function UserDashboard() {
                         Start
                       </button>
                     )}
-                    {task.status === 'in-progress' && (
+                    {!canStart(task, user?._id) && canRequestCompletion(task, user?._id) && (
                       <button
                         onClick={() => handleCompleteTask(task._id)}
                         className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700"
                       >
                         Complete
                       </button>
+                    )}
+                    {isWaitingForTeammates(task, user?._id) && (
+                      <span className="text-xs text-purple-600">Waiting for teammates</span>
                     )}
                   </div>
                 </div>

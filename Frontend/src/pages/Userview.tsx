@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
-import { attendanceAPI } from '../api/attendanceAPI'
+import { attendanceAPI, type AttendanceRecord } from '../api/attendanceAPI'
 import { userAPI } from '../api/userAPI'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 
 type Task = {
   _id: string
@@ -15,20 +15,6 @@ type Task = {
   priority?: 'low' | 'medium' | 'high' | 'urgent'
   assignedTo?: Array<string | { _id: string; name?: string; email?: string }>
   tags?: string[]
-}
-
-type AttendanceRecord = {
-  _id: string
-  user: {
-    _id: string
-    name: string
-    email: string
-  }
-  date: string
-  status: 'present' | 'absent' | 'late' | 'half-day' | 'leave' | 'requested' | 'approved' | 'rejected'
-  checkInTime?: string
-  checkOutTime?: string
-  workHours?: number
 }
 
 type User = {
@@ -49,14 +35,6 @@ export default function Userview() {
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<'overview' | 'tasks' | 'attendance'>('overview')
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      navigate('/login')
-    } else if (!isAdmin) {
-      navigate('/')
-    }
-  }, [isAuthenticated, isAdmin, navigate])
 
   useEffect(() => {
     if (isAuthenticated && isAdmin) {
@@ -109,13 +87,14 @@ export default function Userview() {
     requested: tasks.filter(t => t.status === 'completion-requested').length,
   }
 
-  // Attendance stats
+  // Attendance stats; only approved records count
+  const approvedAttendance = attendance.filter(a => a.approvalStatus === 'approved')
   const attendanceStats = {
     total: attendance.length,
-    present: attendance.filter(a => a.status === 'present' || a.status === 'approved').length,
-    late: attendance.filter(a => a.status === 'late').length,
-    absent: attendance.filter(a => a.status === 'absent').length,
-    totalHours: attendance.reduce((sum, a) => sum + (a.workHours || 0), 0),
+    present: approvedAttendance.filter(a => a.status === 'present').length,
+    late: approvedAttendance.filter(a => a.status === 'late').length,
+    absent: approvedAttendance.filter(a => a.status === 'absent').length,
+    totalHours: approvedAttendance.reduce((sum, a) => sum + (a.workHours || 0), 0),
   }
 
   const formatDate = (date?: string) => {
@@ -159,17 +138,6 @@ export default function Userview() {
       default:
         return 'bg-neutral-100 text-neutral-700'
     }
-  }
-
-  if (!isAuthenticated || !isAdmin) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-50">
-        <div className="text-center">
-          <div className="mb-4 inline-block h-8 w-8 animate-spin rounded-full border-4 border-neutral-200 border-t-neutral-900"></div>
-          <p className="text-sm text-neutral-600">Checking access...</p>
-        </div>
-      </div>
-    )
   }
 
   if (loading) {
@@ -281,7 +249,7 @@ export default function Userview() {
           ].map(tab => (
             <button
               key={tab.key}
-              onClick={() => setActiveTab(tab.key as any)}
+              onClick={() => setActiveTab(tab.key as typeof activeTab)}
               className={`inline-flex items-center gap-2 whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium transition-all ${
                 activeTab === tab.key
                   ? 'bg-neutral-900 text-white shadow-lg'
@@ -492,6 +460,9 @@ export default function Userview() {
                         <td className="px-4 py-3">
                           <span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium capitalize ${getStatusColor(record.status)}`}>
                             {record.status}
+                          </span>
+                          <span className={`ml-1 inline-flex rounded-full px-2 py-1 text-xs font-medium capitalize ${getStatusColor(record.approvalStatus)}`}>
+                            {record.approvalStatus}
                           </span>
                         </td>
                         <td className="px-4 py-3 text-neutral-700">{formatTime(record.checkInTime)}</td>

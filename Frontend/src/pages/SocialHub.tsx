@@ -16,7 +16,7 @@ import {
   Users,
 } from 'lucide-react'
 import { socialV2API } from '../api/socialV2API'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 
 type Role = 'admin' | 'team_leader' | 'team_member' | 'user'
 type Visibility = 'public' | 'team' | 'connections'

@@ -150,10 +150,15 @@ The API returns JSON responses with the following structure:
 
 ## Development
 
-For development, nodemon is configured to auto-restart the server on file changes:
+`npm run dev` restarts the server when a file changes (Node's built-in `--watch`):
 ```bash
 npm run dev
 ```
+
+## Tests
+
+`npm test` runs the end-to-end suites in `test/` against a MongoDB server
+(`TEST_MONGODB_URL`, default `mongodb://127.0.0.1:27017`). See the main README for details.
 
 ## Environment Variables
 

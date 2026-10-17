@@ -2,7 +2,8 @@ import express from 'express';
 import {
   sendMessage,
   getMessages,
-  getChats,
+  markAsRead,
+  getUnreadCounts,
   markMessageAsRead,
   sendTeamMessage,
   getTeamMessages,
@@ -16,7 +17,8 @@ const router = express.Router();
 router.post('/send', protect, sendMessage);
 router.get('/messages/:userId', protect, getMessages);
 router.patch('/messages/:messageId/read', protect, markMessageAsRead);
-router.get('/chats', protect, getChats);
+router.put('/read/:userId', protect, markAsRead);
+router.get('/unread', protect, getUnreadCounts);
 
 router.post('/teams/:teamId/send', protect, sendTeamMessage);
 router.get('/teams/:teamId/messages', protect, getTeamMessages);

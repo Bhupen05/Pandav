@@ -1,4 +1,22 @@
 import User from '../models/User.js';
+import Task from '../models/Task.js';
+import Attendance from '../models/Attendance.js';
+import Chat from '../models/Chat.js';
+import Team from '../models/Team.js';
+import TeamInvite from '../models/TeamInvite.js';
+import TeamChatMessage from '../models/TeamChatMessage.js';
+import { escapeRegex, listResponse, pick, sendServerError } from '../utils/http.js';
+
+// Fields a user may change on their own profile
+const SELF_EDITABLE_FIELDS = ['name', 'email', 'phone', 'department', 'profileImage'];
+// Admins can additionally change role and active status
+const ADMIN_EDITABLE_FIELDS = [...SELF_EDITABLE_FIELDS, 'role', 'isActive'];
+
+// Ends any open chat connections for a user who was just deactivated
+const disconnectUserSockets = (req, userId) => {
+  const io = req.app.get('io');
+  if (io) io.in(userId.toString()).disconnectSockets(true);
+};
 
 // @desc    Search users by name or email
 // @route   GET /api/users/search?q=...
@@ -7,11 +25,12 @@ export const searchUsers = async (req, res) => {
   try {
     const { q } = req.query;
 
-    if (!q || q.trim().length < 2) {
+    if (typeof q !== 'string' || q.trim().length < 2) {
       return res.json({ success: true, data: [] });
     }
 
-    const query = q.trim();
+    // Matched as plain text, not as a regular expression
+    const query = escapeRegex(q.trim());
     const users = await User.find({
       $or: [
         { name: { $regex: query, $options: 'i' } },
@@ -25,7 +44,7 @@ export const searchUsers = async (req, res) => {
 
     res.json({ success: true, count: users.length, data: users });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -35,10 +54,10 @@ export const searchUsers = async (req, res) => {
 export const getChatUsers = async (req, res) => {
   try {
     const users = await User.find({ _id: { $ne: req.user._id }, isActive: { $ne: false } })
-      .select('_id name email profileImage');
+      .select('_id name email');
     res.json({ success: true, data: users });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 
@@ -54,18 +73,11 @@ export const getUsers = async (req, res) => {
     if (department) filter.department = department;
     if (isActive !== undefined) filter.isActive = isActive === 'true';
 
-    const users = await User.find(filter).select('-password');
+    const query = User.find(filter).select('-password');
 
-    res.json({
-      success: true,
-      count: users.length,
-      data: users,
-    });
+    res.json(await listResponse(User, filter, query, req.query));
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -96,10 +108,7 @@ export const getUser = async (req, res) => {
       data: user,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -108,35 +117,41 @@ export const getUser = async (req, res) => {
 // @access  Private
 export const updateUser = async (req, res) => {
   try {
+    const isAdmin = req.user.role === 'admin';
+    const isSelf = req.user.id === req.params.id;
+
     // Users can only update their own profile unless they're admin
-    if (req.user.role !== 'admin' && req.user.id !== req.params.id) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Not authorized to update this profile' 
+    if (!isAdmin && !isSelf) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to update this profile'
       });
     }
 
-    // Prevent non-admin users from changing role
-    if (req.user.role !== 'admin' && req.body.role) {
-      delete req.body.role;
+    // Only whitelisted fields; password changes go through /api/auth/updatepassword
+    const updates = pick(req.body, isAdmin ? ADMIN_EDITABLE_FIELDS : SELF_EDITABLE_FIELDS);
+
+    // Stop admins from locking themselves out
+    if (isAdmin && isSelf && ((updates.role && updates.role !== 'admin') || updates.isActive === false)) {
+      return res.status(400).json({
+        success: false,
+        message: 'You cannot remove your own admin access or deactivate yourself'
+      });
     }
 
-    // Don't allow password update through this route
-    if (req.body.password) {
-      delete req.body.password;
-    }
-
-    const user = await User.findByIdAndUpdate(req.params.id, req.body, {
+    const user = await User.findByIdAndUpdate(req.params.id, updates, {
       new: true,
       runValidators: true,
     }).select('-password');
 
     if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
       });
     }
+
+    if (updates.isActive === false) disconnectUserSockets(req, user._id);
 
     res.json({
       success: true,
@@ -168,21 +183,72 @@ export const deleteUser = async (req, res) => {
     if (req.user.id === req.params.id) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Cannot delete your own account' 
+        message: 'Cannot delete your own account'
       });
     }
 
+    // Remove what belongs to the user so nothing points at a missing account.
+    // Tasks are kept (other assignees may share them); the user is just unassigned.
+    await Promise.all([
+      Task.updateMany(
+        { assignedTo: user._id },
+        { $pull: { assignedTo: user._id, assigneeProgress: { user: user._id } } }
+      ),
+      Attendance.deleteMany({ user: user._id }),
+      Chat.deleteMany({ $or: [{ sender: user._id }, { receiver: user._id }] }),
+      Team.updateMany(
+        { $or: [{ leaders: user._id }, { members: user._id }] },
+        { $pull: { leaders: user._id, members: user._id } }
+      ),
+      TeamInvite.deleteMany({ $or: [{ invitedUser: user._id }, { invitedBy: user._id }] }),
+      TeamChatMessage.deleteMany({ sender: user._id }),
+    ]);
     await user.deleteOne();
+    disconnectUserSockets(req, user._id);
 
     res.json({
       success: true,
       message: 'User deleted successfully',
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
+    sendServerError(res, error);
+  }
+};
+
+// @desc    Set a new password for a user who forgot theirs
+// @route   PUT /api/users/:id/reset-password
+// @access  Private (Admin)
+export const resetUserPassword = async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+
+    if (typeof newPassword !== 'string' || newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be at least 6 characters long'
+      });
+    }
+
+    const user = await User.findById(req.params.id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Saving a new password also signs the user out of existing sessions
+    user.password = newPassword;
+    await user.save();
+    disconnectUserSockets(req, user._id);
+
+    res.json({
+      success: true,
+      message: `Password reset for ${user.name}`,
     });
+  } catch (error) {
+    sendServerError(res, error);
   }
 };
 
@@ -200,8 +266,17 @@ export const toggleUserActive = async (req, res) => {
       });
     }
 
+    if (req.user.id === req.params.id) {
+      return res.status(400).json({
+        success: false,
+        message: 'You cannot deactivate your own account'
+      });
+    }
+
     user.isActive = !user.isActive;
     await user.save();
+
+    if (!user.isActive) disconnectUserSockets(req, user._id);
 
     res.json({
       success: true,
@@ -209,9 +284,6 @@ export const toggleUserActive = async (req, res) => {
       message: `User ${user.isActive ? 'activated' : 'deactivated'} successfully`,
     });
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };

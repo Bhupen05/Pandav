@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Navigate } from 'react-router-dom'
 import Chat from '../components/Chat'
-import { useAuth } from '../context/AuthContext'
-import { useChat } from '../context/ChatContext'
+import { useAuth } from '../context/useAuth'
+import { useChat } from '../context/useChat'
 import { teamAPI } from '../api/teamAPI'
+import { userAPI } from '../api/userAPI'
+import { getErrorMessage } from '../api/axios'
 
 interface UserItem {
   _id: string
@@ -25,8 +26,6 @@ interface TeamDetail {
 
 type ListType = 'direct' | 'team'
 
-const apiBaseUrl = (import.meta.env.VITE_API_URL || '/api/v2').replace(/\/+$/, '')
-
 const initials = (name: string) =>
   name
     .split(' ')
@@ -36,7 +35,7 @@ const initials = (name: string) =>
     .toUpperCase()
 
 export default function ChatPage() {
-  const { token, isAuthenticated, user, isTeamLeader, isAdmin } = useAuth()
+  const { isAuthenticated, user, isTeamLeader, isAdmin } = useAuth()
   const { unreadCounts, clearUnread, activeUsers } = useChat()
   const [listType, setListType] = useState<ListType>('direct')
   const [users, setUsers] = useState<UserItem[]>([])
@@ -54,8 +53,6 @@ export default function ChatPage() {
   const [groupForm, setGroupForm] = useState({ name: '', description: '' })
   const [searchQuery, setSearchQuery] = useState('')
 
-  const authToken = token || sessionStorage.getItem('token') || localStorage.getItem('token')
-
   const isTeamManager = useMemo(() => {
     if (!user || !selectedTeam) return false
     return isAdmin || selectedTeam.leaders.some((leader) => leader._id === user._id)
@@ -63,8 +60,7 @@ export default function ChatPage() {
 
   const canCreateTeam = Boolean(isTeamLeader && !myTeam)
   const allowedDirectUserIds = useMemo(() => {
-    if (isAdmin) return null
-    if (!myTeam || !user?._id) return new Set<string>()
+    if (isAdmin || !myTeam || !user?._id) return null
 
     const ids = new Set<string>()
     myTeam.leaders.forEach((member) => {
@@ -106,7 +102,7 @@ export default function ChatPage() {
     } catch (error) {
       setMyTeam(null)
       setSelectedTeam(null)
-      const message = error instanceof Error ? error.message : 'No team chat available'
+      const message = getErrorMessage(error, 'No team chat available')
       setTeamError(message)
     } finally {
       setLoadingTeam(false)
@@ -122,12 +118,9 @@ export default function ChatPage() {
     if (!isAuthenticated || listType !== 'direct') return
 
     setLoadingUsers(true)
-    fetch(`${apiBaseUrl}/users/chat-list`, {
-      headers: { Authorization: `Bearer ${authToken}` },
-    })
-      .then((response) => response.json())
-      .then((data) => {
-        const list: UserItem[] = Array.isArray(data) ? data : data.data ?? []
+    userAPI.getChatUsers()
+      .then((response) => {
+        const list: UserItem[] = Array.isArray(response.data) ? response.data : []
         const scopedList =
           allowedDirectUserIds === null
             ? list
@@ -136,7 +129,7 @@ export default function ChatPage() {
       })
       .catch(console.error)
       .finally(() => setLoadingUsers(false))
-  }, [isAuthenticated, listType, authToken, allowedDirectUserIds])
+  }, [isAuthenticated, listType, allowedDirectUserIds])
 
   useEffect(() => {
     if (!isAuthenticated || listType !== 'team') return
@@ -160,7 +153,7 @@ export default function ChatPage() {
       setGroupForm({ name: '', description: '' })
       setManageNotice('Team chat group created successfully.')
     } catch (error) {
-      setManageError(error instanceof Error ? error.message : 'Unable to create the team group')
+      setManageError(getErrorMessage(error, 'Unable to create the team group'))
     } finally {
       setManageBusy(false)
     }
@@ -184,7 +177,7 @@ export default function ChatPage() {
       setSelectedTeam(updatedTeam)
       setManageNotice('Team details updated.')
     } catch (error) {
-      setManageError(error instanceof Error ? error.message : 'Unable to update team details')
+      setManageError(getErrorMessage(error, 'Unable to update team details'))
     } finally {
       setManageBusy(false)
     }
@@ -204,7 +197,7 @@ export default function ChatPage() {
       setManageNotice('Invitation sent. The user can accept it from their team invites.')
       await loadMyTeam()
     } catch (error) {
-      setManageError(error instanceof Error ? error.message : 'Unable to invite member')
+      setManageError(getErrorMessage(error, 'Unable to invite member'))
     } finally {
       setManageBusy(false)
     }
@@ -224,7 +217,7 @@ export default function ChatPage() {
       setSelectedTeam(updatedTeam)
       setManageNotice('Member removed from the group.')
     } catch (error) {
-      setManageError(error instanceof Error ? error.message : 'Unable to remove member')
+      setManageError(getErrorMessage(error, 'Unable to remove member'))
     } finally {
       setManageBusy(false)
     }
@@ -242,8 +235,6 @@ export default function ChatPage() {
       setInviteInput('')
     }
   }, [selectedTeam, showManagePanel])
-
-  if (!isAuthenticated) return <Navigate to="/login" replace />
 
   return (
     <div className="min-h-[calc(100vh-80px)] bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.12),_transparent_28%),linear-gradient(180deg,_#f8fafc_0%,_#eef6ff_100%)]">
