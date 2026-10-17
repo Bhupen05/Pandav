@@ -85,8 +85,12 @@ const freePort = () =>
 export async function startServer(suite, env = {}) {
   await resetDatabase(suite);
   runScript(suite, 'create-users.js');
+  return launchServer(suite, await freePort(), env);
+}
 
-  const port = await freePort();
+// Starts the server on a suite's database as it is, and resolves once it
+// answers its health check
+export async function launchServer(suite, port, env = {}) {
   const base = `http://127.0.0.1:${port}`;
   const server = spawn(process.execPath, [path.join(BACKEND_DIR, 'src/server.js')], {
     cwd: TEST_DIR,

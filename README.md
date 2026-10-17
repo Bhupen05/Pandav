@@ -49,61 +49,35 @@ A full-stack MERN application for managing employee tasks, attendance, and perfo
 
 ```
 Pandav/
-├── Frontend/
+├── .github/workflows/ci.yml   # Lint, tests, browser tests and audits on every push
+├── Frontend/                  # React 19 + Vite + Tailwind
 │   ├── src/
-│   │   ├── api/              # API service layer
-│   │   │   ├── axios.ts      # Axios instance with interceptors
-│   │   │   ├── authAPI.ts    # Authentication endpoints
-│   │   │   ├── taskAPI.ts    # Task management endpoints
-│   │   │   ├── userAPI.ts    # User management endpoints
-│   │   │   └── attendanceAPI.ts
-│   │   ├── components/       # Reusable components
-│   │   │   ├── Navbar.tsx    # Navigation with profile dropdown
-│   │   │   ├── Tasksadd.tsx  # Task creation form
-│   │   │   ├── Taskscard.tsx # Task display card
-│   │   │   ├── Attendance.tsx # Attendance management
-│   │   │   └── Contactus.tsx
-│   │   ├── context/          # React Context
-│   │   │   └── AuthContext.tsx # Authentication state
-│   │   ├── pages/            # Page components
-│   │   │   ├── Landing.tsx   # Home page
-│   │   │   ├── Login.tsx     # Login/Register
-│   │   │   ├── Profile.tsx   # User profile with heatmap
-│   │   │   ├── Tasks.tsx     # User task view
-│   │   │   ├── AdminDashboard.tsx # Admin panel
-│   │   │   ├── About.tsx
-│   │   │   └── Service.tsx
-│   │   ├── App.tsx           # Main app component
-│   │   └── main.tsx          # Entry point
-│   ├── package.json
-│   └── vite.config.ts
+│   │   ├── api/               # One module per API area; axios.ts holds the shared client
+│   │   ├── components/        # Navbar, route guard, task form and card, chat window, attendance, ...
+│   │   ├── context/           # Auth, chat (Socket.io) and feedback (toasts, dialogs) providers
+│   │   ├── pages/             # One component per route; loaded on demand (App.tsx)
+│   │   ├── utils/             # Dates, role routing, task progress, image resizing, paging
+│   │   ├── App.tsx            # Routes
+│   │   └── main.tsx           # Entry point
+│   ├── e2e/                   # Playwright browser tests
+│   ├── playwright.config.ts
+│   ├── vercel.json            # Production: /api proxy to the backend, SPA rewrites
+│   └── vite.config.ts         # Development: /api proxy to the backend
 │
-└── Backend/
+└── Backend/                   # Express + MongoDB (Mongoose) + Socket.io
     ├── src/
-    │   ├── config/
-    │   │   └── database.js   # MongoDB connection
-    │   ├── controllers/      # Request handlers
-    │   │   ├── authController.js
-    │   │   ├── taskController.js
-    │   │   ├── userController.js
-    │   │   ├── attendanceController.js
-    │   │   └── contactController.js
-    │   ├── models/           # Mongoose schemas
-    │   │   ├── User.js       # User model with profileImage
-    │   │   ├── Task.js       # Task model
-    │   │   ├── Attendance.js # Attendance model
-    │   │   └── Contact.js
-    │   ├── routes/           # API routes
-    │   │   ├── authRoutes.js
-    │   │   ├── taskRoutes.js
-    │   │   ├── userRoutes.js
-    │   │   ├── attendanceRoutes.js
-    │   │   └── contactRoutes.js
-    │   ├── middleware/
-    │   │   └── auth.js       # JWT verification & authorization
-    │   └── server.js         # Express app setup
-    ├── package.json
-    └── .env
+    │   ├── config/            # Database connection
+    │   ├── controllers/       # Request handlers: auth, users, tasks, attendance, teams,
+    │   │                      #   chat, contact, Social Hub (socialV2Controller.js)
+    │   ├── middleware/        # Sessions and roles, rate limits, input sanitising, V2 validation
+    │   ├── models/            # Mongoose schemas (Social Hub models end in V2)
+    │   ├── routes/            # Routers; v2Routes.js mounts them all under /api/v2
+    │   ├── utils/             # Sessions, HTTP helpers, team rules, dates, token encryption
+    │   └── server.js          # Express app, Socket.io, route mounting
+    ├── scripts/migrate-data.js  # npm run migrate: brings an existing database up to date
+    ├── test/                  # End-to-end API test suites (npm test) and the browser tests' backend
+    ├── Doc/                   # API reference
+    └── create-users.js        # Seeds the first admin and demo user
 ```
 
 ## 🔧 Installation & Setup
@@ -210,48 +184,33 @@ TEST_MONGODB_URL=mongodb://127.0.0.1:27999 npm test   # any other server
 On Windows PowerShell, set the variable with `$env:TEST_MONGODB_URL = "mongodb://..."` first.
 The tests never read `Backend/.env`, so they can't touch your development or production database.
 
+The frontend has browser tests in `Frontend/e2e/` (Playwright, Chromium): sign-in, sessions and
+"remember me", route guards, live chat (including after a backend restart) and the admin flows
+for tasks, attendance and password resets. They start their own backend (port 5055, on a fresh
+`pandav_test_e2e` database) and Vite dev server (port 5180), and need the same MongoDB server as
+the backend tests:
+
+```bash
+cd Frontend
+npx playwright install chromium   # once
+npm run test:e2e
+```
+
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push and pull request:
-- **Backend:** the test suites against a MongoDB 7 service, then `npm audit` of production dependencies
+- **Backend:** `npm run lint`, the test suites against a MongoDB 7 service, then `npm audit` of production dependencies
 - **Frontend:** `npm run lint`, then `npm run build` (type-check and bundle), then `npm audit` of production dependencies
+- **Browser tests:** the Playwright suite against a MongoDB 7 service; a failed run keeps its report and traces as an artifact
 
 The audit steps fail on high or critical advisories.
 
 ## 📡 API Endpoints
 
-### Authentication
-- `POST /api/auth/register` - Register new user
-- `POST /api/auth/login` - User login
-- `GET /api/auth/me` - Get current user
+The API lives under `/api/v2`. The full reference, one page per area, is in
+[`Backend/Doc/`](Backend/Doc/README.md): sessions, errors, paging and rate limits on its front
+page, then users, tasks, attendance, teams, chat (with the Socket.io events) and the Social Hub.
 
-### Tasks
-- `GET /api/tasks` - Get all tasks (filtered by role)
-- `GET /api/tasks/:id` - Get single task
-- `POST /api/tasks` - Create task
-- `PUT /api/tasks/:id` - Update task
-- `DELETE /api/tasks/:id` - Delete task (admin only)
-
-### Users
-- `GET /api/users` - Get all users (admin only)
-- `GET /api/users/:id` - Get user by ID
-- `PUT /api/users/:id` - Update user
-- `DELETE /api/users/:id` - Delete user (admin only)
-
-### Attendance
-- `GET /api/attendance` - Get attendance records
-- `POST /api/attendance` - Create attendance record
-- `POST /api/attendance/checkin` - Check-in
-- `POST /api/attendance/checkout` - Check-out
-- `PUT /api/attendance/:id` - Update attendance
-- `DELETE /api/attendance/:id` - Delete attendance (admin only)
-
-### Health
-- `GET /api/health` - `200` when the server and database are up, `503` while the database is unreachable
-
-### Contact
-- `GET /api/contact` - Get all messages (admin only)
-- `POST /api/contact` - Submit contact form
-- `PUT /api/contact/:id` - Update message status
-- `DELETE /api/contact/:id` - Delete message
+`GET /api/health` answers `200` when the server and database are up and `503` while the
+database is unreachable.
 
 ## 🔐 Authentication & Authorization
 

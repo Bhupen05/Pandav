@@ -1,7 +1,7 @@
 import Attendance from '../models/Attendance.js';
 import User from '../models/User.js';
 import { listResponse, pick, sendServerError } from '../utils/http.js';
-import { toDayKey } from '../utils/dates.js';
+import { dayRange, toDayKey } from '../utils/dates.js';
 import { canReviewFor, ledUserIds } from '../utils/teams.js';
 
 // Fields an admin (or the user's team leader) may set on a record. Regular
@@ -33,9 +33,9 @@ export const getAttendance = async (req, res) => {
 
     // Both ends inclusive, compared as calendar days
     if (startDate || endDate) {
-      filter.day = {};
-      if (startDate) filter.day.$gte = toDayKey(startDate);
-      if (endDate) filter.day.$lte = toDayKey(endDate);
+      const { range, error } = dayRange(startDate, endDate);
+      if (error) return res.status(400).json({ success: false, message: error });
+      filter.day = range;
     }
 
     // Admins see everyone, team leaders their teams, everyone else themselves
@@ -144,10 +144,7 @@ export const createAttendance = async (req, res) => {
         message: DUPLICATE_DAY_MESSAGE
       })
     }
-    res.status(400).json({
-      success: false,
-      message: error.message
-    })
+    sendServerError(res, error)
   }
 }
 
@@ -216,10 +213,7 @@ export const updateAttendance = async (req, res) => {
         message: DUPLICATE_DAY_MESSAGE
       });
     }
-    res.status(400).json({
-      success: false,
-      message: error.message
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -288,10 +282,7 @@ export const checkIn = async (req, res) => {
         message: 'Already checked in today'
       });
     }
-    res.status(400).json({
-      success: false,
-      message: error.message
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -329,10 +320,7 @@ export const checkOut = async (req, res) => {
       data: populatedAttendance,
     });
   } catch (error) {
-    res.status(400).json({
-      success: false,
-      message: error.message
-    });
+    sendServerError(res, error);
   }
 };
 

@@ -10,7 +10,11 @@ const timezone = () => process.env.APP_TIMEZONE || DEFAULT_TIMEZONE;
 // Date-only strings from <input type="date"> are already a day and pass through.
 // Returns null for anything that isn't a valid date.
 export const toDayKey = (value = new Date()) => {
-  if (typeof value === 'string' && DATE_ONLY.test(value)) return value;
+  if (typeof value === 'string' && DATE_ONLY.test(value)) {
+    // A day that exists in the calendar (not 2026-02-31)
+    const day = new Date(`${value}T00:00:00Z`);
+    return !Number.isNaN(day.getTime()) && day.toISOString().startsWith(value) ? value : null;
+  }
 
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
@@ -21,4 +25,17 @@ export const toDayKey = (value = new Date()) => {
     month: '2-digit',
     day: '2-digit',
   }).format(date);
+};
+
+// A filter on `day` between two dates, both inclusive (either may be left
+// out), or { error } naming the parameter that isn't a date
+export const dayRange = (startDate, endDate) => {
+  const range = {};
+  for (const [name, value, operator] of [['startDate', startDate, '$gte'], ['endDate', endDate, '$lte']]) {
+    if (!value) continue;
+    const day = toDayKey(value);
+    if (!day) return { error: `Invalid ${name}` };
+    range[operator] = day;
+  }
+  return { range };
 };

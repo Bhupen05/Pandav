@@ -61,10 +61,7 @@ export const createContact = async (req, res) => {
       message: 'Your message has been sent successfully',
     });
   } catch (error) {
-    res.status(400).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -102,10 +99,7 @@ export const updateContact = async (req, res) => {
       data: contact,
     });
   } catch (error) {
-    res.status(400).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 

@@ -24,7 +24,8 @@ type PersonalTaskPayload = {
 }
 
 export const socialV2API = {
-  getFeed: async () => (await api.get('/social/feed')).data,
+  // Newest posts first; `before` (the oldest post's createdAt) loads the page before
+  getFeed: async (before?: string) => (await api.get('/social/feed', { params: { before } })).data,
   getMyPosts: async () => (await api.get('/social/posts/me')).data,
   createPost: async (payload: PostPayload) => (await api.post('/social/posts', payload)).data,
   likePost: async (postId: string) => (await api.post(`/social/posts/${postId}/like`)).data,

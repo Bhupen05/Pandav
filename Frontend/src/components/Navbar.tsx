@@ -39,9 +39,10 @@ function Navbar() {
       notify(getErrorMessage(error, 'Could not sign out. Please try again.'), 'error')
       return
     }
-    close()
-    setProfileOpen(false)
-    navigate('/')
+    // A fresh page load: a client-side navigate('/') loses to the route guard,
+    // which sends a signed-out user on a protected page to /login. It also
+    // drops anything the previous account left in memory.
+    window.location.replace('/')
   }
 
   if (isPublicRoute && !isAuthenticated) {

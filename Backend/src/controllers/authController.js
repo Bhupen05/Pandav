@@ -59,10 +59,7 @@ export const register = async (req, res) => {
         message: 'User already exists'
       });
     }
-    res.status(400).json({
-      success: false,
-      message: error.message
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -167,18 +164,21 @@ export const updatePassword = async (req, res) => {
 
     const user = await User.findById(req.user.id).select('+password');
 
-    // Check current password
+    // A 400, not a 401: the session is fine, and the app treats a 401 as
+    // being signed out
     if (!(await user.comparePassword(currentPassword))) {
-      return res.status(401).json({ 
+      return res.status(400).json({ 
         success: false, 
-        message: 'Password is incorrect' 
+        message: 'Current password is incorrect' 
       });
     }
 
     // Saving a new password also invalidates every token issued before now,
     // so this browser gets a fresh session, kept as long as the old one was
     user.password = newPassword;
-    await user.save();
+    // Only the password is checked: an older profile image the schema now
+    // refuses must not block it
+    await user.save({ validateModifiedOnly: true });
     setSessionCookie(req, res, user._id, req.session.remember === true);
 
     res.json({

@@ -13,6 +13,7 @@ import { escapeRegex, sendServerError } from '../utils/http.js';
 import { ledUserIds } from '../utils/teams.js';
 
 const MAX_MESSAGE_LENGTH = 2000;
+const FEED_PAGE_SIZE = 50;
 
 // Only what a conversation needs about each participant (as in chatController)
 const participants = [
@@ -246,6 +247,33 @@ const canUserViewPost = async (post, currentUser) => {
   }
 
   return false;
+};
+
+// The posts a user may see in the feed, as a query. Same rules as
+// canUserViewPost, except that removed posts never show.
+const feedFilter = async (user) => {
+  if (user.role === 'admin') return { moderationStatus: { $ne: 'removed' } };
+
+  const [teammateIds, connections] = await Promise.all([
+    user.teamId ? User.find({ teamId: user.teamId }).distinct('_id') : [],
+    NetworkConnection.find({
+      status: 'accepted',
+      $or: [{ requester: user._id }, { recipient: user._id }],
+    }).select('requester recipient').lean(),
+  ]);
+  const connectedIds = connections.map((connection) =>
+    (String(connection.requester) === String(user._id) ? connection.recipient : connection.requester));
+  const shown = { $ne: 'hidden' };
+
+  return {
+    moderationStatus: { $ne: 'removed' },
+    $or: [
+      { author: user._id },
+      { moderationStatus: shown, visibility: 'public' },
+      { moderationStatus: shown, visibility: 'team', author: { $in: teammateIds } },
+      { moderationStatus: shown, visibility: 'connections', author: { $in: connectedIds } },
+    ],
+  };
 };
 
 const ensureAtLeastOneTarget = (targets = {}) => {
@@ -517,21 +545,31 @@ export const generatePostFromPersonalTask = async (req, res) => {
   }
 };
 
+// Newest posts the user may see. Pass ?before=<createdAt of the oldest post
+// shown> for the page before it.
 export const getFeed = async (req, res) => {
   try {
-    const posts = await SocialPost.find({ moderationStatus: { $ne: 'removed' } })
+    const filter = await feedFilter(req.user);
+    if (req.query.before) {
+      const before = new Date(req.query.before);
+      if (Number.isNaN(before.getTime())) {
+        return res.status(400).json({ success: false, message: 'Invalid before date' });
+      }
+      filter.createdAt = { $lt: before };
+    }
+
+    // One extra tells us whether there is an older page
+    const newestFirst = await SocialPost.find(filter)
       .populate('author', 'name email role profileImage teamId')
       .populate('sourceTask', 'title status completedAt')
       .sort({ createdAt: -1 })
-      .limit(100);
+      .limit(FEED_PAGE_SIZE + 1);
 
-    const visiblePosts = [];
-    for (const post of posts) {
-      const allowed = await canUserViewPost(post, req.user);
-      if (allowed) visiblePosts.push(post);
-    }
+    const hasMore = newestFirst.length > FEED_PAGE_SIZE;
+    // Skip posts left behind by a deleted account (npm run migrate -- --clean-orphans removes them)
+    const posts = newestFirst.slice(0, FEED_PAGE_SIZE).filter((post) => post.author);
 
-    return res.json({ success: true, count: visiblePosts.length, data: visiblePosts });
+    return res.json({ success: true, count: posts.length, data: posts, hasMore });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -564,21 +602,26 @@ export const toggleLike = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not allowed to interact with this post' });
     }
 
-    const userId = req.user._id.toString();
-    const likeIndex = post.likes.findIndex((id) => id.toString() === userId);
-
-    if (likeIndex >= 0) {
-      post.likes.splice(likeIndex, 1);
-    } else {
-      post.likes.push(req.user._id);
+    // A single update either way, so likes from several people at once are all kept
+    const userId = req.user._id;
+    let updated = await SocialPost.findOneAndUpdate(
+      { _id: post._id, likes: { $ne: userId } },
+      { $addToSet: { likes: userId } },
+      { new: true, projection: { likes: 1 } }
+    );
+    const liked = Boolean(updated);
+    if (!liked) {
+      updated = await SocialPost.findByIdAndUpdate(
+        post._id,
+        { $pull: { likes: userId } },
+        { new: true, projection: { likes: 1 } }
+      );
     }
-
-    await post.save();
 
     return res.json({
       success: true,
-      liked: likeIndex < 0,
-      likesCount: post.likes.length,
+      liked,
+      likesCount: updated?.likes.length ?? 0,
     });
   } catch (error) {
     return sendServerError(res, error);
@@ -874,17 +917,19 @@ export const createPersonalTask = async (req, res) => {
   try {
     const { title, description = '', priority = 'medium', dueDate = null, autoGenerateLinkedInPost = true } = req.body;
 
-    if (!title || !title.trim()) {
+    if (typeof title !== 'string' || !title.trim()) {
       return res.status(400).json({ success: false, message: 'title is required' });
     }
 
     const task = await PersonalTask.create({
       user: req.user._id,
       title: title.trim(),
-      description: description.trim(),
+      // null (allowed by the validator) means no description
+      description: typeof description === 'string' ? description.trim() : '',
       priority,
       dueDate,
-      autoGenerateLinkedInPost: Boolean(autoGenerateLinkedInPost),
+      // Cast by the schema, as on update: "false" is false
+      autoGenerateLinkedInPost,
     });
 
     await logAuditEventV2(req, {

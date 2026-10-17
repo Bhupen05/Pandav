@@ -380,7 +380,9 @@ export default function ChatPage() {
                         className={`absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-white ${
                           activeUsers.includes(chatUser._id) ? 'bg-emerald-500' : 'bg-slate-300'
                         }`}
-                      />
+                      >
+                        <span className="sr-only">{activeUsers.includes(chatUser._id) ? 'online' : 'offline'}</span>
+                      </span>
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2">

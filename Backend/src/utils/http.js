@@ -1,12 +1,40 @@
-// Sends a 500 response, hiding internal error details in production
+import mongoose from 'mongoose';
+
+// For matching user input as plain text inside a $regex
+export const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Mongoose's built-in validator messages ('Path `{PATH}` is required.', ...)
+// as patterns for the filled-in text. Any other message was written in a
+// schema for users to read.
+const BUILT_IN_MESSAGES = Object.values(mongoose.Error.messages)
+  .flatMap((group) => (group && typeof group === 'object' ? Object.values(group) : [group]))
+  .filter((template) => typeof template === 'string')
+  .map((template) => new RegExp(`^${escapeRegex(template).replace(/\\\{[A-Z]+\\\}/g, '[\\s\\S]*')}$`));
+
+// One field's problem: the schema's own message if it has one, otherwise just
+// the field's name. Built-in messages can quote the submitted value.
+const fieldProblem = (fieldError) => {
+  const message = fieldError.properties?.message;
+  const isCustom = typeof message === 'string' && !BUILT_IN_MESSAGES.some((pattern) => pattern.test(message));
+  return isCustom ? message : `Invalid ${fieldError.path}`;
+};
+
+// Sends an error response: 400 for bad input, otherwise a 500 that hides
+// internal error details in production
 export const sendServerError = (res, error) => {
   // Malformed ids and similar bad input are the client's mistake, not a server error
   if (error.name === 'CastError') {
     return res.status(400).json({ success: false, message: `Invalid ${error.path}` });
   }
-  // A value the schema refuses (wrong enum, too long, ...): name the fields, not the values
+  // A unique field (an email, a team name) that is already taken
+  if (error.code === 11000) {
+    const field = Object.keys(error.keyPattern || error.keyValue || {})[0];
+    return res.status(400).json({ success: false, message: field ? `That ${field} is already in use` : 'Already exists' });
+  }
+  // A value the schema refuses (wrong enum, too long, ...)
   if (error.name === 'ValidationError') {
-    return res.status(400).json({ success: false, message: `Invalid ${Object.keys(error.errors).join(', ')}` });
+    const problems = [...new Set(Object.values(error.errors).map(fieldProblem))];
+    return res.status(400).json({ success: false, message: problems.join('; ') });
   }
 
   console.error(error);
@@ -48,6 +76,3 @@ export const pick = (source = {}, keys) =>
     if (source[key] !== undefined) result[key] = source[key];
     return result;
   }, {});
-
-// For matching user input as plain text inside a $regex
-export const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

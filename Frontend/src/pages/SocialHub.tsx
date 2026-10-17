@@ -247,6 +247,8 @@ export default function SocialHub() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [feed, setFeed] = useState<SocialPost[]>([])
+  const [hasMoreFeed, setHasMoreFeed] = useState(false)
+  const [loadingOlderFeed, setLoadingOlderFeed] = useState(false)
   const [personalTasks, setPersonalTasks] = useState<PersonalTask[]>([])
   const [connections, setConnections] = useState<ConnectionState>(defaultConnections)
   const [discoverQuery, setDiscoverQuery] = useState('')
@@ -324,6 +326,7 @@ export default function SocialHub() {
       ])
 
       setFeed(Array.isArray(responses[0]?.data) ? responses[0].data : [])
+      setHasMoreFeed(Boolean(responses[0]?.hasMore))
       setPersonalTasks(Array.isArray(responses[1]?.data) ? responses[1].data : [])
       setConnections(responses[2]?.data ?? defaultConnections)
       setDiscoverResults(Array.isArray(responses[3]?.data) ? responses[3].data : [])
@@ -338,6 +341,22 @@ export default function SocialHub() {
     } finally {
       setIsLoading(false)
       setIsRefreshing(false)
+    }
+  }
+
+  async function loadOlderFeed() {
+    const oldest = feed[feed.length - 1]
+    if (!oldest) return
+    setLoadingOlderFeed(true)
+    try {
+      const response = await socialV2API.getFeed(oldest.createdAt)
+      const older: SocialPost[] = Array.isArray(response?.data) ? response.data : []
+      setFeed((current) => [...current, ...older.filter((post) => !current.some((shown) => shown._id === post._id))])
+      setHasMoreFeed(Boolean(response?.hasMore))
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load older posts')
+    } finally {
+      setLoadingOlderFeed(false)
     }
   }
 
@@ -847,6 +866,13 @@ export default function SocialHub() {
                     </article>
                   )
                 })}
+                {hasMoreFeed ? (
+                  <div className="flex justify-center">
+                    <button onClick={() => void loadOlderFeed()} disabled={loadingOlderFeed} className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                      {loadingOlderFeed ? 'Loading...' : 'Load older posts'}
+                    </button>
+                  </div>
+                ) : null}
               </div>
             </SectionCard>
           </div>

@@ -38,12 +38,6 @@ const sendTask = async (res, taskId, message, status = 200) => {
   res.status(status).json({ success: true, ...(message && { message }), data: task })
 }
 
-const sendValidationError = (res, error) =>
-  res.status(400).json({
-    success: false,
-    message: error.message,
-  })
-
 // Whose tasks a list may include: admins see everyone's, team leaders their
 // teams', everyone else their own
 const visibleAssignees = async (user) => {
@@ -131,9 +125,15 @@ export const createTask = async (req, res) => {
   try {
     const data = { ...pick(req.body, TASK_FIELDS), createdBy: req.user.id }
 
-    // Team leaders can only assign work within one of their teams
+    const assignees = [].concat(data.assignedTo || []).map(String)
+    if (assignees.length === 0) {
+      return res.status(400).json({ success: false, message: 'Task must be assigned to at least one user' })
+    }
+
+    // Team leaders can only assign work within one of their teams, and their
+    // tasks start as pending: a status like "completed" would skip approval
     if (req.user.role === 'team_leader') {
-      const assignees = [].concat(data.assignedTo || []).map(String)
+      delete data.status
       const teams = await Team.find({ leaders: req.user.id }).select('leaders members')
       const team = teams.find((t) => {
         const members = teamUserIds(t)
@@ -151,7 +151,7 @@ export const createTask = async (req, res) => {
     const task = await Task.create(data)
     await sendTask(res, task._id, undefined, 201)
   } catch (error) {
-    sendValidationError(res, error)
+    sendServerError(res, error)
   }
 }
 
@@ -203,7 +203,7 @@ export const updateTask = async (req, res) => {
     await task.save()
     await sendTask(res, task._id)
   } catch (error) {
-    sendValidationError(res, error)
+    sendServerError(res, error)
   }
 }
 

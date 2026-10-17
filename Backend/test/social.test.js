@@ -200,3 +200,86 @@ test('social hub', async (t) => {
   });
   await check('posts by deleted accounts are skipped', (await call('GET', '/v2/social/feed', { token: mia.token })).status === 200);
 });
+
+test('social feed: who sees what, paging and likes', async (t) => {
+  const check = checker(t);
+  const { call, login, register } = server.api;
+  const db = await connectDatabase('social');
+  t.after(() => db.close());
+
+  // Gil leads Gamma with Hal; Ivy is connected to Gil; Jon knows nobody
+  const adminToken = await login(ADMIN);
+  const gil = await register('Gil Leader', 'gil@feed.test');
+  const hal = await register('Hal Member', 'hal@feed.test');
+  const ivy = await register('Ivy Contact', 'ivy@feed.test');
+  const jon = await register('Jon Stranger', 'jon@feed.test');
+  const gamma = (await call('POST', '/teams', { token: adminToken, body: { name: 'Gamma', leaderId: gil._id } })).data.data;
+  const invite = (await call('POST', `/teams/${gamma._id}/invite`, { token: gil.token, body: { userId: hal._id } })).data.data;
+  await call('PUT', `/teams/invites/${invite._id}/accept`, { token: hal.token });
+  const request = (await call('POST', '/v2/social/connections/request', { token: ivy.token, body: { userId: gil._id } })).data.data;
+  await call('PATCH', `/v2/social/connections/${request._id}/respond`, { token: gil.token, body: { action: 'accepted' } });
+
+  const post = async (content, visibility) =>
+    (await call('POST', '/v2/social/posts', { token: gil.token, body: { content, visibility } })).data.data;
+  await post('Gil public', 'public');
+  await post('Gil team', 'team');
+  await post('Gil connections', 'connections');
+  const hidden = await post('Gil hidden', 'public');
+  const removed = await post('Gil removed', 'public');
+  await call('PATCH', `/v2/social/moderation/posts/${hidden._id}`, { token: adminToken, body: { action: 'hide' } });
+  await call('PATCH', `/v2/social/moderation/posts/${removed._id}`, { token: adminToken, body: { action: 'remove' } });
+
+  const gilPostsSeenBy = async (token) => {
+    const feed = await call('GET', '/v2/social/feed', { token });
+    return feed.data.data.filter((p) => p.author._id === gil._id).map((p) => p.content.replace('Gil ', '')).sort().join(',');
+  };
+  const expectations = [
+    ['his teammate', hal.token, 'public,team'],
+    ['a connection', ivy.token, 'connections,public'],
+    ['a stranger', jon.token, 'public'],
+    ['the author (hidden included)', gil.token, 'connections,hidden,public,team'],
+    ['an admin', adminToken, 'connections,hidden,public,team'],
+  ];
+  for (const [who, token, expected] of expectations) {
+    const seen = await gilPostsSeenBy(token);
+    await check(`the feed shows ${who} the right posts`, seen === expected, seen);
+  }
+
+  // ---------- Paging ----------
+  const start = Date.now() - 3600 * 1000;
+  await db.collection('socialpostv2').insertMany(Array.from({ length: 70 }, (_, i) => ({
+    author: new mongoose.Types.ObjectId(jon._id), content: `bulk ${i}`, visibility: 'public',
+    moderationStatus: 'clean', approvalStatus: 'none', targets: { pandav: true, linkedin: false, github: false },
+    likes: [], comments: [], mediaUrls: [], tags: [], createdAt: new Date(start + i * 1000), updatedAt: new Date(),
+  })));
+  const pages = [];
+  let cursor;
+  for (let i = 0; i < 5; i += 1) {
+    const page = (await call('GET', `/v2/social/feed${cursor ? `?before=${encodeURIComponent(cursor)}` : ''}`, { token: jon.token })).data;
+    pages.push(page);
+    if (!page.hasMore) break;
+    cursor = page.data.at(-1).createdAt;
+  }
+  const allIds = pages.flatMap((page) => page.data.map((p) => p._id));
+  const bulkSeen = pages.flatMap((page) => page.data).filter((p) => p.content.startsWith('bulk')).length;
+  await check('the feed comes in pages of 50', pages[0].data.length === 50 && pages[0].hasMore === true, `${pages[0].data.length} ${pages[0].hasMore}`);
+  await check('the pages cover every post once', bulkSeen === 70 && new Set(allIds).size === allIds.length, `${bulkSeen} bulk, ${allIds.length} ids`);
+  await check('the last page says there is no more', pages.at(-1).hasMore === false);
+  await check('a bad before date is a 400', (await call('GET', '/v2/social/feed?before=soon', { token: jon.token })).status === 400);
+
+  // ---------- Likes from several people at once are all kept ----------
+  const target = (await call('POST', '/v2/social/posts', { token: jon.token, body: { content: 'Like me' } })).data.data;
+  const likers = [gil, hal, ivy, jon];
+  await Promise.all(likers.map((u) => call('POST', `/v2/social/posts/${target._id}/like`, { token: u.token })));
+  const liked = await db.collection('socialpostv2').findOne({ _id: new mongoose.Types.ObjectId(target._id) });
+  await check('four likes at once are four likes', liked.likes.length === 4, `${liked.likes.length} likes`);
+  const unlike = await call('POST', `/v2/social/posts/${target._id}/like`, { token: hal.token });
+  await check('liking again takes the like back', unlike.data.liked === false && unlike.data.likesCount === 3, JSON.stringify(unlike.data));
+
+  // ---------- Personal task input ----------
+  const noNotes = await call('POST', '/v2/social/personal-tasks', { token: jon.token, body: { title: 'No notes', description: null } });
+  await check('a null description means none (it used to be a 500)', noNotes.status === 201 && noNotes.data.data?.description === '', JSON.stringify(noNotes.data));
+  const quiet = await call('POST', '/v2/social/personal-tasks', { token: jon.token, body: { title: 'Quiet', autoGenerateLinkedInPost: 'false' } });
+  await check('"false" as text turns auto-sharing off, as it does on update',
+    quiet.status === 201 && quiet.data.data?.autoGenerateLinkedInPost === false, JSON.stringify(quiet.data));
+});

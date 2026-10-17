@@ -20,6 +20,10 @@ const SELF_EDITABLE_FIELDS = ['name', 'email', 'phone', 'department', 'profileIm
 // Admins can additionally change role and active status
 const ADMIN_EDITABLE_FIELDS = [...SELF_EDITABLE_FIELDS, 'role', 'isActive'];
 
+// Whether the request is about the signed-in user's own account. Ids are hex,
+// so compare them case-insensitively.
+const isOwnAccount = (req) => String(req.params.id).toLowerCase() === req.user.id;
+
 // Ends any open chat connections for a user who was just deactivated
 const disconnectUserSockets = (req, userId) => {
   const io = req.app.get('io');
@@ -94,20 +98,21 @@ export const getUsers = async (req, res) => {
 // @access  Private
 export const getUser = async (req, res) => {
   try {
+    // Users can only view their own profile unless they're admin (checked
+    // first, so others can't learn which ids exist)
+    if (req.user.role !== 'admin' && !isOwnAccount(req)) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Not authorized to access this profile' 
+      });
+    }
+
     const user = await User.findById(req.params.id).select('-password');
 
     if (!user) {
       return res.status(404).json({ 
         success: false, 
         message: 'User not found' 
-      });
-    }
-
-    // Users can only view their own profile unless they're admin
-    if (req.user.role !== 'admin' && req.user.id !== req.params.id) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Not authorized to access this profile' 
       });
     }
 
@@ -126,7 +131,7 @@ export const getUser = async (req, res) => {
 export const updateUser = async (req, res) => {
   try {
     const isAdmin = req.user.role === 'admin';
-    const isSelf = req.user.id === req.params.id;
+    const isSelf = isOwnAccount(req);
 
     // Users can only update their own profile unless they're admin
     if (!isAdmin && !isSelf) {
@@ -138,6 +143,14 @@ export const updateUser = async (req, res) => {
 
     // Only whitelisted fields; password changes go through /api/auth/updatepassword
     const updates = pick(req.body, isAdmin ? ADMIN_EDITABLE_FIELDS : SELF_EDITABLE_FIELDS);
+
+    // Form posts send "true"/"false"; the checks below need a real boolean
+    if (updates.isActive !== undefined) {
+      if (updates.isActive === 'true' || updates.isActive === 'false') updates.isActive = updates.isActive === 'true';
+      if (typeof updates.isActive !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'isActive must be true or false' });
+      }
+    }
 
     // Stop admins from locking themselves out
     if (isAdmin && isSelf && ((updates.role && updates.role !== 'admin') || updates.isActive === false)) {
@@ -186,10 +199,7 @@ export const updateUser = async (req, res) => {
       data: user,
     });
   } catch (error) {
-    res.status(400).json({ 
-      success: false, 
-      message: error.message 
-    });
+    sendServerError(res, error);
   }
 };
 
@@ -208,10 +218,19 @@ export const deleteUser = async (req, res) => {
     }
 
     // Prevent deleting yourself
-    if (req.user.id === req.params.id) {
+    if (isOwnAccount(req)) {
       return res.status(400).json({ 
         success: false, 
         message: 'Cannot delete your own account'
+      });
+    }
+
+    // A team always has a leader
+    const ledAlone = await Team.findOne({ leaders: [user._id] }).select('name');
+    if (ledAlone) {
+      return res.status(400).json({
+        success: false,
+        message: `${user.name} is the only leader of ${ledAlone.name}. Make someone else its leader or delete the team first.`,
       });
     }
 
@@ -280,7 +299,7 @@ export const resetUserPassword = async (req, res) => {
 
     // Saving a new password also signs the user out of existing sessions
     user.password = newPassword;
-    await user.save();
+    await user.save({ validateModifiedOnly: true });
     disconnectUserSockets(req, user._id);
 
     res.json({
@@ -306,7 +325,7 @@ export const toggleUserActive = async (req, res) => {
       });
     }
 
-    if (req.user.id === req.params.id) {
+    if (isOwnAccount(req)) {
       return res.status(400).json({
         success: false,
         message: 'You cannot deactivate your own account'
@@ -314,7 +333,7 @@ export const toggleUserActive = async (req, res) => {
     }
 
     user.isActive = !user.isActive;
-    await user.save();
+    await user.save({ validateModifiedOnly: true });
 
     if (!user.isActive) disconnectUserSockets(req, user._id);
 

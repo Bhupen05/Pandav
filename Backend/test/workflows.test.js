@@ -1,7 +1,9 @@
 // End-to-end checks for admin and user workflows: task lists and edits,
-// admin-created attendance, password resets, error messages, contact inbox
+// admin-created attendance, password resets, error messages, contact inbox, and
+// the account, task and date checks the API reference relies on
 import { after, before, test } from 'node:test';
-import { ADMIN, checker, sleep, startServer } from './helpers.js';
+import mongoose from 'mongoose';
+import { ADMIN, checker, connectDatabase, sleep, startServer } from './helpers.js';
 
 let server;
 before(async () => { server = await startServer('workflows'); });
@@ -61,4 +63,66 @@ test('workflows', async (t) => {
   await check('admin marks message resolved; resolver recorded', resolved.status === 200 && resolved.data.data.status === 'resolved' && resolved.data.data.resolvedBy?.name === 'Admin User');
   await check('admin deletes message', (await call('DELETE', `/contact/${msgId}`, { token: adminToken })).status === 200);
   await check('non-admin cannot read inbox', (await call('GET', '/contact', { token: carolToken })).status === 403);
+});
+
+test('account, task and date checks', async (t) => {
+  const check = checker(t);
+  const { call, login, me } = server.api;
+  const db = await connectDatabase('workflows');
+  t.after(() => db.close());
+
+  const adminToken = await login(ADMIN);
+  const admin = await me(adminToken);
+  const register = async (name, email, password) => {
+    await call('POST', '/auth/register', { body: { name, email, password } });
+    const token = await login({ email, password });
+    return { token, ...(await me(token)) };
+  };
+  const dee = await register('Dee', 'dee@test.com', 'deepass1');
+  const lou = await register('Lou Lead', 'lou@test.com', 'loupass1');
+
+  // ---------- Accounts ----------
+  const taken = await call('PUT', `/users/${dee._id}`, { token: adminToken, body: { email: 'lou@test.com' } });
+  await check('an email already in use is a 400', taken.status === 400 && taken.data.message === 'That email is already in use', JSON.stringify(taken.data));
+  const selfOff = await call('PUT', `/users/${admin._id}`, { token: adminToken, body: { isActive: 'false' } });
+  await check('an admin cannot deactivate themselves with "false" as text', selfOff.status === 400 && (await me(adminToken))?.isActive === true, `${selfOff.status}`);
+  await check('isActive must be true or false',
+    (await call('PUT', `/users/${dee._id}`, { token: adminToken, body: { isActive: 'nope' } })).status === 400);
+  const upper = admin._id.toUpperCase();
+  await check('an upper-case own id is still the admin\'s own: no self-demotion',
+    (await call('PUT', `/users/${upper}`, { token: adminToken, body: { role: 'user' } })).status === 400);
+  await check('no self-deletion', (await call('DELETE', `/users/${upper}`, { token: adminToken })).status === 400);
+  await check('no self-deactivation', (await call('PUT', `/users/${upper}/toggle-active`, { token: adminToken })).status === 400);
+  await check('so the admin is still an admin', (await me(adminToken))?.role === 'admin');
+  await check("other people's profiles are a 403 whether or not they exist",
+    (await call('GET', `/users/${new mongoose.Types.ObjectId()}`, { token: dee.token })).status === 403);
+
+  const wrong = await call('PUT', '/auth/updatepassword', { token: dee.token, body: { currentPassword: 'not-it', newPassword: 'deepass2' } });
+  await check('a wrong current password is a 400, not a sign-out', wrong.status === 400 && (await me(dee.token))?._id === dee._id, `${wrong.status}`);
+
+  // A profile image saved before images had to be uploads doesn't block other changes
+  await db.collection('users').updateOne({ _id: new mongoose.Types.ObjectId(dee._id) }, { $set: { profileImage: 'https://example.com/old.png' } });
+  const changed = await call('PUT', '/auth/updatepassword', { token: dee.token, body: { currentPassword: 'deepass1', newPassword: 'deepass2' } });
+  await check('with an old image URL: password change works', changed.status === 200, JSON.stringify(changed.data));
+  await check('password reset works', (await call('PUT', `/users/${dee._id}/reset-password`, { token: adminToken, body: { newPassword: 'deepass3' } })).status === 200);
+  await check('deactivation works', (await call('PUT', `/users/${dee._id}/toggle-active`, { token: adminToken })).status === 200);
+
+  // ---------- Tasks ----------
+  const dates = { startDate: '2026-10-01', dueDate: '2026-10-20' };
+  await check('a task needs at least one assignee',
+    (await call('POST', '/tasks', { token: adminToken, body: { title: 'x', description: 'd', ...dates, assignedTo: [] } })).status === 400);
+  await check('also when the list is missing',
+    (await call('POST', '/tasks', { token: adminToken, body: { title: 'x', description: 'd', ...dates } })).status === 400);
+  await call('POST', '/teams', { token: adminToken, body: { name: 'Omega', leaderId: lou._id } });
+  const shortcut = await call('POST', '/tasks', { token: lou.token, body: { title: 'Done already', description: 'd', ...dates, assignedTo: [lou._id], status: 'completed' } });
+  await check("a leader's new task starts pending whatever status they send",
+    shortcut.status === 201 && shortcut.data.data.status === 'pending', `${shortcut.status} ${shortcut.data.data?.status}`);
+
+  // ---------- Dates ----------
+  await check('a day that doesn\'t exist is refused as a filter',
+    (await call('GET', '/attendance?startDate=2026-02-31', { token: adminToken })).status === 400);
+  await check('and as an attendance date',
+    (await call('POST', '/attendance', { token: adminToken, body: { user: lou._id, date: '2026-02-31', status: 'present' } })).status === 400);
+  await check('real days still work',
+    (await call('GET', '/attendance?startDate=2024-02-29&endDate=2024-03-01', { token: adminToken })).status === 200);
 });

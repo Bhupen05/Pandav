@@ -6,10 +6,12 @@ import Attendance from '../models/Attendance.js';
 import TeamChatMessage from '../models/TeamChatMessage.js';
 import mongoose from 'mongoose';
 import { escapeRegex, pick, sendServerError } from '../utils/http.js';
-import { toDayKey } from '../utils/dates.js';
+import { dayRange } from '../utils/dates.js';
 import { canReviewFor, isInAnyTeam, teamUserIds } from '../utils/teams.js';
 
 const TEAM_ROLES = ['team_leader', 'team_member'];
+
+const LAST_LEADER_MESSAGE = "This is the team's only leader. Make someone else a leader first, or delete the team.";
 
 // Why this user can't be made a team's leader, or null if they can. A user
 // belongs to at most one team, and admins never take a team role (it would
@@ -92,7 +94,7 @@ export const createTeam = async (req, res) => {
     // Promote leader's role
     leader.role = 'team_leader';
     leader.teamId = team._id;
-    await leader.save();
+    await leader.save({ validateModifiedOnly: true });
 
     const populated = await Team.findById(team._id)
       .populate('leaders', 'name email profileImage role')
@@ -283,8 +285,10 @@ export const inviteMember = async (req, res) => {
     const problem = await inviteeProblem(invitedUser);
     if (problem) return res.status(400).json({ success: false, message: problem });
 
-    // Check for existing pending invite
-    const existingInvite = await TeamInvite.findOne({ team: teamId, invitedUser: invitedUser._id, status: 'pending' });
+    // An unexpired pending invite blocks a second one; an expired one doesn't
+    const existingInvite = await TeamInvite.findOne({
+      team: teamId, invitedUser: invitedUser._id, status: 'pending', expiresAt: { $gt: new Date() },
+    });
     if (existingInvite) {
       return res.status(400).json({ success: false, message: 'A pending invite already exists for this user' });
     }
@@ -388,7 +392,7 @@ export const declineInvite = async (req, res) => {
 // @access  Private
 export const getMyInvites = async (req, res) => {
   try {
-    const invites = await TeamInvite.find({ invitedUser: req.user.id, status: 'pending' })
+    const invites = await TeamInvite.find({ invitedUser: req.user.id, status: 'pending', expiresAt: { $gt: new Date() } })
       .populate('team', 'name description')
       .populate('invitedBy', 'name email profileImage')
       .sort({ createdAt: -1 });
@@ -425,6 +429,9 @@ export const removeMember = async (req, res) => {
     // Leaders can only be removed by admin
     if (isLeaderTarget && req.user.role !== 'admin') {
       return res.status(403).json({ success: false, message: 'Only admin can remove a team leader' });
+    }
+    if (isLeaderTarget && team.leaders.length === 1) {
+      return res.status(400).json({ success: false, message: LAST_LEADER_MESSAGE });
     }
 
     team.members = team.members.filter(m => !m.equals(userId));
@@ -476,7 +483,7 @@ export const addLeader = async (req, res) => {
     await team.save();
     user.role = 'team_leader';
     user.teamId = team._id;
-    await user.save();
+    await user.save({ validateModifiedOnly: true });
 
     const populated = await Team.findById(team._id)
       .populate('leaders', 'name email profileImage role')
@@ -718,9 +725,9 @@ export const getTeamAttendance = async (req, res) => {
       else filter.status = status;
     }
     if (startDate || endDate) {
-      filter.day = {};
-      if (startDate) filter.day.$gte = toDayKey(startDate);
-      if (endDate) filter.day.$lte = toDayKey(endDate);
+      const { range, error } = dayRange(startDate, endDate);
+      if (error) return res.status(400).json({ success: false, message: error });
+      filter.day = range;
     }
 
     const attendance = await Attendance.find(filter)

@@ -4,6 +4,7 @@
 // changes keep users and teams in step (one team per user, admins never take
 // a team role)
 import { after, before, test } from 'node:test';
+import mongoose from 'mongoose';
 import { ADMIN, checker, connectDatabase, startServer } from './helpers.js';
 
 let server;
@@ -192,6 +193,14 @@ test('team membership rules', async (t) => {
 
   await check('renaming a team to a taken name is a 400',
     (await call('PUT', `/teams/${gamma._id}`, { token: adminToken, body: { name: 'Delta' } })).status === 400);
+
+  // ---------- Invites expire ----------
+  const lapsed = (await call('POST', `/teams/${gamma._id}/invite`, { token: ann.token, body: { userId: dan._id } })).data.data;
+  await db.collection('teaminvites').updateOne({ _id: new mongoose.Types.ObjectId(lapsed._id) }, { $set: { expiresAt: new Date(Date.now() - 1000) } });
+  const danInvites = (await call('GET', '/teams/invites/my', { token: dan.token })).data.data;
+  await check('an expired invite is no longer listed', !danInvites.some((i) => i._id === lapsed._id));
+  await check('and does not block a new one',
+    (await call('POST', `/teams/${gamma._id}/invite`, { token: ann.token, body: { userId: dan._id } })).status === 201);
 
   // ---------- Deleting a team leaves nothing pointing at it ----------
   await call('POST', `/chat/teams/${gamma._id}/send`, { token: cat.token, body: { message: 'last words' } });
