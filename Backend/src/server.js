@@ -14,6 +14,8 @@ import attendanceRoutes from './routes/attendanceRoutes.js';
 import contactRoutes from './routes/contactRoutes.js';
 import userRoutes from './routes/userRoutes.js';
 import chatRoutes from './routes/chatRoutes.js';
+import teamRoutes from './routes/teamRoutes.js';
+import v2Routes from './routes/v2Routes.js';
 
 dotenv.config();
 
@@ -51,7 +53,10 @@ const io = new SocketIO(server, {
     methods: ['GET', 'POST']
   }
 });
+
 const PORT = process.env.PORT || 5000;
+const API_V1_PREFIX = process.env.API_V1_PREFIX || '/api/v1';
+const API_V2_PREFIX = process.env.API_V2_PREFIX || '/api/v2';
 
 // Socket.io: only authenticated users can connect, and the room each socket
 // joins comes from the verified token, never from the client
@@ -60,6 +65,7 @@ io.use(async (socket, next) => {
     const user = await getUserFromToken(socket.handshake.auth?.token);
     if (!user) return next(new Error('Not authorized'));
     socket.data.userId = user._id.toString();
+    socket.data.userName = user.name;
     next();
   } catch (error) {
     next(new Error('Not authorized'));
@@ -77,6 +83,17 @@ io.on('connection', (socket) => {
   socket.join(userId);
   onlineUsers.set(userId, (onlineUsers.get(userId) || 0) + 1);
   broadcastOnlineUsers();
+
+  // Typing indicators for direct chats. Who is typing comes from the verified
+  // token; the client only says to whom.
+  socket.on('typing', ({ recipientId } = {}) => {
+    if (typeof recipientId !== 'string') return;
+    socket.to(recipientId).emit('user_typing', { userId, userName: socket.data.userName });
+  });
+  socket.on('stopped_typing', ({ recipientId } = {}) => {
+    if (typeof recipientId !== 'string') return;
+    socket.to(recipientId).emit('user_stopped_typing', { userId });
+  });
 
   socket.on('disconnect', () => {
     const remaining = (onlineUsers.get(userId) || 1) - 1;
@@ -115,25 +132,39 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use(sanitizeInput);
 
-// Routes
+// Health check: 503 while the database is unreachable, so the host and
+// uptime monitors see an instance that can't serve requests as down
+const healthCheck = (req, res) => {
+  const databaseUp = mongoose.connection.readyState === 1;
+  res.status(databaseUp ? 200 : 503).json({
+    status: databaseUp ? 'OK' : 'UNAVAILABLE',
+    version: 'v1',
+    database: databaseUp ? 'connected' : 'disconnected',
+  });
+};
+
+// V1 Routes (current production APIs)
+app.use(`${API_V1_PREFIX}/auth`, authRoutes);
+app.use(`${API_V1_PREFIX}/tasks`, taskRoutes);
+app.use(`${API_V1_PREFIX}/attendance`, attendanceRoutes);
+app.use(`${API_V1_PREFIX}/contact`, contactRoutes);
+app.use(`${API_V1_PREFIX}/users`, userRoutes);
+app.use(`${API_V1_PREFIX}/chat`, chatRoutes);
+app.use(`${API_V1_PREFIX}/teams`, teamRoutes);
+app.get(`${API_V1_PREFIX}/health`, healthCheck);
+
+// Legacy alias to reduce breakage (can be removed later)
 app.use('/api/auth', authRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/contact', contactRoutes);
 app.use('/api/users', userRoutes);
-
-// Add chat routes
 app.use('/api/chat', chatRoutes);
+app.use('/api/teams', teamRoutes);
+app.get('/api/health', healthCheck);
 
-// Health check: 503 while the database is unreachable, so the host and
-// uptime monitors see an instance that can't serve requests as down
-app.get('/api/health', (req, res) => {
-  const databaseUp = mongoose.connection.readyState === 1;
-  res.status(databaseUp ? 200 : 503).json({
-    status: databaseUp ? 'OK' : 'UNAVAILABLE',
-    database: databaseUp ? 'connected' : 'disconnected',
-  });
-});
+// V2 Routes
+app.use(API_V2_PREFIX, v2Routes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -155,5 +186,8 @@ app.use((err, req, res, next) => {
 
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
-  console.log(`Local: http://localhost:${PORT}`);
+  console.log(`Local v1: http://localhost:${PORT}${API_V1_PREFIX}`);
+  console.log(`Local v2: http://localhost:${PORT}${API_V2_PREFIX}`);
 });
+
+

@@ -8,6 +8,8 @@ export interface AuthContextType {
   token: string | null;
   isAuthenticated: boolean;
   isAdmin: boolean;
+  isTeamLeader: boolean;
+  isTeamMember: boolean;
   // True while a session restored from storage is being confirmed with the server
   loading: boolean;
   login: (email: string, password: string, rememberMe?: boolean) => Promise<User>;

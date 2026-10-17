@@ -1,9 +1,11 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { taskAPI } from '../api/taskAPI'
 import { getErrorMessage } from '../api/axios'
 import { useAuth } from '../context/useAuth'
+import { usePagination } from '../utils/usePagination'
 import Taskscard from '../components/Taskscard'
 import Tasksadd from '../components/Tasksadd'
+import Pagination from '../components/Pagination'
 import type { TaskInput } from '../components/Tasksadd'
 import { useFeedback } from '../context/useFeedback'
 
@@ -39,7 +41,7 @@ export default function Tasks() {
     if (!silent) setLoading(true)
     setError(null)
     try {
-      // The API already limits regular users to their own tasks; admins get all of them
+      // The API scopes the list: own tasks for users, the team's for leaders, all for admins
       const response = await taskAPI.getTasks()
       if (response.success && Array.isArray(response.data)) {
         setTasks(response.data)
@@ -57,7 +59,7 @@ export default function Tasks() {
   }
 
   const handleStatusChange = async (index: number, newStatus: TaskInput['status']) => {
-    const task = filteredTasks[index]
+    const task = pagination.paginatedData[index]
     const originalIndex = tasks.findIndex(t => t === task)
     
     if (originalIndex === -1) return
@@ -122,11 +124,11 @@ export default function Tasks() {
   }
 
   const handleEdit = (index: number) => {
-    setEditingTask(filteredTasks[index])
+    setEditingTask(pagination.paginatedData[index])
   }
 
   const handleDelete = async (index: number) => {
-    const task = filteredTasks[index]
+    const task = pagination.paginatedData[index]
     const originalIndex = tasks.findIndex(t => t === task)
     
     if (originalIndex === -1) return
@@ -184,12 +186,19 @@ export default function Tasks() {
     }
   }
 
-  const filteredTasks = (filter === 'all' ? tasks : tasks.filter(t => t.status === filter))
-    .filter(t => searchQuery === '' || 
-      t.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      t.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      t.tags?.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase()))
-    )
+  const canCreateTasks = isAdmin || user?.role === 'team_leader'
+
+  const filteredTasks = useMemo(() => (
+    (filter === 'all' ? tasks : tasks.filter(t => t.status === filter))
+      .filter(t => searchQuery === '' || 
+        t.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        t.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        t.tags?.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase()))
+      )
+  ), [filter, searchQuery, tasks])
+
+  // Pagination hook
+  const pagination = usePagination(filteredTasks, 10)
 
   const statusCounts = {
     all: tasks.length,
@@ -302,7 +311,7 @@ export default function Tasks() {
               className="w-full rounded-xl border-0 bg-neutral-100 py-3 pl-10 pr-4 text-sm outline-none transition-all focus:bg-neutral-50 focus:ring-2 focus:ring-neutral-900"
             />
           </div>
-          {isAdmin && (
+          {canCreateTasks && (
             <button
               onClick={() => setShowAddModal(true)}
               className="inline-flex items-center gap-2 rounded-xl bg-neutral-900 px-5 py-3 text-sm font-semibold text-white shadow-lg transition-all hover:shadow-xl hover:opacity-90"
@@ -422,13 +431,27 @@ export default function Tasks() {
               </button>
             </div>
             <Taskscard
-              tasks={filteredTasks}
+              tasks={pagination.paginatedData}
               onStatusChange={handleStatusChange}
               onEdit={handleEdit}
               onDelete={handleDelete}
               isAdmin={isAdmin}
               currentUserId={user?._id}
             />
+            
+            {/* Pagination Controls */}
+            {filteredTasks.length > 10 && (
+              <div className="mt-6 border-t pt-4">
+                <Pagination
+                  currentPage={pagination.currentPage}
+                  totalPages={pagination.totalPages}
+                  totalItems={pagination.totalItems}
+                  onPageChange={pagination.goToPage}
+                  itemsPerPage={pagination.pageSize}
+                  onItemsPerPageChange={pagination.setPageSize}
+                />
+              </div>
+            )}
           </div>
         )}
       </div>

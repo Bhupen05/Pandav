@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { taskAPI } from '../api/taskAPI'
 import { userAPI } from '../api/userAPI'
+import { teamAPI } from '../api/teamAPI'
 import { getErrorMessage, type ApiError } from '../api/axios'
 import { useAuth } from '../context/useAuth'
 import type { AssigneeProgress } from '../utils/taskProgress'
@@ -54,13 +55,17 @@ function Tasksadd({ isOpen, onClose, onCreate, task }: Props) {
 	const [users, setUsers] = useState<AssigneeOption[]>([])
 	const [showUserDropdown, setShowUserDropdown] = useState(false)
 	
-	const { isAdmin } = useAuth()
+	const { isAdmin, user } = useAuth()
+	const canCreateTasks = isAdmin || user?.role === 'team_leader'
 
 	useEffect(() => {
-		if (isAdmin && isOpen) {
-			loadUsers()
-		}
-	}, [isAdmin, isOpen])
+		if (!canCreateTasks || !isOpen) return
+		// Admins pick from everyone; team leaders assign work within their own team
+		const request = isAdmin
+			? userAPI.getUsers({ isActive: true }).then((response) => response.data || [])
+			: teamAPI.getMyTeam().then((response) => (response.data ? [...response.data.leaders, ...response.data.members] : []))
+		request.then(setUsers).catch((err) => console.error('Failed to load users:', err))
+	}, [canCreateTasks, isAdmin, isOpen])
 
 	// Reset form when modal closes
 	useEffect(() => {
@@ -94,15 +99,6 @@ function Tasksadd({ isOpen, onClose, onCreate, task }: Props) {
 			setEstimatedDays(diffDays > 0 ? diffDays : 1)
 		}
 	}, [startDate, dueDate])
-
-	const loadUsers = async () => {
-		try {
-			const response = await userAPI.getUsers({ isActive: true })
-			setUsers(response.data || [])
-		} catch (err) {
-			console.error('Failed to load users:', err)
-		}
-	}
 
 	const resetForm = () => {
 		setTitle('')
@@ -198,7 +194,7 @@ function Tasksadd({ isOpen, onClose, onCreate, task }: Props) {
 		} catch (err) {
 			const status = (err as ApiError).status
 			if (status === 403) {
-				setError('You do not have permission to change tasks. Only admins can create or edit tasks.')
+				setError('You do not have permission to change tasks. Team leaders can only assign tasks to their own team.')
 			} else if (status === 401) {
 				setError('You must be logged in to save tasks.')
 			} else {
@@ -217,7 +213,7 @@ function Tasksadd({ isOpen, onClose, onCreate, task }: Props) {
 		)
 	}
 
-	if (!isOpen) return null
+	if (!isOpen || !canCreateTasks) return null
 
 	return (
 		<div className="fixed inset-0 z-50 flex items-center justify-center p-4">

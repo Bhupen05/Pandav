@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useAuth } from '../context/useAuth'
 import { useNavigate, useLocation, Link } from 'react-router-dom'
 import { getErrorMessage } from '../api/axios'
+import { getDashboardRouteForRole } from '../utils/roleRedirect'
 
 function Login() {
   const [email, setEmail] = useState('')
@@ -31,7 +32,7 @@ function Login() {
     
     try {
       const user = await login(email.trim(), password, remember)
-      const home = user.role === 'admin' ? '/admin' : '/user'
+      const home = getDashboardRouteForRole(user.role)
       const canReturn = from && (user.role === 'admin' || !from.startsWith('/admin'))
       navigate(canReturn ? from : home, { replace: true })
     } catch (err) {

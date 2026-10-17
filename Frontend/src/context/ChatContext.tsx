@@ -1,16 +1,36 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import io, { Socket } from 'socket.io-client';
-import api from '../api/axios';
+import api, { socketBaseUrl } from '../api/axios';
 import { useAuth } from './useAuth';
-import { ChatContext, type Message, type Participant } from './useChat';
+import { ChatContext, participantId, type Message, type TypingStatus } from './useChat';
 
 interface MessagesPage {
   data: Message[];
   hasMore: boolean;
 }
 
-const participantId = (participant: Participant) =>
-  typeof participant === 'string' ? participant : participant?._id;
+const teamIdOf = (message: Message) =>
+  typeof message.team === 'string' ? message.team : message.team?._id;
+
+// Adds messages, replacing any already shown (the sender's own copy, a read
+// receipt) instead of showing them twice
+const mergeMessages = (current: Message[], incoming: Message | Message[]) => {
+  const merged = [...current];
+  const indexById = new Map(current.map((message, index) => [message._id, index]));
+
+  (Array.isArray(incoming) ? incoming : [incoming]).forEach((message) => {
+    if (!message?._id) return;
+    const index = indexById.get(message._id);
+    if (index !== undefined) {
+      merged[index] = { ...merged[index], ...message };
+    } else {
+      indexById.set(message._id, merged.length);
+      merged.push(message);
+    }
+  });
+
+  return merged;
+};
 
 export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user, token, loading } = useAuth();
@@ -20,9 +40,23 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [activeUsers, setActiveUsers] = useState<string[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [typingUsers, setTypingUsers] = useState<TypingStatus[]>([]);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
-  // The conversation on screen. A ref, so the socket handler always sees the current value.
+  // The conversation on screen: a person or a team. Refs, so the socket
+  // handlers always see the current value.
   const openChatUserIdRef = useRef<string | null>(null);
+  const openTeamIdRef = useRef<string | null>(null);
+
+  const markTeamMessagesAsRead = useCallback(async (teamId: string) => {
+    try {
+      const { data } = await api.patch<{ data: Message[] }>(`/chat/teams/${teamId}/read`);
+      if (openTeamIdRef.current === teamId && Array.isArray(data.data) && data.data.length > 0) {
+        setMessages((prev) => mergeMessages(prev, data.data));
+      }
+    } catch (error) {
+      console.error('Error marking team messages as read:', error);
+    }
+  }, []);
 
   useEffect(() => {
     // Wait until a stored session has been confirmed: a rejected token would
@@ -30,7 +64,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!userId || !token || loading) return;
 
     // The server identifies the user from this token and joins their room itself
-    const newSocket = io(import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:5000', {
+    const newSocket = io(socketBaseUrl, {
       auth: { token },
     });
 
@@ -45,13 +79,48 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     newSocket.on('receive_message', (data: Message) => {
       const senderId = participantId(data.sender);
+      if (!senderId) return;
       // Show the message only in its own conversation; anything else counts as unread
       if (senderId === openChatUserIdRef.current) {
-        setMessages(prev => [...prev, data]);
+        setMessages((prev) => mergeMessages(prev, data));
         api.put(`/chat/read/${senderId}`).catch((error) => console.error('Error marking messages read:', error));
       } else {
-        setUnreadCounts(prev => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
+        setUnreadCounts((prev) => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
       }
+      setTypingUsers((prev) => prev.filter((t) => t.userId !== senderId));
+    });
+
+    // Read receipts for messages this user sent
+    newSocket.on('message_read', (message: Message) => {
+      setMessages((prev) => (prev.some((m) => m._id === message._id) ? mergeMessages(prev, message) : prev));
+    });
+    newSocket.on('messages_read', ({ readerId }: { readerId: string }) => {
+      setMessages((prev) => prev.map((m) => (participantId(m.receiver) === readerId ? { ...m, isRead: true } : m)));
+    });
+
+    newSocket.on('receive_team_message', (payload: Message | { data: Message }) => {
+      const message = 'data' in payload ? payload.data : payload;
+      const teamId = teamIdOf(message);
+      if (!teamId || openTeamIdRef.current !== teamId) return;
+
+      setMessages((prev) => mergeMessages(prev, message));
+      if (participantId(message.sender) !== userId) {
+        void markTeamMessagesAsRead(teamId);
+      }
+    });
+
+    newSocket.on('team_message_read', (message: Message) => {
+      const teamId = teamIdOf(message);
+      if (!teamId || openTeamIdRef.current !== teamId) return;
+      setMessages((prev) => mergeMessages(prev, message));
+    });
+
+    newSocket.on('user_typing', (data: TypingStatus) => {
+      setTypingUsers((prev) => [...prev.filter((t) => t.userId !== data.userId), data]);
+    });
+
+    newSocket.on('user_stopped_typing', ({ userId: typingUserId }: { userId: string }) => {
+      setTypingUsers((prev) => prev.filter((t) => t.userId !== typingUserId));
     });
 
     newSocket.on('update_active_users', (users: string[]) => {
@@ -66,24 +135,35 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setSocket(null);
       setMessages([]);
       setUnreadCounts({});
+      setTypingUsers([]);
       openChatUserIdRef.current = null;
+      openTeamIdRef.current = null;
     };
-  }, [userId, token, loading]);
+  }, [userId, token, loading, markTeamMessagesAsRead]);
 
   const sendMessage = useCallback(async (receiverId: string, message: string) => {
     const { data } = await api.post<Message>('/chat/send', { receiverId, message });
     // The receiver gets it over the socket; add the sender's own copy here
     if (receiverId === openChatUserIdRef.current) {
-      setMessages(prev => [...prev, data]);
+      setMessages((prev) => mergeMessages(prev, data));
+    }
+  }, []);
+
+  const sendTeamMessage = useCallback(async (teamId: string, message: string) => {
+    const { data } = await api.post<{ data: Message }>(`/chat/teams/${teamId}/send`, { message });
+    // Everyone in the team, the sender included, also gets it over the socket
+    if (teamId === openTeamIdRef.current) {
+      setMessages((prev) => mergeMessages(prev, data.data));
     }
   }, []);
 
   const clearUnread = useCallback((chatUserId: string) => {
-    setUnreadCounts(prev => ({ ...prev, [chatUserId]: 0 }));
+    setUnreadCounts((prev) => ({ ...prev, [chatUserId]: 0 }));
   }, []);
 
   const fetchMessages = useCallback(async (chatUserId: string) => {
     openChatUserIdRef.current = chatUserId;
+    openTeamIdRef.current = null;
     clearUnread(chatUserId);
     setLoadingMessages(true);
     setMessages([]);
@@ -103,6 +183,25 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [clearUnread]);
 
+  const fetchTeamMessages = useCallback(async (teamId: string) => {
+    openTeamIdRef.current = teamId;
+    openChatUserIdRef.current = null;
+    setLoadingMessages(true);
+    setMessages([]);
+    setHasMoreMessages(false);
+    try {
+      const { data } = await api.get<{ data: Message[] }>(`/chat/teams/${teamId}/messages`);
+      if (openTeamIdRef.current === teamId) {
+        setMessages(Array.isArray(data.data) ? data.data : []);
+        await markTeamMessagesAsRead(teamId);
+      }
+    } catch (error) {
+      console.error('Error fetching team messages:', error);
+    } finally {
+      setLoadingMessages(false);
+    }
+  }, [markTeamMessagesAsRead]);
+
   const loadOlderMessages = useCallback(async () => {
     const chatUserId = openChatUserIdRef.current;
     const oldest = messages[0];
@@ -113,7 +212,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         params: { before: oldest.timestamp },
       });
       if (openChatUserIdRef.current === chatUserId) {
-        setMessages(prev => [...data.data, ...prev]);
+        setMessages((prev) => [...data.data, ...prev]);
         setHasMoreMessages(!!data.hasMore);
       }
     } catch (error) {
@@ -121,14 +220,38 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [messages]);
 
+  const setTyping = useCallback((isTyping: boolean, recipientId: string) => {
+    socket?.emit(isTyping ? 'typing' : 'stopped_typing', { recipientId });
+  }, [socket]);
+
   const closeChat = useCallback(() => {
     openChatUserIdRef.current = null;
+    openTeamIdRef.current = null;
     setMessages([]);
     setHasMoreMessages(false);
   }, []);
 
   return (
-    <ChatContext.Provider value={{ socket, messages, activeUsers, loadingMessages, unreadCounts, clearUnread, sendMessage, fetchMessages, hasMoreMessages, loadOlderMessages, closeChat }}>
+    <ChatContext.Provider
+      value={{
+        socket,
+        messages,
+        activeUsers,
+        loadingMessages,
+        unreadCounts,
+        typingUsers,
+        clearUnread,
+        sendMessage,
+        sendTeamMessage,
+        fetchMessages,
+        fetchTeamMessages,
+        markTeamMessagesAsRead,
+        setTyping,
+        hasMoreMessages,
+        loadOlderMessages,
+        closeChat,
+      }}
+    >
       {children}
     </ChatContext.Provider>
   );

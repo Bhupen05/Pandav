@@ -44,3 +44,6 @@ export const pick = (source = {}, keys) =>
     if (source[key] !== undefined) result[key] = source[key];
     return result;
   }, {});
+
+// For matching user input as plain text inside a $regex
+export const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

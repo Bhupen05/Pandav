@@ -2,15 +2,27 @@ import { createContext, useContext } from 'react';
 import type { Socket } from 'socket.io-client';
 
 // Populated by the API ({ _id, name }); a bare id if population is skipped
-export type Participant = string | { _id: string; name?: string };
+export type Participant = string | { _id: string; name?: string; email?: string };
 
+// A direct message, or a team message (which has `team` and `readBy` instead
+// of a receiver and isRead)
 export interface Message {
   _id: string;
   sender: Participant;
-  receiver: Participant;
+  receiver?: Participant;
   message: string;
-  timestamp: string;
-  isRead: boolean;
+  timestamp?: string;
+  createdAt?: string;
+  isRead?: boolean;
+  team?: string | { _id: string; name?: string };
+  readBy?: Array<{ user: Participant; readAt: string }>;
+  isEdited?: boolean;
+  editedAt?: string;
+}
+
+export interface TypingStatus {
+  userId: string;
+  userName: string;
 }
 
 export interface ChatContextType {
@@ -19,10 +31,16 @@ export interface ChatContextType {
   activeUsers: string[];
   loadingMessages: boolean;
   unreadCounts: Record<string, number>;
+  // People typing to the current user in a direct chat
+  typingUsers: TypingStatus[];
   clearUnread: (userId: string) => void;
-  // Rejects if the message could not be sent
+  // Reject if the message could not be sent
   sendMessage: (receiverId: string, message: string) => Promise<void>;
+  sendTeamMessage: (teamId: string, message: string) => Promise<void>;
   fetchMessages: (userId: string) => Promise<void>;
+  fetchTeamMessages: (teamId: string) => Promise<void>;
+  markTeamMessagesAsRead: (teamId: string) => Promise<void>;
+  setTyping: (isTyping: boolean, recipientId: string) => void;
   // Whether the open conversation has older messages than those loaded
   hasMoreMessages: boolean;
   loadOlderMessages: () => Promise<void>;
@@ -30,6 +48,9 @@ export interface ChatContextType {
 }
 
 export const ChatContext = createContext<ChatContextType | undefined>(undefined);
+
+export const participantId = (participant: Participant | undefined) =>
+  typeof participant === 'string' ? participant : participant?._id;
 
 export const useChat = () => {
   const context = useContext(ChatContext);

@@ -186,7 +186,7 @@ npm run preview
 ### Frontend (`Frontend/.env`, or the host's environment settings)
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `VITE_API_URL` | Backend API URL, including `/api` | `http://localhost:5000/api` |
+| `VITE_API_URL` | Backend API URL, including the version prefix (`/api/v2` serves every module, including the Social Hub) | `http://localhost:5000/api/v2` |
 | `VITE_CONTACT_EMAIL` | Email shown on the Contact page (hidden if unset) | `support@example.com` |
 | `VITE_CONTACT_PHONE` | Phone number shown on the Contact page (hidden if unset) | `+91 98765 43210` |
 | `VITE_CONTACT_WHATSAPP` | WhatsApp number shown on the Contact page (hidden if unset) | `+91 98765 43210` |

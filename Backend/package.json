@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "node --test --test-concurrency=1 --test-reporter=spec \"test/*.test.js\"",
+    "test:integration": "node --test test/integration/*.test.mjs",
     "migrate": "node scripts/migrate-data.js"
   },
   "keywords": [

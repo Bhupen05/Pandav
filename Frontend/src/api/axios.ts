@@ -1,10 +1,16 @@
 import axios from 'axios';
 
-// Shape of every rejected request from this instance
+// Shape of every rejected request from this instance. `response` mirrors
+// axios's error shape for callers that read error.response.status/data.
 export interface ApiError {
   message: string;
   status?: number;
   data?: unknown;
+  response?: {
+    status: number;
+    statusText?: string;
+    data?: unknown;
+  };
 }
 
 // Message to show the user for any error thrown by an API call
@@ -15,12 +21,22 @@ export const getErrorMessage = (error: unknown, fallback: string): string => {
   return fallback;
 };
 
+// Backend API URL including the version prefix (VITE_API_URL), e.g.
+// http://localhost:5000/api/v2. Defaults to /api/v2 on the same origin.
+export const apiBaseUrl = (import.meta.env.VITE_API_URL || '/api/v2').replace(/\/+$/, '');
+
+// Socket.io lives at the server root, without the /api or /api/vN prefix
+export const socketBaseUrl = /^https?:\/\//.test(apiBaseUrl)
+  ? apiBaseUrl.replace(/\/api(?:\/v\d+)?$/, '')
+  : window.location.origin;
+
 // Create axios instance with base configuration
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL ,
+  baseURL: apiBaseUrl,
   headers: {
     'Content-Type': 'application/json',
   },
+  timeout: 30000, // 30 second timeout for requests
 });
 
 // Request interceptor - Add token to requests
@@ -45,7 +61,7 @@ api.interceptors.response.use(
   },
   (error) => {
     if (error.response) {
-      const { status, data } = error.response;
+      const { status, statusText, data } = error.response;
 
       // Handle 401 Unauthorized - token expired or invalid
       // BUT skip redirect for login/register, so the error can be shown, and for
@@ -69,6 +85,7 @@ api.interceptors.response.use(
         message: data?.message || data?.error || `Request failed with status ${status}`,
         status,
         data,
+        response: { status, statusText, data },
       };
       return Promise.reject(apiError);
     }

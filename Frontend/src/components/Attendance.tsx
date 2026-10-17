@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useCallback, useState, useEffect } from 'react'
 import { attendanceAPI, type AttendanceRecord, type AttendanceStatus } from '../api/attendanceAPI'
 import { userAPI } from '../api/userAPI'
 import { getErrorMessage } from '../api/axios'
@@ -25,7 +25,7 @@ function Attendance() {
   const [employees, setEmployees] = useState<{ _id: string; name: string }[]>([])
   const [employeeId, setEmployeeId] = useState('')
 
-  const { isAdmin } = useAuth()
+  const { isAdmin, user } = useAuth()
 
   // Admins choose who a new record is for
   useEffect(() => {
@@ -34,6 +34,21 @@ function Attendance() {
       .then((response) => setEmployees(Array.isArray(response.data) ? response.data : []))
       .catch((err) => console.error('Failed to load employees:', err))
   }, [isAdmin])
+
+  const loadAttendance = useCallback(async (silent = false) => {
+    try {
+      // Team leaders can see their team's records; this page is only their own
+      const response = await attendanceAPI.getAttendance(!isAdmin && user?._id ? { user: user._id } : undefined)
+      if (response.success) {
+        const data: AttendanceRecord[] = Array.isArray(response.data) ? response.data : []
+        setRecords(isAdmin ? data : data.filter((record) => record.user?._id === user?._id))
+      }
+    } catch (err) {
+      if (!silent) {
+        console.error('Failed to load attendance:', err)
+      }
+    }
+  }, [isAdmin, user?._id])
 
   useEffect(() => {
     loadAttendance()
@@ -44,20 +59,7 @@ function Attendance() {
     }, 30000)
     
     return () => clearInterval(refreshInterval)
-  }, [])
-
-  const loadAttendance = async (silent = false) => {
-    try {
-      const response = await attendanceAPI.getAttendance()
-      if (response.success) {
-        setRecords(response.data)
-      }
-    } catch (err) {
-      if (!silent) {
-        console.error('Failed to load attendance:', err)
-      }
-    }
-  }
+  }, [loadAttendance])
 
   const handleCheckIn = async () => {
     setError(null)
@@ -67,7 +69,7 @@ function Attendance() {
     try {
       const response = await attendanceAPI.checkIn()
       if (response.success) {
-        setSuccess('Checked in successfully! Your attendance is pending admin approval.')
+        setSuccess('Checked in successfully. Your attendance is pending approval.')
         loadAttendance()
       } else {
         setError(response.message || 'Failed to check in')

@@ -1,0 +1,19 @@
+.app-shell {
+  min-height: 100vh;
+}
+
+.app-content {
+  min-height: 100vh;
+  padding-top: 4.75rem;
+}
+
+@media (min-width: 1024px) {
+  .app-content {
+    padding-left: 16rem;
+  }
+}
+
+.public-shell,
+.public-content {
+  min-height: 100vh;
+}

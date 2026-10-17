@@ -1,14 +1,23 @@
 import Attendance from '../models/Attendance.js';
+import User from '../models/User.js';
 import { listResponse, pick, sendServerError } from '../utils/http.js';
 import { toDayKey } from '../utils/dates.js';
+import { canReviewFor, ledUserIds } from '../utils/teams.js';
 
-// Fields an admin may set on a record. Regular users can only submit a
-// request (date, kind of day, remarks) that an admin then approves or rejects.
+// Fields an admin (or the user's team leader) may set on a record. Regular
+// users can only submit a request (date, kind of day, remarks) that a
+// reviewer then approves or rejects.
 const ADMIN_EDITABLE_FIELDS = ['date', 'status', 'approvalStatus', 'checkInTime', 'checkOutTime', 'remarks'];
 
 const DUPLICATE_DAY_MESSAGE = 'Attendance already recorded for this user on that day';
 
-const withUser = (query) => query.populate('user', 'name email department profileImage');
+const withUser = (query) =>
+  query
+    .populate('user', 'name email department profileImage')
+    .populate('team', 'name');
+
+// Team a new record belongs to, so team leaders can find it
+const teamOf = async (userId) => (await User.findById(userId).select('teamId'))?.teamId || null;
 
 // @desc    Get all attendance records
 // @route   GET /api/attendance
@@ -29,8 +38,15 @@ export const getAttendance = async (req, res) => {
       if (endDate) filter.day.$lte = toDayKey(endDate);
     }
 
-    // If user is not admin, show only their attendance
-    if (req.user.role !== 'admin') {
+    // Admins see everyone, team leaders their teams, everyone else themselves
+    if (req.user.role === 'team_leader') {
+      const led = await ledUserIds(req.user.id);
+      if (led.length === 0) {
+        filter.user = req.user.id;
+      } else {
+        filter.user = { $in: user ? led.filter((id) => id === user) : led };
+      }
+    } else if (req.user.role !== 'admin') {
       filter.user = req.user.id;
     }
 
@@ -59,8 +75,9 @@ export const getAttendanceById = async (req, res) => {
       });
     }
 
-    // Check if user has access
-    if (req.user.role !== 'admin' && attendance.user?._id.toString() !== req.user.id) {
+    // The user themselves, an admin, or their team leader
+    const isOwn = attendance.user?._id.toString() === req.user.id;
+    if (!isOwn && !(await canReviewFor(req.user, [attendance.user]))) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to access this record'
@@ -110,6 +127,8 @@ export const createAttendance = async (req, res) => {
       })
     }
 
+    data.team = await teamOf(data.user)
+
     const attendance = await Attendance.create(data)
     const populatedAttendance = await withUser(Attendance.findById(attendance._id))
 
@@ -146,15 +165,19 @@ export const updateAttendance = async (req, res) => {
       });
     }
 
-    // Only admin or the user themselves can update
-    if (req.user.role !== 'admin' && attendance.user.toString() !== req.user.id) {
+    // Admins and the user's team leader can edit the record; the user
+    // themselves only the remarks on a request that hasn't been reviewed
+    const isOwn = attendance.user.toString() === req.user.id;
+    const isReviewer = await canReviewFor(req.user, [attendance.user]);
+
+    if (!isOwn && !isReviewer) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to update this record'
       });
     }
 
-    if (req.user.role === 'admin') {
+    if (isReviewer) {
       const updates = pick(req.body, ADMIN_EDITABLE_FIELDS);
       if (updates.date !== undefined) {
         updates.day = toDayKey(updates.date);
@@ -167,7 +190,6 @@ export const updateAttendance = async (req, res) => {
       }
       attendance.set({ ...updates, approvedBy: req.user.id });
     } else {
-      // Users can only edit the remarks on a request that hasn't been reviewed yet
       if (attendance.approvalStatus !== 'pending') {
         return res.status(403).json({
           success: false,
@@ -244,6 +266,7 @@ export const checkIn = async (req, res) => {
     const now = new Date();
     const attendance = await Attendance.create({
       user: req.user.id,
+      team: req.user.teamId || null,
       date: now,
       day,
       checkInTime: now,
@@ -325,6 +348,13 @@ const review = async (req, res, approvalStatus, message) => {
       });
     }
 
+    if (!(await canReviewFor(req.user, [attendance.user]))) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to review this record'
+      });
+    }
+
     attendance.approvalStatus = approvalStatus;
     attendance.approvedBy = req.user.id;
     if (req.body.remarks) attendance.remarks = req.body.remarks;
@@ -346,12 +376,12 @@ const review = async (req, res, approvalStatus, message) => {
 
 // @desc    Approve attendance record
 // @route   PUT /api/attendance/:id/approve
-// @access  Private (Admin only)
+// @access  Private (Admin or the user's team leader)
 export const approveAttendance = (req, res) =>
   review(req, res, 'approved', 'Attendance approved successfully');
 
 // @desc    Reject attendance record
 // @route   PUT /api/attendance/:id/disapprove
-// @access  Private (Admin only)
+// @access  Private (Admin or the user's team leader)
 export const disapproveAttendance = (req, res) =>
   review(req, res, 'rejected', 'Attendance rejected');

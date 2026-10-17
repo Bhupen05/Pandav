@@ -98,6 +98,12 @@ const taskSchema = new mongoose.Schema({
   notes: {
     type: String,
   },
+  // Optional: team this task belongs to
+  team: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Team',
+    default: null,
+  },
 }, {
   timestamps: true,
 });
@@ -128,6 +134,35 @@ taskSchema.methods.progressFor = function(userId) {
     entry = this.assigneeProgress[this.assigneeProgress.length - 1];
   }
   return entry;
+};
+
+// A reviewer can act once anyone has asked for completion, so one inactive
+// assignee can't hold a task up forever
+taskSchema.methods.hasCompletionRequest = function() {
+  return this.status === 'completion-requested' ||
+    this.assigneeProgress.some((p) => p.status === 'completion-requested');
+};
+
+taskSchema.methods.approveCompletion = function(reviewerId) {
+  const now = new Date();
+  this.status = 'completed';
+  this.approvedBy = reviewerId;
+  this.approvedAt = now;
+  this.completedDate = now;
+  this.assignedTo.forEach((a) => { this.progressFor(a).status = 'completed'; });
+};
+
+// Sends the task back to in-progress with the rejection details
+taskSchema.methods.rejectCompletion = function(reviewerId, reason) {
+  this.status = 'in-progress';
+  this.rejectionReason = reason || 'Task completion rejected';
+  this.rejectedBy = reviewerId;
+  this.rejectedAt = new Date();
+  this.completionRequestedBy = undefined;
+  this.completionRequestedAt = undefined;
+  this.assigneeProgress.forEach((p) => {
+    if (p.status === 'completion-requested') p.status = 'in-progress';
+  });
 };
 
 taskSchema.pre('validate', function(next) {

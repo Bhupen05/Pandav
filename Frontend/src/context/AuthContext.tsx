@@ -99,6 +99,8 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
     token: session?.token ?? null,
     isAuthenticated: session !== null,
     isAdmin: user?.role === 'admin',
+    isTeamLeader: user?.role === 'team_leader',
+    isTeamMember: user?.role === 'team_member',
     loading,
     login,
     logout,

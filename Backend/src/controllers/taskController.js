@@ -1,5 +1,7 @@
 import Task from '../models/Task.js'
+import Team from '../models/Team.js'
 import { listResponse, pick, sendServerError } from '../utils/http.js'
+import { canReviewFor, ledUserIds, teamUserIds } from '../utils/teams.js'
 
 // Fields an admin may set when creating or editing a task
 const TASK_FIELDS = [
@@ -42,6 +44,28 @@ const sendValidationError = (res, error) =>
     message: error.message,
   })
 
+// Whose tasks a list may include: admins see everyone's, team leaders their
+// teams', everyone else their own
+const visibleAssignees = async (user) => {
+  if (user.role === 'admin') return null
+  if (user.role === 'team_leader') {
+    const ids = await ledUserIds(user.id)
+    if (ids.length > 0) return ids
+  }
+  return [user.id]
+}
+
+// Admins, assignees, and leaders of an assignee's team can view a task
+const canViewTask = async (task, user) => {
+  if (user.role === 'admin' || isAssignee(task, user.id)) return true
+  if (user.role !== 'team_leader') return false
+  const led = await ledUserIds(user.id)
+  return task.assignedTo.some((assignee) => led.includes((assignee._id || assignee).toString()))
+}
+
+// Only someone else can sign off a task: an admin, or a leader of every assignee
+const canReviewTask = (task, user) => canReviewFor(user, task.assignedTo)
+
 // @desc    Get all tasks
 // @route   GET /api/tasks
 // @access  Private
@@ -52,11 +76,15 @@ export const getTasks = async (req, res) => {
 
     if (status) filter.status = status;
     if (priority) filter.priority = priority;
-    if (assignedTo) filter.assignedTo = { $in: [assignedTo] };
 
-    // If user is not admin, show only their tasks
-    if (req.user.role !== 'admin') {
-      filter.assignedTo = { $in: [req.user.id] };
+    const allowed = await visibleAssignees(req.user)
+    if (!allowed) {
+      if (assignedTo) filter.assignedTo = { $in: [assignedTo] };
+    } else if (assignedTo && req.user.role === 'team_leader') {
+      // A leader can narrow the list to one person in their team
+      filter.assignedTo = { $in: allowed.includes(assignedTo) ? [assignedTo] : [] };
+    } else {
+      filter.assignedTo = { $in: allowed };
     }
 
     const query = populateTask(Task.find(filter)).sort({ createdAt: -1 })
@@ -80,7 +108,7 @@ export const getTask = async (req, res) => {
       })
     }
 
-    if (req.user.role !== 'admin' && !isAssignee(task, req.user.id)) {
+    if (!(await canViewTask(task, req.user))) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to view this task',
@@ -98,10 +126,29 @@ export const getTask = async (req, res) => {
 
 // @desc    Create task
 // @route   POST /api/tasks
-// @access  Private (Admin)
+// @access  Private (Admin or team_leader)
 export const createTask = async (req, res) => {
   try {
-    const task = await Task.create({ ...pick(req.body, TASK_FIELDS), createdBy: req.user.id })
+    const data = { ...pick(req.body, TASK_FIELDS), createdBy: req.user.id }
+
+    // Team leaders can only assign work within one of their teams
+    if (req.user.role === 'team_leader') {
+      const assignees = [].concat(data.assignedTo || []).map(String)
+      const teams = await Team.find({ leaders: req.user.id }).select('leaders members')
+      const team = teams.find((t) => {
+        const members = teamUserIds(t)
+        return assignees.every((id) => members.includes(id))
+      })
+      if (!team) {
+        return res.status(403).json({
+          success: false,
+          message: 'You can only assign tasks to members of your team',
+        })
+      }
+      data.team = team._id
+    }
+
+    const task = await Task.create(data)
     await sendTask(res, task._id, undefined, 201)
   } catch (error) {
     sendValidationError(res, error)
@@ -134,7 +181,7 @@ export const updateTask = async (req, res) => {
       }
     } else {
       // Assignees can only start their part of the task. Completion goes
-      // through request-completion so that an admin has to approve it.
+      // through request-completion so that a reviewer has to approve it.
       const progress = isAssignee(task, req.user.id) ? task.progressFor(req.user.id) : null
       const canStart =
         progress &&
@@ -229,7 +276,7 @@ export const requestTaskCompletion = async (req, res) => {
     task.rejectedBy = undefined
     task.rejectedAt = undefined
 
-    // The task goes to an admin once every assignee has finished their part
+    // The task goes to a reviewer once every assignee has finished their part
     const everyoneDone = task.assignedTo.every((a) => DONE_PROGRESS.includes(task.progressFor(a).status))
     if (everyoneDone) {
       task.status = 'completion-requested'
@@ -250,40 +297,46 @@ export const requestTaskCompletion = async (req, res) => {
   }
 }
 
-// An admin can act once anyone has asked for completion, so one inactive
-// assignee can't hold a task up forever
-const hasCompletionRequest = (task) =>
-  task.status === 'completion-requested' ||
-  task.assigneeProgress.some((p) => p.status === 'completion-requested')
+// Loads a task a reviewer is about to approve or reject, or sends the reason they can't
+const findTaskToReview = async (req, res) => {
+  const task = await Task.findById(req.params.id)
+
+  if (!task) {
+    res.status(404).json({
+      success: false,
+      message: 'Task not found',
+    })
+    return null
+  }
+
+  if (!(await canReviewTask(task, req.user))) {
+    res.status(403).json({
+      success: false,
+      message: 'Not authorized to review this task',
+    })
+    return null
+  }
+
+  if (!task.hasCompletionRequest()) {
+    res.status(400).json({
+      success: false,
+      message: 'Task completion has not been requested',
+    })
+    return null
+  }
+
+  return task
+}
 
 // @desc    Approve task completion
 // @route   PUT /api/tasks/:id/approve
-// @access  Private (Admin)
+// @access  Private (Admin or team leader of the assignees)
 export const approveTaskCompletion = async (req, res) => {
   try {
-    const task = await Task.findById(req.params.id)
+    const task = await findTaskToReview(req, res)
+    if (!task) return
 
-    if (!task) {
-      return res.status(404).json({
-        success: false,
-        message: 'Task not found',
-      })
-    }
-
-    if (!hasCompletionRequest(task)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Task completion has not been requested',
-      })
-    }
-
-    const now = new Date()
-    task.status = 'completed'
-    task.approvedBy = req.user.id
-    task.approvedAt = now
-    task.completedDate = now
-    task.assignedTo.forEach((a) => { task.progressFor(a).status = 'completed' })
-
+    task.approveCompletion(req.user.id)
     await task.save()
     await sendTask(res, task._id, 'Task completion approved')
   } catch (error) {
@@ -293,37 +346,13 @@ export const approveTaskCompletion = async (req, res) => {
 
 // @desc    Reject task completion
 // @route   PUT /api/tasks/:id/reject
-// @access  Private (Admin)
+// @access  Private (Admin or team leader of the assignees)
 export const rejectTaskCompletion = async (req, res) => {
   try {
-    const task = await Task.findById(req.params.id)
+    const task = await findTaskToReview(req, res)
+    if (!task) return
 
-    if (!task) {
-      return res.status(404).json({
-        success: false,
-        message: 'Task not found',
-      })
-    }
-
-    if (!hasCompletionRequest(task)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Task completion has not been requested',
-      })
-    }
-
-    // Set task back to in-progress with rejection details
-    task.status = 'in-progress'
-    task.rejectionReason = req.body.rejectionReason || 'Task completion rejected by admin'
-    task.rejectedBy = req.user.id
-    task.rejectedAt = new Date()
-    // Clear completion request
-    task.completionRequestedBy = undefined
-    task.completionRequestedAt = undefined
-    task.assigneeProgress.forEach((p) => {
-      if (p.status === 'completion-requested') p.status = 'in-progress'
-    })
-
+    task.rejectCompletion(req.user.id, req.body.rejectionReason)
     await task.save()
     await sendTask(res, task._id, 'Task completion rejected')
   } catch (error) {
@@ -333,10 +362,17 @@ export const rejectTaskCompletion = async (req, res) => {
 
 // @desc    Get tasks pending approval
 // @route   GET /api/tasks/pending-approval
-// @access  Private (Admin)
+// @access  Private (Admin or team_leader)
 export const getPendingApprovalTasks = async (req, res) => {
   try {
     const filter = { status: 'completion-requested' }
+
+    // Leaders only see their teams' tasks, and not ones they're assigned to themselves
+    if (req.user.role !== 'admin') {
+      const led = (await ledUserIds(req.user.id)).filter((id) => id !== req.user.id)
+      filter.assignedTo = { $in: led, $ne: req.user._id }
+    }
+
     const query = populateTask(Task.find(filter)).sort({ completionRequestedAt: -1 })
     res.status(200).json(await listResponse(Task, filter, query, req.query))
   } catch (error) {

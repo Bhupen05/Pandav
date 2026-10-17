@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Navigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
 import { useAuth } from '../context/useAuth'
 import { getErrorMessage } from '../api/axios'
 import { canRequestCompletion, canStart, isWaitingForTeammates, type AssigneeProgress } from '../utils/taskProgress'
 import { useFeedback } from '../context/useFeedback'
+import { socialV2API } from '../api/socialV2API'
 
 type Task = {
   _id: string
@@ -28,6 +29,23 @@ type LeaderboardUser = {
   completionRate: number
 }
 
+type SocialPost = {
+  _id: string
+  content: string
+  author?: { _id: string; name: string; profileImage?: string }
+  likes: string[]
+  comments: unknown[]
+  createdAt: string
+}
+
+type PersonalTodo = {
+  _id: string
+  title: string
+  description?: string
+  status: 'todo' | 'in_progress' | 'completed'
+  createdAt: string
+}
+
 const priorityConfig = {
   urgent: { bg: 'bg-red-100', text: 'text-red-700', border: 'border-red-200' },
   high: { bg: 'bg-orange-100', text: 'text-orange-700', border: 'border-orange-200' },
@@ -46,8 +64,11 @@ const statusConfig = {
 export default function UserDashboard() {
   const { notify } = useFeedback()
   const { user } = useAuth()
+  const navigate = useNavigate()
   const [tasks, setTasks] = useState<Task[]>([])
   const [leaderboard, setLeaderboard] = useState<LeaderboardUser[]>([])
+  const [socialPosts, setSocialPosts] = useState<SocialPost[]>([])
+  const [personalTodos, setPersonalTodos] = useState<PersonalTodo[]>([])
   const [isLoading, setIsLoading] = useState(true)
   // Admins have their own dashboard
   const isAdminUser = user?.role === 'admin'
@@ -57,13 +78,17 @@ export default function UserDashboard() {
     try {
       // The leaderboard is computed on the server: a regular user's task list
       // only contains their own tasks, so it can't be built from that
-      const [taskRes, leaderboardRes] = await Promise.all([
+      const [taskRes, leaderboardRes, postsRes, todosRes] = await Promise.all([
         taskAPI.getTasks(),
         taskAPI.getLeaderboard().catch(() => ({ data: [] })),
+        socialV2API.getFeed().catch(() => ({ data: [] })),
+        socialV2API.getPersonalTasks().catch(() => ({ data: [] })),
       ])
 
       setTasks(Array.isArray(taskRes?.data) ? taskRes.data : [])
       setLeaderboard(Array.isArray(leaderboardRes?.data) ? (leaderboardRes.data as LeaderboardUser[]) : [])
+      setSocialPosts(Array.isArray(postsRes?.data) ? (postsRes.data as SocialPost[]).slice(0, 5) : [])
+      setPersonalTodos(Array.isArray(todosRes?.data) ? (todosRes.data as PersonalTodo[]) : [])
     } catch (error) {
       console.error('Failed to load user dashboard', error)
     } finally {
@@ -131,6 +156,18 @@ export default function UserDashboard() {
     } catch (error) {
       console.error('Unable to start task', error)
       notify(getErrorMessage(error, 'Unable to start task'), 'error')
+    }
+  }
+
+  const handleToggleTodo = async (todoId: string) => {
+    try {
+      const response = await socialV2API.togglePersonalTask(todoId)
+      const updated = response?.data as PersonalTodo | undefined
+      if (updated) {
+        setPersonalTodos((prev) => prev.map((todo) => (todo._id === todoId ? updated : todo)))
+      }
+    } catch (error) {
+      notify(getErrorMessage(error, 'Unable to update todo'), 'error')
     }
   }
 
@@ -255,6 +292,111 @@ export default function UserDashboard() {
 
       {/* Leaderboard & Recent Tasks Grid */}
       <div className="grid gap-6 lg:grid-cols-2">
+        {/* Social Feed Section */}
+        <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
+          <div className="border-b bg-linear-to-r from-purple-500 to-pink-500 px-5 py-4">
+            <div className="flex items-center gap-2 text-white">
+              <span className="text-2xl">📱</span>
+              <h3 className="font-bold text-lg">Social Feed</h3>
+            </div>
+            <p className="text-purple-100 text-sm mt-1">Updates from your network</p>
+          </div>
+          {socialPosts.length === 0 ? (
+            <div className="p-8 text-center">
+              <div className="text-4xl mb-3">🌐</div>
+              <p className="text-sm text-neutral-500">No posts yet. Visit the Social Hub to get started!</p>
+              <button
+                onClick={() => navigate('/social')}
+                className="mt-3 text-sm text-purple-600 hover:text-purple-700 font-medium"
+              >
+                Go to Social Hub →
+              </button>
+            </div>
+          ) : (
+            <div className="divide-y max-h-96 overflow-y-auto">
+              {socialPosts.map((post) => (
+                <div key={post._id} className="p-4 hover:bg-neutral-50 transition-colors">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-purple-100 text-xs font-bold text-purple-600">
+                      {(post.author?.name || '?').split(' ').map((n: string) => n[0]).join('').slice(0, 2)}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-neutral-900">{post.author?.name || 'Unknown'}</p>
+                      <p className="text-sm text-neutral-600 mt-1 line-clamp-2">{post.content}</p>
+                      <div className="flex gap-4 mt-2 text-xs text-neutral-500">
+                        <span>👍 {post.likes?.length ?? 0}</span>
+                        <span>💬 {post.comments?.length ?? 0}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Personal Todos Section */}
+        <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
+          <div className="border-b bg-linear-to-r from-teal-500 to-cyan-500 px-5 py-4">
+            <div className="flex items-center gap-2 text-white">
+              <span className="text-2xl">✅</span>
+              <h3 className="font-bold text-lg">Personal Todos</h3>
+            </div>
+            <p className="text-teal-100 text-sm mt-1 flex items-center gap-1">
+              {personalTodos.filter(t => t.status !== 'completed').length} of {personalTodos.length} remaining
+            </p>
+          </div>
+          {personalTodos.length === 0 ? (
+            <div className="p-8 text-center">
+              <div className="text-4xl mb-3">📝</div>
+              <p className="text-sm text-neutral-500">No todos yet. Create one in the Social Hub!</p>
+              <button
+                onClick={() => navigate('/social')}
+                className="mt-3 text-sm text-teal-600 hover:text-teal-700 font-medium"
+              >
+                Go to Social Hub →
+              </button>
+            </div>
+          ) : (
+            <div className="divide-y max-h-96 overflow-y-auto">
+              {personalTodos.map((todo) => (
+                <div
+                  key={todo._id}
+                  className={`p-4 flex items-start gap-3 hover:bg-neutral-50 transition-colors ${
+                    todo.status === 'completed' ? 'bg-neutral-50' : ''
+                  }`}
+                >
+                  <button
+                    onClick={() => handleToggleTodo(todo._id)}
+                    className={`mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded border-2 transition-all ${
+                      todo.status === 'completed'
+                        ? 'bg-teal-500 border-teal-500'
+                        : 'border-neutral-300 hover:border-teal-500'
+                    }`}
+                  >
+                    {todo.status === 'completed' && <span className="text-white text-xs">✓</span>}
+                  </button>
+                  <div className="flex-1 min-w-0">
+                    <p
+                      className={`text-sm font-medium ${
+                        todo.status === 'completed' ? 'line-through text-neutral-400' : 'text-neutral-900'
+                      }`}
+                    >
+                      {todo.title}
+                    </p>
+                    {todo.description && (
+                      <p className="text-xs text-neutral-500 mt-1">{todo.description}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Leaderboard & Recent Tasks Grid */}
+      <div className="grid gap-6 lg:grid-cols-2">
         {/* Leaderboard */}
         <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
           <div className="border-b bg-linear-to-r from-amber-500 to-orange-500 px-5 py-4">
@@ -299,7 +441,7 @@ export default function UserDashboard() {
                         />
                       ) : (
                         <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100 text-sm font-bold text-emerald-600 border-2 border-white shadow">
-                          {member.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
+                          {member.name.split(' ').map((n: string) => n[0]).join('').toUpperCase().slice(0, 2)}
                         </div>
                       )}
                       {isCurrentUser && (

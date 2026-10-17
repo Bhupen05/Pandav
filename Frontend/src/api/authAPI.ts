@@ -29,6 +29,7 @@ export interface User {
   department?: string;
   createdAt?: string;
   profileImage?: string;
+  teamId?: string | null;
 }
 
 // Keeps the profile fields of a user returned by the API (login also sends the token)
@@ -41,6 +42,7 @@ const toUser = (data: User): User => ({
   department: data.department,
   profileImage: data.profileImage,
   createdAt: data.createdAt,
+  teamId: data.teamId,
 });
 
 export const authAPI = {

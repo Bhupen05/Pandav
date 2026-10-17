@@ -2,7 +2,10 @@ import User from '../models/User.js';
 import Task from '../models/Task.js';
 import Attendance from '../models/Attendance.js';
 import Chat from '../models/Chat.js';
-import { listResponse, pick, sendServerError } from '../utils/http.js';
+import Team from '../models/Team.js';
+import TeamInvite from '../models/TeamInvite.js';
+import TeamChatMessage from '../models/TeamChatMessage.js';
+import { escapeRegex, listResponse, pick, sendServerError } from '../utils/http.js';
 
 // Fields a user may change on their own profile
 const SELF_EDITABLE_FIELDS = ['name', 'email', 'phone', 'department', 'profileImage'];
@@ -13,6 +16,36 @@ const ADMIN_EDITABLE_FIELDS = [...SELF_EDITABLE_FIELDS, 'role', 'isActive'];
 const disconnectUserSockets = (req, userId) => {
   const io = req.app.get('io');
   if (io) io.in(userId.toString()).disconnectSockets(true);
+};
+
+// @desc    Search users by name or email
+// @route   GET /api/users/search?q=...
+// @access  Private
+export const searchUsers = async (req, res) => {
+  try {
+    const { q } = req.query;
+
+    if (typeof q !== 'string' || q.trim().length < 2) {
+      return res.json({ success: true, data: [] });
+    }
+
+    // Matched as plain text, not as a regular expression
+    const query = escapeRegex(q.trim());
+    const users = await User.find({
+      $or: [
+        { name: { $regex: query, $options: 'i' } },
+        { email: { $regex: query, $options: 'i' } },
+      ],
+      _id: { $ne: req.user._id }, // Don't show current user
+      isActive: true,
+    })
+      .select('_id name email role department profileImage')
+      .limit(10);
+
+    res.json({ success: true, count: users.length, data: users });
+  } catch (error) {
+    sendServerError(res, error);
+  }
 };
 
 // @desc    Get all users for chat (any authenticated user)
@@ -163,6 +196,12 @@ export const deleteUser = async (req, res) => {
       ),
       Attendance.deleteMany({ user: user._id }),
       Chat.deleteMany({ $or: [{ sender: user._id }, { receiver: user._id }] }),
+      Team.updateMany(
+        { $or: [{ leaders: user._id }, { members: user._id }] },
+        { $pull: { leaders: user._id, members: user._id } }
+      ),
+      TeamInvite.deleteMany({ $or: [{ invitedUser: user._id }, { invitedBy: user._id }] }),
+      TeamChatMessage.deleteMany({ sender: user._id }),
     ]);
     await user.deleteOne();
     disconnectUserSockets(req, user._id);
