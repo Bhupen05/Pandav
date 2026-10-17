@@ -5,7 +5,7 @@ interface LoginCredentials {
   password: string;
 }
 
-interface RegisterData {
+export interface RegisterData {
   name: string;
   email: string;
   password: string;
@@ -19,6 +19,30 @@ interface UpdatePasswordData {
   newPassword: string;
 }
 
+// The signed-in user, as kept for the session
+export interface User {
+  _id: string;
+  name: string;
+  email: string;
+  role: string;
+  phone?: string;
+  department?: string;
+  createdAt?: string;
+  profileImage?: string;
+}
+
+// Keeps the profile fields of a user returned by the API (login also sends the token)
+const toUser = (data: User): User => ({
+  _id: data._id,
+  name: data.name,
+  email: data.email,
+  role: data.role,
+  phone: data.phone,
+  department: data.department,
+  profileImage: data.profileImage,
+  createdAt: data.createdAt,
+});
+
 export const authAPI = {
   // Register new user
   register: async (data: RegisterData) => {
@@ -26,43 +50,25 @@ export const authAPI = {
     return response.data;
   },
 
-  // Login user
-  login: async (credentials: LoginCredentials, rememberMe: boolean = false) => {
-    const trimmedCredentials = {
+  // Login user. Storing the session is up to the caller (AuthProvider).
+  login: async (credentials: LoginCredentials) => {
+    const response = await api.post('/auth/login', {
       email: credentials.email.trim(),
-      password: credentials.password
-    };
-    
-    const response = await api.post('/auth/login', trimmedCredentials);
-    
+      password: credentials.password,
+    });
     const { success, data, message } = response.data;
-    
-    const token = data?.token;
-    const user = data ? { 
-      _id: data._id, 
-      name: data.name, 
-      email: data.email, 
-      role: data.role,
-      phone: data.phone,
-      department: data.department,
-      profileImage: data.profileImage,
-      createdAt: data.createdAt
-    } : null;
-    
-    if (success && token) {
-      // Use localStorage for "Remember Me", sessionStorage for session-based (logout on close)
-      const storage = rememberMe ? localStorage : sessionStorage;
-      storage.setItem('token', token);
-      storage.setItem('user', JSON.stringify(user));
-    }
-    
-    return { success, token, user, message };
+    return {
+      success: Boolean(success),
+      message: message as string | undefined,
+      token: data?.token as string | undefined,
+      user: data ? toUser(data) : null,
+    };
   },
 
-  // Get current user
-  getMe: async () => {
+  // The current user, fresh from the server
+  getMe: async (): Promise<User> => {
     const response = await api.get('/auth/me');
-    return response.data;
+    return toUser(response.data.data);
   },
 
   // Update password

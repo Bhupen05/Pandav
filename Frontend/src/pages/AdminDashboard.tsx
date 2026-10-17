@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
 import { attendanceAPI, type AttendanceRecord } from '../api/attendanceAPI'
 import { userAPI } from '../api/userAPI'
 import { getErrorMessage } from '../api/axios'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 import Tasksadd, { type TaskInput } from '../components/Tasksadd'
 import { todayKey } from '../utils/date'
+import { useFeedback } from '../context/useFeedback'
 
 type DashboardTask = TaskInput & {
   _id: string
@@ -25,7 +26,7 @@ type DashboardUser = {
 }
 
 export default function AdminDashboard() {
-  const navigate = useNavigate()
+  const { notify, confirm, prompt } = useFeedback()
   const { isAdmin, isAuthenticated, user } = useAuth()
 
   const [tasks, setTasks] = useState<DashboardTask[]>([])
@@ -43,14 +44,6 @@ export default function AdminDashboard() {
   const [rejectionReason, setRejectionReason] = useState('')
   const [rejectingTaskId, setRejectingTaskId] = useState<string | null>(null)
   const [isRejectSubmitting, setIsRejectSubmitting] = useState(false)
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      navigate('/login')
-    } else if (!isAdmin) {
-      navigate('/')
-    }
-  }, [isAuthenticated, isAdmin, navigate])
 
   useEffect(() => {
     if (isAuthenticated && isAdmin) {
@@ -99,7 +92,7 @@ export default function AdminDashboard() {
       await fetchAllData()
     } catch (error) {
       console.error('Failed to approve task completion', error)
-      alert(getErrorMessage(error, 'Failed to approve task'))
+      notify(getErrorMessage(error, 'Failed to approve task'), 'error')
     }
   }
 
@@ -127,20 +120,20 @@ export default function AdminDashboard() {
       await fetchAllData()
     } catch (error) {
       console.error('Failed to reject task completion', error)
-      alert(getErrorMessage(error, 'Failed to reject task'))
+      notify(getErrorMessage(error, 'Failed to reject task'), 'error')
     } finally {
       setIsRejectSubmitting(false)
     }
   }
 
   const handleDeleteTask = async (taskId: string) => {
-    if (!confirm('Delete this task?')) return
+    if (!(await confirm({ title: 'Delete this task?', message: "It will be removed for everyone. This can't be undone.", confirmLabel: 'Delete', danger: true }))) return
     try {
       await taskAPI.deleteTask(taskId)
       setTasks((prev) => prev.filter((task) => task._id !== taskId))
     } catch (error) {
       console.error('Failed to delete task', error)
-      alert(getErrorMessage(error, 'Failed to delete task'))
+      notify(getErrorMessage(error, 'Failed to delete task'), 'error')
     }
   }
 
@@ -155,7 +148,7 @@ export default function AdminDashboard() {
       setAttendanceRequests((prev) => prev.filter((item) => item._id !== requestId))
     } catch (error) {
       console.error('Failed to update attendance request', error)
-      alert(getErrorMessage(error, 'Failed to update attendance request'))
+      notify(getErrorMessage(error, 'Failed to update attendance request'), 'error')
     }
   }
 
@@ -167,19 +160,26 @@ export default function AdminDashboard() {
       )
     } catch (error) {
       console.error('Failed to toggle user status', error)
-      alert(getErrorMessage(error, 'Failed to change user status'))
+      notify(getErrorMessage(error, 'Failed to change user status'), 'error')
     }
   }
 
   // Users who forgot their password get a new one from an admin
   const handleResetPassword = async (targetUser: DashboardUser) => {
-    const newPassword = window.prompt(`New password for ${targetUser.name} (at least 6 characters):`)
+    const newPassword = await prompt({
+      title: `Reset password for ${targetUser.name}`,
+      message: 'They will be signed out everywhere and need this password to sign in again.',
+      label: 'New password (at least 6 characters)',
+      type: 'password',
+      minLength: 6,
+      confirmLabel: 'Reset password',
+    })
     if (newPassword === null) return
     try {
       await userAPI.resetPassword(targetUser._id, newPassword)
-      alert(`Password reset. Share the new password with ${targetUser.name}; they have been signed out everywhere.`)
+      notify(`Password reset. Share the new password with ${targetUser.name}; they have been signed out everywhere.`, 'success')
     } catch (error) {
-      alert(getErrorMessage(error, 'Failed to reset password'))
+      notify(getErrorMessage(error, 'Failed to reset password'), 'error')
     }
   }
 
@@ -242,14 +242,6 @@ export default function AdminDashboard() {
   // Greeting based on time
   const hour = new Date().getHours()
   const greeting = hour < 12 ? 'Good Morning' : hour < 17 ? 'Good Afternoon' : 'Good Evening'
-
-  if (!isAuthenticated || !isAdmin) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-50 text-sm text-neutral-600">
-        Checking access...
-      </div>
-    )
-  }
 
   if (isLoading) {
     return (

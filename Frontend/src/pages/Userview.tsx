@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
 import { attendanceAPI, type AttendanceRecord } from '../api/attendanceAPI'
 import { userAPI } from '../api/userAPI'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 
 type Task = {
   _id: string
@@ -35,14 +35,6 @@ export default function Userview() {
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<'overview' | 'tasks' | 'attendance'>('overview')
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      navigate('/login')
-    } else if (!isAdmin) {
-      navigate('/')
-    }
-  }, [isAuthenticated, isAdmin, navigate])
 
   useEffect(() => {
     if (isAuthenticated && isAdmin) {
@@ -146,17 +138,6 @@ export default function Userview() {
       default:
         return 'bg-neutral-100 text-neutral-700'
     }
-  }
-
-  if (!isAuthenticated || !isAdmin) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-50">
-        <div className="text-center">
-          <div className="mb-4 inline-block h-8 w-8 animate-spin rounded-full border-4 border-neutral-200 border-t-neutral-900"></div>
-          <p className="text-sm text-neutral-600">Checking access...</p>
-        </div>
-      </div>
-    )
   }
 
   if (loading) {
@@ -268,7 +249,7 @@ export default function Userview() {
           ].map(tab => (
             <button
               key={tab.key}
-              onClick={() => setActiveTab(tab.key as any)}
+              onClick={() => setActiveTab(tab.key as typeof activeTab)}
               className={`inline-flex items-center gap-2 whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium transition-all ${
                 activeTab === tab.key
                   ? 'bg-neutral-900 text-white shadow-lg'

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
-import { useChat, type Participant } from '../context/ChatContext';
-import { useAuth } from '../context/AuthContext';
+import { useChat, type Participant } from '../context/useChat';
+import { useAuth } from '../context/useAuth';
 import { getErrorMessage } from '../api/axios';
 
 interface ChatProps {

@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react'
 import { attendanceAPI, type AttendanceRecord, type AttendanceStatus } from '../api/attendanceAPI'
 import { userAPI } from '../api/userAPI'
 import { getErrorMessage } from '../api/axios'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 import { todayKey } from '../utils/date'
+import { useFeedback } from '../context/useFeedback'
 
 const approvalBadge = {
   pending: 'bg-purple-50 text-purple-700 ring-1 ring-purple-200',
@@ -12,6 +13,7 @@ const approvalBadge = {
 }
 
 function Attendance() {
+  const { confirm } = useFeedback()
   const [records, setRecords] = useState<AttendanceRecord[]>([])
   const [date, setDate] = useState('')
   const [status, setStatus] = useState<AttendanceStatus>('present')
@@ -64,7 +66,6 @@ function Attendance() {
 
     try {
       const response = await attendanceAPI.checkIn()
-      console.log('Check-in response:', response)
       if (response.success) {
         setSuccess('Checked in successfully! Your attendance is pending admin approval.')
         loadAttendance()
@@ -86,7 +87,6 @@ function Attendance() {
 
     try {
       const response = await attendanceAPI.checkOut()
-      console.log('Check-out response:', response)
       if (response.success) {
         setSuccess('Checked out successfully! Your work hours have been recorded.')
         loadAttendance()
@@ -141,7 +141,7 @@ function Attendance() {
   }
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm('Delete this attendance record?')) return
+    if (!(await confirm({ title: 'Delete this attendance record?', message: "This can't be undone.", confirmLabel: 'Delete', danger: true }))) return
 
     try {
       await attendanceAPI.deleteAttendance(id)

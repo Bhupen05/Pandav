@@ -9,9 +9,10 @@ import {
   type ApprovalStatus,
 } from '../api/attendanceAPI'
 import { userAPI } from '../api/userAPI'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 import { getErrorMessage } from '../api/axios'
 import { todayKey } from '../utils/date'
+import { useFeedback } from '../context/useFeedback'
 
 const statusLabel = (value: string) => value.charAt(0).toUpperCase() + value.slice(1).replace('-', ' ')
 
@@ -24,6 +25,7 @@ type User = {
 }
 
 export default function AttendanceAdmin() {
+  const { notify } = useFeedback()
   const navigate = useNavigate()
   const { isAdmin, isAuthenticated } = useAuth()
   
@@ -45,14 +47,6 @@ export default function AttendanceAdmin() {
   const [editStatus, setEditStatus] = useState<AttendanceStatus>('present')
   const [editApproval, setEditApproval] = useState<ApprovalStatus>('pending')
   const [editRemarks, setEditRemarks] = useState<string>('')
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      navigate('/login')
-    } else if (!isAdmin) {
-      navigate('/')
-    }
-  }, [isAuthenticated, isAdmin, navigate])
 
   useEffect(() => {
     if (isAuthenticated && isAdmin) {
@@ -87,7 +81,7 @@ export default function AttendanceAdmin() {
       replaceRecord(response.data)
     } catch (error) {
       console.error('Failed to approve:', error)
-      alert(getErrorMessage(error, 'Failed to approve attendance'))
+      notify(getErrorMessage(error, 'Failed to approve attendance'), 'error')
     }
   }
 
@@ -113,7 +107,7 @@ export default function AttendanceAdmin() {
       closeRejectModal()
     } catch (error) {
       console.error('Failed to reject:', error)
-      alert(getErrorMessage(error, 'Failed to reject attendance'))
+      notify(getErrorMessage(error, 'Failed to reject attendance'), 'error')
     } finally {
       setIsSubmitting(false)
     }
@@ -150,7 +144,7 @@ export default function AttendanceAdmin() {
       closeEditModal()
     } catch (error) {
       console.error('Failed to update record:', error)
-      alert(getErrorMessage(error, 'Failed to update attendance record'))
+      notify(getErrorMessage(error, 'Failed to update attendance record'), 'error')
     } finally {
       setIsSubmitting(false)
     }
@@ -218,17 +212,6 @@ export default function AttendanceAdmin() {
       default:
         return 'bg-purple-50 text-purple-700 ring-1 ring-purple-200'
     }
-  }
-
-  if (!isAuthenticated || !isAdmin) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-50">
-        <div className="text-center">
-          <div className="mb-4 inline-block h-8 w-8 animate-spin rounded-full border-4 border-neutral-200 border-t-neutral-900"></div>
-          <p className="text-sm text-neutral-600">Checking access...</p>
-        </div>
-      </div>
-    )
   }
 
   if (loading) {

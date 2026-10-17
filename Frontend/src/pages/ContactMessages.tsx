@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { contactAPI } from '../api/contactAPI'
 import { getErrorMessage } from '../api/axios'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
+import { useFeedback } from '../context/useFeedback'
 
 type ContactStatus = 'new' | 'in-progress' | 'resolved' | 'closed'
 
@@ -35,20 +36,13 @@ const statusColor = (status: ContactStatus) => {
 }
 
 export default function ContactMessages() {
+  const { notify, confirm } = useFeedback()
   const navigate = useNavigate()
   const { isAdmin, isAuthenticated } = useAuth()
   const [messages, setMessages] = useState<ContactMessage[]>([])
   const [filter, setFilter] = useState<'all' | ContactStatus>('all')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      navigate('/login')
-    } else if (!isAdmin) {
-      navigate('/')
-    }
-  }, [isAuthenticated, isAdmin, navigate])
 
   const loadMessages = useCallback(async () => {
     setLoading(true)
@@ -72,31 +66,23 @@ export default function ContactMessages() {
       const response = await contactAPI.updateContact(id, { status })
       setMessages((prev) => prev.map((m) => (m._id === id ? response.data : m)))
     } catch (err) {
-      alert(getErrorMessage(err, 'Failed to update message status'))
+      notify(getErrorMessage(err, 'Failed to update message status'), 'error')
     }
   }
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm('Delete this message?')) return
+    if (!(await confirm({ title: 'Delete this message?', message: "This can't be undone.", confirmLabel: 'Delete', danger: true }))) return
     try {
       await contactAPI.deleteContact(id)
       setMessages((prev) => prev.filter((m) => m._id !== id))
     } catch (err) {
-      alert(getErrorMessage(err, 'Failed to delete message'))
+      notify(getErrorMessage(err, 'Failed to delete message'), 'error')
     }
   }
 
   const visibleMessages = filter === 'all' ? messages : messages.filter((m) => m.status === filter)
   const countFor = (status: 'all' | ContactStatus) =>
     status === 'all' ? messages.length : messages.filter((m) => m.status === status).length
-
-  if (!isAuthenticated || !isAdmin) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-50">
-        <p className="text-sm text-neutral-600">Checking access...</p>
-      </div>
-    )
-  }
 
   return (
     <div className="min-h-screen bg-linear-to-br from-neutral-50 via-white to-neutral-100">

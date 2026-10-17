@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 
 function Navbar() {
   const [open, setOpen] = useState(false)
@@ -9,7 +9,7 @@ function Navbar() {
   const close = () => setOpen(false)
   const navigate = useNavigate()
   
-  const { isAuthenticated, isAdmin, logout, user } = useAuth()
+  const { isAuthenticated, isAdmin, logout, user, loading } = useAuth()
 
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     `rounded-md px-3 py-2 text-sm font-medium transition-colors ${isActive ? 'bg-emerald-50 text-emerald-700' : 'text-neutral-600 hover:bg-neutral-50 hover:text-neutral-900'}`
@@ -44,6 +44,8 @@ function Navbar() {
           className={`${open ? 'flex' : 'hidden'} absolute left-0 right-0 top-16 flex-col gap-1 border-b bg-white px-4 py-4 shadow-md md:static md:flex md:h-auto md:flex-row md:items-center md:gap-1 md:border-0 md:bg-transparent md:p-0 md:shadow-none`}
           aria-label="Primary"
         >
+          {/* Links depend on the role, which is confirmed with the server first */}
+          {!loading && (<>
           {!isAuthenticated && (
             <>
               <NavLink to="/" end className={linkClass} onClick={close}>
@@ -186,6 +188,7 @@ function Navbar() {
               Login
             </NavLink>
           )}
+          </>)}
         </nav>
       </div>
     </header>

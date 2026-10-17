@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { taskAPI } from '../api/taskAPI'
 import { userAPI } from '../api/userAPI'
 import { getErrorMessage, type ApiError } from '../api/axios'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 import type { AssigneeProgress } from '../utils/taskProgress'
 
 // The API returns populated users; freshly built inputs hold plain ids

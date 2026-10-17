@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Navigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 import { getErrorMessage } from '../api/axios'
 import { canRequestCompletion, canStart, isWaitingForTeammates, type AssigneeProgress } from '../utils/taskProgress'
+import { useFeedback } from '../context/useFeedback'
 
 type Task = {
   _id: string
@@ -43,24 +44,13 @@ const statusConfig = {
 }
 
 export default function UserDashboard() {
-  const navigate = useNavigate()
-  const { isAuthenticated, user } = useAuth()
+  const { notify } = useFeedback()
+  const { user } = useAuth()
   const [tasks, setTasks] = useState<Task[]>([])
   const [leaderboard, setLeaderboard] = useState<LeaderboardUser[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const [checkingSession, setCheckingSession] = useState(true)
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      navigate('/login')
-      return
-    }
-    if (user?.role === 'admin') {
-      navigate('/admin')
-      return
-    }
-    setCheckingSession(false)
-  }, [isAuthenticated, user?.role, navigate])
+  // Admins have their own dashboard
+  const isAdminUser = user?.role === 'admin'
 
   const loadData = useCallback(async () => {
     setIsLoading(true)
@@ -82,10 +72,10 @@ export default function UserDashboard() {
   }, [])
 
   useEffect(() => {
-    if (!checkingSession && isAuthenticated && user?._id) {
+    if (!isAdminUser && user?._id) {
       loadData()
     }
-  }, [checkingSession, isAuthenticated, user?._id, loadData])
+  }, [isAdminUser, user?._id, loadData])
 
   const pendingTasks = tasks.filter((task) => task.status === 'pending')
   const inProgressTasks = tasks.filter((task) => task.status === 'in-progress')
@@ -130,7 +120,7 @@ export default function UserDashboard() {
       replaceTask(response.data)
     } catch (error) {
       console.error('Unable to request task completion', error)
-      alert(getErrorMessage(error, 'Unable to request task completion'))
+      notify(getErrorMessage(error, 'Unable to request task completion'), 'error')
     }
   }
 
@@ -140,26 +130,14 @@ export default function UserDashboard() {
       replaceTask(response.data)
     } catch (error) {
       console.error('Unable to start task', error)
-      alert(getErrorMessage(error, 'Unable to start task'))
+      notify(getErrorMessage(error, 'Unable to start task'), 'error')
     }
   }
 
 
 
-  if (!isAuthenticated) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-50 text-sm text-neutral-600">
-        Redirecting...
-      </div>
-    )
-  }
-
-  if (checkingSession) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-50 text-sm text-neutral-600">
-        Checking session...
-      </div>
-    )
+  if (isAdminUser) {
+    return <Navigate to="/admin" replace />
   }
 
   if (isLoading) {

@@ -48,10 +48,12 @@ api.interceptors.response.use(
       const { status, data } = error.response;
 
       // Handle 401 Unauthorized - token expired or invalid
-      // BUT skip redirect for auth endpoints (login/register) so error can be shown
+      // BUT skip redirect for login/register, so the error can be shown, and for
+      // the session check on page load, which signs out without leaving the page
       if (status === 401) {
         const isAuthEndpoint = error.config?.url?.includes('/auth/login') ||
-                               error.config?.url?.includes('/auth/register');
+                               error.config?.url?.includes('/auth/register') ||
+                               error.config?.url?.includes('/auth/me');
 
         if (!isAuthEndpoint) {
           // Clear both storage types

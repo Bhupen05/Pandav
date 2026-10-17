@@ -355,17 +355,3 @@ export const approveAttendance = (req, res) =>
 // @access  Private (Admin only)
 export const disapproveAttendance = (req, res) =>
   review(req, res, 'rejected', 'Attendance rejected');
-
-// @desc    Get pending attendance records (for admin approval)
-// @route   GET /api/attendance/pending
-// @access  Private (Admin only)
-export const getPendingAttendance = async (req, res) => {
-  try {
-    const filter = { approvalStatus: 'pending' };
-    const query = withUser(Attendance.find(filter)).sort('-date');
-
-    res.json(await listResponse(Attendance, filter, query, req.query));
-  } catch (error) {
-    sendServerError(res, error);
-  }
-};

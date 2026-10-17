@@ -1,35 +1,8 @@
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import io, { Socket } from 'socket.io-client';
 import api from '../api/axios';
-import { useAuth } from './AuthContext';
-
-// Populated by the API ({ _id, name }); a bare id if population is skipped
-export type Participant = string | { _id: string; name?: string };
-
-export interface Message {
-  _id: string;
-  sender: Participant;
-  receiver: Participant;
-  message: string;
-  timestamp: string;
-  isRead: boolean;
-}
-
-interface ChatContextType {
-  socket: Socket | null;
-  messages: Message[];
-  activeUsers: string[];
-  loadingMessages: boolean;
-  unreadCounts: Record<string, number>;
-  clearUnread: (userId: string) => void;
-  // Rejects if the message could not be sent
-  sendMessage: (receiverId: string, message: string) => Promise<void>;
-  fetchMessages: (userId: string) => Promise<void>;
-  // Whether the open conversation has older messages than those loaded
-  hasMoreMessages: boolean;
-  loadOlderMessages: () => Promise<void>;
-  closeChat: () => void;
-}
+import { useAuth } from './useAuth';
+import { ChatContext, type Message, type Participant } from './useChat';
 
 interface MessagesPage {
   data: Message[];
@@ -39,10 +12,8 @@ interface MessagesPage {
 const participantId = (participant: Participant) =>
   typeof participant === 'string' ? participant : participant?._id;
 
-export const ChatContext = createContext<ChatContextType | undefined>(undefined);
-
 export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user, token } = useAuth();
+  const { user, token, loading } = useAuth();
   const userId = user?._id;
   const [socket, setSocket] = useState<Socket | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -54,7 +25,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const openChatUserIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!userId || !token) return;
+    // Wait until a stored session has been confirmed: a rejected token would
+    // otherwise fail these requests and redirect to the login page
+    if (!userId || !token || loading) return;
 
     // The server identifies the user from this token and joins their room itself
     const newSocket = io(import.meta.env.VITE_API_URL?.replace('/api', '') || 'http://localhost:5000', {
@@ -95,7 +68,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUnreadCounts({});
       openChatUserIdRef.current = null;
     };
-  }, [userId, token]);
+  }, [userId, token, loading]);
 
   const sendMessage = useCallback(async (receiverId: string, message: string) => {
     const { data } = await api.post<Message>('/chat/send', { receiverId, message });
@@ -159,10 +132,4 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       {children}
     </ChatContext.Provider>
   );
-};
-
-export const useChat = () => {
-  const context = useContext(ChatContext);
-  if (!context) throw new Error('useChat must be used within ChatProvider');
-  return context;
 };

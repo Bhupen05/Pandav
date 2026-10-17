@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 import { useNavigate, useLocation, Link } from 'react-router-dom'
 import { getErrorMessage } from '../api/axios'
 
@@ -14,8 +14,9 @@ function Login() {
 
   const { login } = useAuth()
   const navigate = useNavigate()
-  // Set by the register page after a successful sign-up
-  const notice = (useLocation().state as { message?: string } | null)?.message
+  // `message` is set by the register page after a successful sign-up, `from`
+  // by a protected page that sent the visitor here to sign in
+  const { message: notice, from } = (useLocation().state as { message?: string; from?: string } | null) ?? {}
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -30,12 +31,9 @@ function Login() {
     
     try {
       const user = await login(email.trim(), password, remember)
-      
-      if (user.role === 'admin') {
-        navigate('/admin')
-      } else {
-        navigate('/user')
-      }
+      const home = user.role === 'admin' ? '/admin' : '/user'
+      const canReturn = from && (user.role === 'admin' || !from.startsWith('/admin'))
+      navigate(canReturn ? from : home, { replace: true })
     } catch (err) {
       setError(getErrorMessage(err, 'Login failed. Please check your credentials and try again.'))
       setLoading(false)

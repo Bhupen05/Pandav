@@ -4,6 +4,7 @@ import { Server as SocketIO } from 'socket.io';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
+import mongoose from 'mongoose';
 import connectDB from './config/database.js';
 import { getUserFromToken } from './middleware/auth.js';
 import { sanitizeInput } from './middleware/sanitize.js';
@@ -124,9 +125,14 @@ app.use('/api/users', userRoutes);
 // Add chat routes
 app.use('/api/chat', chatRoutes);
 
-// Health check route
+// Health check: 503 while the database is unreachable, so the host and
+// uptime monitors see an instance that can't serve requests as down
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Server is running' });
+  const databaseUp = mongoose.connection.readyState === 1;
+  res.status(databaseUp ? 200 : 503).json({
+    status: databaseUp ? 'OK' : 'UNAVAILABLE',
+    database: databaseUp ? 'connected' : 'disconnected',
+  });
 });
 
 // Error handling middleware

@@ -1,144 +1,109 @@
-import { createContext, useState, useContext, type FC, type ReactNode } from 'react';
-import { authAPI } from '../api/authAPI';
-import { setSecureItem, removeSecureItem, CHAT_USER_ID_KEY, CHAT_USER_NAME_KEY } from '../utils/secureStorage';
+import { useEffect, useState, type FC, type ReactNode } from 'react';
+import { authAPI, type User } from '../api/authAPI';
+import type { ApiError } from '../api/axios';
+import { AuthContext } from './useAuth';
 
-interface User {
-  id?: string;
-  _id: string;
-  name: string;
-  email: string;
-  role: string;
-  phone?: string;
-  department?: string;
-  bio?: string;
-  createdAt?: string;
-  profileImage?: string;
+interface Session {
+  user: User;
+  token: string;
 }
 
-interface AuthContextType {
-  user: User | null;
-  token: string | null;
-  isAuthenticated: boolean;
-  isAdmin: boolean;
-  loading: boolean;
-  login: (email: string, password: string, rememberMe?: boolean) => Promise<User>;
-  register: (userData: any) => Promise<void>;
-  logout: () => void;
-  updateUser: (user: User) => void;
-}
+// "Remember me" sessions are kept in localStorage, others in sessionStorage
+// (cleared when the browser closes)
+const activeStorage = () =>
+  sessionStorage.getItem('token') ? sessionStorage : localStorage.getItem('token') ? localStorage : null;
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
-
-const getInitialAuthState = () => {
-  // Check sessionStorage first (session-based login), then localStorage (remember me)
-  const storedUser = sessionStorage.getItem('user') || localStorage.getItem('user');
-  const storedToken = sessionStorage.getItem('token') || localStorage.getItem('token');
-
-  if (storedUser && storedToken) {
-    try {
-      const parsedUser = JSON.parse(storedUser) as User;
-      return {
-        user: parsedUser,
-        token: storedToken,
-        isAuthenticated: true,
-        isAdmin: parsedUser.role === 'admin',
-        loading: false,
-      };
-    } catch {
-      return null;
-    }
+const readStoredSession = (): Session | null => {
+  const storage = activeStorage();
+  const token = storage?.getItem('token');
+  const storedUser = storage?.getItem('user');
+  if (!token || !storedUser) return null;
+  try {
+    return { token, user: JSON.parse(storedUser) as User };
+  } catch {
+    return null;
   }
-  return null;
 };
 
+const storeUser = (user: User) => activeStorage()?.setItem('user', JSON.stringify(user));
+
 export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(() => getInitialAuthState()?.user ?? null);
-  const [token, setToken] = useState<string | null>(() => getInitialAuthState()?.token ?? null);
-  const [loading, setLoading] = useState(() => getInitialAuthState()?.loading ?? false);
-  const [isAuthenticated, setIsAuthenticated] = useState(() => getInitialAuthState()?.isAuthenticated ?? false);
-  const [isAdmin, setIsAdmin] = useState(() => getInitialAuthState()?.isAdmin ?? false);
+  const [session, setSession] = useState<Session | null>(readStoredSession);
+  const [loading, setLoading] = useState(() => readStoredSession() !== null);
 
-  const hydrateSession = (authUser: User, authToken: string, rememberMe: boolean = false) => {
-    setUser(authUser)
-    setToken(authToken)
-    setIsAuthenticated(true)
-    setIsAdmin(authUser.role === 'admin')
-    
-    // Use localStorage for "Remember Me", sessionStorage for session-based (logout on close)
+  // A stored session (and the role in it) is only trusted once the server
+  // confirms it. This also picks up profile changes made elsewhere.
+  useEffect(() => {
+    // Written by older versions; nothing reads them any more
+    localStorage.removeItem('chat_uid');
+    localStorage.removeItem('chat_uname');
+
+    const stored = readStoredSession();
+    if (!stored) return;
+
+    let cancelled = false;
+    const isStillCurrent = (current: Session | null) => current?.token === stored.token;
+
+    authAPI
+      .getMe()
+      .then((user) => {
+        if (cancelled || !isStillCurrent(readStoredSession())) return;
+        storeUser(user);
+        setSession((current) => (isStillCurrent(current) ? { ...stored, user } : current));
+      })
+      .catch((error: ApiError) => {
+        // Expired, revoked or deactivated. If the server can't be reached,
+        // keep the session: every API call is checked by the server anyway.
+        if (cancelled || error.status !== 401) return;
+        if (isStillCurrent(readStoredSession())) authAPI.logout();
+        setSession((current) => (isStillCurrent(current) ? null : current));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const login = async (email: string, password: string, rememberMe = false) => {
+    const { success, token, user, message } = await authAPI.login({ email, password });
+    if (!success || !token || !user) {
+      throw new Error(message || 'Invalid credentials');
+    }
+
+    authAPI.logout();
     const storage = rememberMe ? localStorage : sessionStorage;
-    storage.setItem('user', JSON.stringify(authUser))
-    storage.setItem('token', authToken)
-    // Store encrypted chat identity
-    setSecureItem(CHAT_USER_ID_KEY, authUser._id)
-    setSecureItem(CHAT_USER_NAME_KEY, authUser.name)
-    setLoading(false)
-  }
-
-  const login = async (email: string, password: string, rememberMe: boolean = false) => {
-    const response = await authAPI.login({ email, password }, rememberMe)
-    const { success, token: authToken, user: authUser, message } = response
-
-    if (!success || !authToken || !authUser) {
-      throw new Error(message || 'Invalid credentials')
-    }
-
-    hydrateSession(authUser, authToken, rememberMe)
-    return authUser
-  }
-
-  const register = async (userData: any) => {
-    const { success, token: authToken, user: authUser, message } = await authAPI.register(userData)
-    if (!success || !authToken || !authUser) {
-      throw new Error(message || 'Registration failed')
-    }
-    hydrateSession(authUser, authToken)
-  }
+    storage.setItem('token', token);
+    storage.setItem('user', JSON.stringify(user));
+    setSession({ user, token });
+    setLoading(false);
+    return user;
+  };
 
   const logout = () => {
-    authAPI.logout()
-    setUser(null)
-    setToken(null)
-    setIsAuthenticated(false)
-    setIsAdmin(false)
-    removeSecureItem(CHAT_USER_ID_KEY)
-    removeSecureItem(CHAT_USER_NAME_KEY)
+    authAPI.logout();
+    setSession(null);
+    setLoading(false);
   };
 
-  const updateUser = (updatedUser: User) => {
-    setUser(updatedUser);
-    // Check which storage is being used and update accordingly
-    const sessionUser = sessionStorage.getItem('user');
-    const localUser = localStorage.getItem('user');
-    
-    if (sessionUser) {
-      const parsed = JSON.parse(sessionUser);
-      sessionStorage.setItem('user', JSON.stringify({ ...parsed, ...updatedUser }));
-    }
-    if (localUser) {
-      const parsed = JSON.parse(localUser);
-      localStorage.setItem('user', JSON.stringify({ ...parsed, ...updatedUser }));
-    }
+  const updateUser = (user: User) => {
+    storeUser(user);
+    setSession((current) => (current ? { ...current, user } : current));
   };
 
+  const user = session?.user ?? null;
   const value = {
     user,
-    token,
-    isAuthenticated,
-    isAdmin,
+    token: session?.token ?? null,
+    isAuthenticated: session !== null,
+    isAdmin: user?.role === 'admin',
     loading,
     login,
-    register,
     logout,
     updateUser,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-};
-
-export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
-  return context;
 };

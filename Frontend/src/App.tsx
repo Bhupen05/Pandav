@@ -1,6 +1,7 @@
 import './App.css'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import Navbar from './components/Navbar'
+import RequireAuth from './components/RequireAuth'
 import Landing from './pages/Landing'
 import Login from './pages/Login'
 import Register from './pages/Register'
@@ -17,6 +18,7 @@ import UserDashboard from './pages/UserDashboard'
 import { ChatProvider } from './context/ChatContext'
 import ChatPage from './pages/ChatPage'
 import ContactMessages from './pages/ContactMessages'
+import NotFound from './pages/NotFound'
 
 function App() {
   return (
@@ -24,21 +26,29 @@ function App() {
       <BrowserRouter>
         <Navbar />
         <Routes>
-          <Route path="/chat" element={<ChatPage />} />
           <Route path="/" element={<Landing />} />
-          <Route path="/about" element={<About/>} />
+          <Route path="/about" element={<About />} />
           <Route path="/service" element={<Service />} />
+          <Route path="/contact" element={<Contactus />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
-          <Route path="/profile" element={<Profile />} />
-          <Route path="/admin" element={<AdminDashboard />} />
-          <Route path="/admin/attendance" element={<AttendanceAdmin />} />
-          <Route path="/admin/userview" element={<Userview />} />
-          <Route path="/admin/messages" element={<ContactMessages />} />
-          <Route path="/tasks" element={<Tasks />} />
-          <Route path="/attendance" element={<Attendance />} />
-          <Route path="/contact" element={<Contactus />} />
-          <Route path="/user" element = {<UserDashboard />} />
+
+          <Route element={<RequireAuth />}>
+            <Route path="/user" element={<UserDashboard />} />
+            <Route path="/tasks" element={<Tasks />} />
+            <Route path="/attendance" element={<Attendance />} />
+            <Route path="/chat" element={<ChatPage />} />
+            <Route path="/profile" element={<Profile />} />
+          </Route>
+
+          <Route element={<RequireAuth admin />}>
+            <Route path="/admin" element={<AdminDashboard />} />
+            <Route path="/admin/attendance" element={<AttendanceAdmin />} />
+            <Route path="/admin/userview" element={<Userview />} />
+            <Route path="/admin/messages" element={<ContactMessages />} />
+          </Route>
+
+          <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>
     </ChatProvider>

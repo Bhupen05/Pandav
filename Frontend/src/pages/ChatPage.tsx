@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
-import { Navigate } from 'react-router-dom';
 import Chat from '../components/Chat';
-import { useAuth } from '../context/AuthContext';
-import { useChat } from '../context/ChatContext';
+import { useAuth } from '../context/useAuth';
+import { useChat } from '../context/useChat';
 import { userAPI } from '../api/userAPI';
 
 interface UserItem {
@@ -28,8 +27,6 @@ export default function ChatPage() {
       .catch(console.error)
       .finally(() => setLoadingUsers(false));
   }, [isAuthenticated]);
-
-  if (!isAuthenticated) return <Navigate to="/login" replace />;
 
   return (
     <div className="mx-auto flex max-w-5xl gap-4 px-4 py-8 h-[calc(100vh-80px)]">

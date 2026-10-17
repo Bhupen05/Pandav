@@ -1,14 +1,14 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { taskAPI } from '../api/taskAPI'
 import { getErrorMessage } from '../api/axios'
-import { useAuth } from '../context/AuthContext'
+import { useAuth } from '../context/useAuth'
 import Taskscard from '../components/Taskscard'
 import Tasksadd from '../components/Tasksadd'
 import type { TaskInput } from '../components/Tasksadd'
+import { useFeedback } from '../context/useFeedback'
 
 export default function Tasks() {
-  const navigate = useNavigate()
+  const { notify, confirm } = useFeedback()
   const [tasks, setTasks] = useState<TaskInput[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -79,11 +79,11 @@ export default function Tasks() {
         const response = await taskAPI.requestCompletion(task._id)
         if (response.success) {
           replaceTask(response.data)
-          alert(response.message || 'Completion request sent! Waiting for admin approval.')
+          notify(response.message || 'Completion request sent. Waiting for admin approval.', 'success')
         }
       } catch (err) {
         console.error('Failed to request task completion:', err)
-        alert(getErrorMessage(err, 'Failed to request task completion'))
+        notify(getErrorMessage(err, 'Failed to request task completion'), 'error')
       }
       return
     }
@@ -94,11 +94,11 @@ export default function Tasks() {
         const response = await taskAPI.approveCompletion(task._id)
         if (response.success) {
           replaceTask(response.data)
-          alert('Task approved successfully!')
+          notify('Task approved.', 'success')
         }
       } catch (err) {
         console.error('Failed to approve task:', err)
-        alert(getErrorMessage(err, 'Failed to approve task'))
+        notify(getErrorMessage(err, 'Failed to approve task'), 'error')
       }
       return
     }
@@ -117,7 +117,7 @@ export default function Tasks() {
       if (response.success) replaceTask(response.data)
     } catch (err) {
       console.error('Failed to update task status:', err)
-      alert(getErrorMessage(err, 'Failed to update task status'))
+      notify(getErrorMessage(err, 'Failed to update task status'), 'error')
     }
   }
 
@@ -136,20 +136,17 @@ export default function Tasks() {
       return
     }
 
-    if (!confirm('Are you sure you want to delete this task?')) return
+    if (!(await confirm({ title: 'Delete this task?', message: `"${task.title}" will be removed for everyone. This can't be undone.`, confirmLabel: 'Delete', danger: true }))) return
 
     // Optimistically remove from UI
     const updatedTasks = tasks.filter((_, i) => i !== originalIndex)
     setTasks(updatedTasks)
 
     try {
-      const response = await taskAPI.deleteTask(task._id)
-      if (response.success) {
-        console.log('Task deleted successfully')
-      }
+      await taskAPI.deleteTask(task._id)
     } catch (err) {
       console.error('Failed to delete task:', err)
-      alert(getErrorMessage(err, 'Failed to delete task'))
+      notify(getErrorMessage(err, 'Failed to delete task'), 'error')
       // Revert on error
       setTasks(tasks)
     }
@@ -177,11 +174,11 @@ export default function Tasks() {
         setShowRejectModal(false)
         setRejectionReason('')
         setRejectingTaskId(null)
-        alert('Task rejected successfully')
+        notify('Task rejected.', 'success')
       }
     } catch (err) {
       console.error('Failed to reject task:', err)
-      alert(getErrorMessage(err, 'Failed to reject task'))
+      notify(getErrorMessage(err, 'Failed to reject task'), 'error')
     } finally {
       setIsRejectSubmitting(false)
     }
@@ -216,26 +213,6 @@ export default function Tasks() {
   })
 
   const urgentTasks = tasks.filter(t => t.priority === 'urgent' && t.status !== 'completed')
-
-  if (!isAuthenticated) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-linear-to-br from-neutral-50 to-neutral-100 px-4">
-        <div className="text-center">
-          <div className="mb-6 inline-flex h-20 w-20 items-center justify-center rounded-full bg-neutral-900 text-3xl text-white">
-            🔐
-          </div>
-          <h2 className="mb-2 text-2xl font-bold text-neutral-900">Access Required</h2>
-          <p className="mb-6 text-neutral-600">You need to be logged in to view your tasks.</p>
-          <button 
-            onClick={() => navigate('/login')}
-            className="rounded-lg bg-neutral-900 px-6 py-3 text-sm font-semibold text-white shadow-lg hover:opacity-90 transition-all"
-          >
-            Login to Continue
-          </button>
-        </div>
-      </div>
-    )
-  }
 
   return (
     <div className="min-h-screen bg-linear-to-br from-neutral-50 via-white to-neutral-100">
@@ -350,7 +327,7 @@ export default function Tasks() {
           ].map((status) => (
             <button
               key={status.key}
-              onClick={() => setFilter(status.key as any)}
+              onClick={() => setFilter(status.key as typeof filter)}
               className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-all ${
                 filter === status.key
                   ? status.color === 'amber' ? 'bg-amber-600 text-white shadow-lg shadow-amber-200' :

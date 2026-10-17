@@ -1,10 +1,17 @@
-import { useState, useEffect } from 'react'
-import { useAuth } from '../context/AuthContext'
+import { useState, useEffect, useCallback } from 'react'
+import { useAuth } from '../context/useAuth'
 import { userAPI } from '../api/userAPI'
 import { taskAPI } from '../api/taskAPI'
-import { attendanceAPI } from '../api/attendanceAPI'
+import { attendanceAPI, type AttendanceRecord } from '../api/attendanceAPI'
 import { getErrorMessage } from '../api/axios'
 import { resizeImage } from '../utils/resizeImage'
+import type { TaskInput } from '../components/Tasksadd'
+import { useFeedback } from '../context/useFeedback'
+
+type ProfileTask = TaskInput & {
+  createdAt?: string
+  updatedAt?: string
+}
 
 type DayEntry = {
   date: string
@@ -98,6 +105,7 @@ type UserProfile = {
 }
 
 export default function Profile() {
+  const { notify } = useFeedback()
   const { user, updateUser } = useAuth()
   const [activityData, setActivityData] = useState<DayEntry[]>([])
   const [loadingActivity, setLoadingActivity] = useState(true)
@@ -124,24 +132,10 @@ export default function Profile() {
 
   const [editedProfile, setEditedProfile] = useState<UserProfile>(profile)
 
-  useEffect(() => {
-    if (user) {
-      const userProfile: UserProfile = {
-        name: user.name || 'User',
-        email: user.email || '',
-        phone: user.phone || '',
-        role: user.role || 'User',
-        joinedDate: user.createdAt || new Date().toISOString(),
-        profileImage: user.profileImage || '',
-      }
-      setProfile(userProfile)
-      setEditedProfile(userProfile)
-      loadAllData()
-    }
-  }, [user])
+  const userId = user?._id
 
-  const loadAllData = async () => {
-    if (!user?._id) return
+  const loadAllData = useCallback(async () => {
+    if (!userId) return
     setLoadingActivity(true)
     
     try {
@@ -149,20 +143,20 @@ export default function Profile() {
       const activityMap = new Map<string, number>()
       
       // Load tasks
-      const taskResponse = await taskAPI.getTasks({ assignedTo: user._id })
+      const taskResponse = await taskAPI.getTasks({ assignedTo: userId })
       if (taskResponse.success && Array.isArray(taskResponse.data)) {
-        const tasks = taskResponse.data
+        const tasks: ProfileTask[] = taskResponse.data
         
         // Calculate task stats
         setTaskStats({
           total: tasks.length,
-          completed: tasks.filter((t: any) => t.status === 'completed').length,
-          inProgress: tasks.filter((t: any) => t.status === 'in-progress').length,
-          pending: tasks.filter((t: any) => t.status === 'pending').length,
+          completed: tasks.filter((t) => t.status === 'completed').length,
+          inProgress: tasks.filter((t) => t.status === 'in-progress').length,
+          pending: tasks.filter((t) => t.status === 'pending').length,
         })
         
         // Count activities from tasks: completed, completion-requested, or any status change
-        tasks.forEach((task: any) => {
+        tasks.forEach((task) => {
           // Count completed tasks
           if ((task.status === 'completed' || task.status === 'completion-requested') && task.updatedAt) {
             const date = new Date(task.updatedAt).toISOString().slice(0, 10)
@@ -180,9 +174,9 @@ export default function Profile() {
       try {
         const attendanceResponse = await attendanceAPI.getAttendance()
         if (attendanceResponse.success && Array.isArray(attendanceResponse.data)) {
-          const records = attendanceResponse.data
-          const approvedRecords = records.filter((r: any) => r.approvalStatus === 'approved')
-          const totalHours = approvedRecords.reduce((sum: number, r: any) => sum + (r.workHours || 0), 0)
+          const records: AttendanceRecord[] = attendanceResponse.data
+          const approvedRecords = records.filter((r) => r.approvalStatus === 'approved')
+          const totalHours = approvedRecords.reduce((sum, r) => sum + (r.workHours || 0), 0)
           
           setAttendanceStats({
             totalDays: records.length,
@@ -191,11 +185,11 @@ export default function Profile() {
           })
           
           // Add attendance check-ins to activity map
-          records.forEach((record: any) => {
+          records.forEach((record) => {
             if (record.date || record.checkInTime) {
               const dateStr = record.date
                 ? new Date(record.date).toISOString().slice(0, 10)
-                : new Date(record.checkInTime).toISOString().slice(0, 10)
+                : new Date(record.checkInTime!).toISOString().slice(0, 10)
               activityMap.set(dateStr, (activityMap.get(dateStr) || 0) + 1)
             }
           })
@@ -228,7 +222,23 @@ export default function Profile() {
     } finally {
       setLoadingActivity(false)
     }
-  }
+  }, [userId])
+
+  useEffect(() => {
+    if (user) {
+      const userProfile: UserProfile = {
+        name: user.name || 'User',
+        email: user.email || '',
+        phone: user.phone || '',
+        role: user.role || 'User',
+        joinedDate: user.createdAt || new Date().toISOString(),
+        profileImage: user.profileImage || '',
+      }
+      setProfile(userProfile)
+      setEditedProfile(userProfile)
+      loadAllData()
+    }
+  }, [user, loadAllData])
 
   const handleEdit = () => {
     setEditedProfile(profile)
@@ -245,12 +255,12 @@ export default function Profile() {
     if (!file) return
 
     if (!file.type.startsWith('image/')) {
-      alert('Please upload an image file')
+      notify('Please choose an image file.', 'error')
       return
     }
 
     if (file.size > 5 * 1024 * 1024) {
-      alert('Image size should be less than 5MB')
+      notify('Images must be smaller than 5 MB.', 'error')
       return
     }
 
@@ -258,7 +268,7 @@ export default function Profile() {
       setPreviewImage(await resizeImage(file))
       setShowImagePreview(true)
     } catch {
-      alert('Could not read that image. Please try another file.')
+      notify('Could not read that image. Please try another file.', 'error')
     }
   }
 
@@ -278,10 +288,10 @@ export default function Profile() {
         setShowImagePreview(false)
         setPreviewImage(null)
       } else {
-        alert(response.message || 'Failed to update profile picture')
+        notify(response.message || 'Failed to update profile picture', 'error')
       }
     } catch (error) {
-      alert(getErrorMessage(error, 'Failed to upload image'))
+      notify(getErrorMessage(error, 'Failed to upload image'), 'error')
     } finally {
       setUploadingImage(false)
     }
@@ -294,7 +304,7 @@ export default function Profile() {
 
   const handleSave = async () => {
     if (!user?._id) {
-      alert('User not found')
+      notify('User not found', 'error')
       return
     }
 
@@ -318,10 +328,10 @@ export default function Profile() {
           })
         }
       } else {
-        alert(response.message || 'Failed to update profile')
+        notify(response.message || 'Failed to update profile', 'error')
       }
     } catch (error) {
-      alert(getErrorMessage(error, 'Failed to update profile'))
+      notify(getErrorMessage(error, 'Failed to update profile'), 'error')
     } finally {
       setLoading(false)
     }
