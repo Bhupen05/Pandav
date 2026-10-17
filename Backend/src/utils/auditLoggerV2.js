@@ -10,7 +10,8 @@ export const logAuditEventV2 = async (req, payload) => {
       targetType: payload.targetType || null,
       targetId: payload.targetId ? String(payload.targetId) : null,
       status: payload.status || 'success',
-      ip: req.ip || req.headers['x-forwarded-for'] || null,
+      // The visitor's IP, not the frontend proxy's (see requireProxy)
+      ip: req.clientIp || req.ip || null,
       userAgent: req.headers['user-agent'] || null,
       details: payload.details || {},
     });

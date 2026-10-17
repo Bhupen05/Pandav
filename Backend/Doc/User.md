@@ -47,21 +47,31 @@ The User Management and Authentication API provides endpoints for user registrat
 
 ## Authentication
 
-### JWT Token Structure
+Signing in sets a `pandav_session` cookie. Every protected endpoint reads the session from it;
+the `Authorization` header is not used. The cookie is `HttpOnly` (page scripts can't read it),
+`SameSite=Lax`, limited to the `/api` path, and `Secure` over HTTPS. Sign in once with curl and
+reuse the cookie file:
+
+```bash
+curl -c cookies.txt -X POST http://localhost:5000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "admin@example.com", "password": "..."}'
+
+curl -b cookies.txt http://localhost:5000/api/auth/me
+```
+
+POST, PUT, PATCH and DELETE requests from a browser must come from an allowed origin
+(`CLIENT_URL`); requests without an `Origin` header (curl, scripts) are allowed.
+
+### Session Token
 
 ```
-Bearer Token Format: JWT with HS256 algorithm
-Token Expiration: 30 days (configurable via JWT_EXPIRE)
-Payload: { id: userId }
+Format: JWT (HS256), audience "session"
+Payload: { id: userId, remember: boolean }
+Lifetime: JWT_EXPIRE (default 30 days) with "remember me", otherwise 1 day
 ```
 
-### Token Usage
-
-All protected endpoints require the token in Authorization header:
-
-```
-Authorization: Bearer YOUR_JWT_TOKEN
-```
+Without `rememberMe` the cookie has no expiry date, so the browser drops it when it closes.
 
 ---
 
@@ -98,8 +108,7 @@ Authorization: Bearer YOUR_JWT_TOKEN
     "phone": "+1-555-0100",
     "department": "Frontend",
     "profileImage": "https://example.com/john.jpg",
-    "createdAt": "2024-01-18T10:30:00.000Z",
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    "createdAt": "2024-01-18T10:30:00.000Z"
   }
 }
 ```
@@ -151,9 +160,13 @@ curl -X POST http://localhost:5000/api/auth/register \
 ```json
 {
   "email": "john@example.com",
-  "password": "password123"
+  "password": "password123",
+  "rememberMe": true
 }
 ```
+
+`rememberMe` (optional) keeps the session cookie after the browser closes. The response sets the
+`pandav_session` cookie; the token is never in the response body.
 
 **Response (200 OK):**
 ```json
@@ -167,15 +180,14 @@ curl -X POST http://localhost:5000/api/auth/register \
     "phone": "+1-555-0100",
     "department": "Frontend",
     "profileImage": "https://example.com/john.jpg",
-    "createdAt": "2024-01-18T10:30:00.000Z",
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    "createdAt": "2024-01-18T10:30:00.000Z"
   }
 }
 ```
 
 **Example Request:**
 ```bash
-curl -X POST http://localhost:5000/api/auth/login \
+curl -c cookies.txt -X POST http://localhost:5000/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{
     "email": "john@example.com",
@@ -237,7 +249,7 @@ curl -X POST http://localhost:5000/api/auth/login \
 **Example Request:**
 ```bash
 curl -X GET http://localhost:5000/api/auth/me \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -b cookies.txt
 ```
 
 **Error Response (Unauthorized):**
@@ -272,8 +284,7 @@ curl -X GET http://localhost:5000/api/auth/me \
     "_id": "607f1f77bcf86cd799439012",
     "name": "John Doe",
     "email": "john@example.com",
-    "role": "user",
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    "role": "user"
   }
 }
 ```
@@ -281,7 +292,7 @@ curl -X GET http://localhost:5000/api/auth/me \
 **Example Request:**
 ```bash
 curl -X PUT http://localhost:5000/api/auth/updatepassword \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json" \
   -d '{
     "currentPassword": "oldpassword123",
@@ -300,7 +311,28 @@ curl -X PUT http://localhost:5000/api/auth/updatepassword \
 **Validation Rules:**
 - Current password must be correct
 - New password minimum 6 characters
-- Returns new token after successful update
+- Sets a new session cookie (kept as long as the old one was); every other session of the user is signed out
+
+---
+
+### Sign Out
+
+**Endpoint:** `POST /api/auth/logout`
+
+**Authentication:** Not required. Clears the `pandav_session` cookie, even if the session has already expired.
+
+**Response:** `{ "success": true }`
+
+### Socket Ticket
+
+**Endpoint:** `POST /api/auth/socket-token`
+
+**Authentication:** Required (Private)
+
+Returns a ticket for opening the Socket.io connection, valid for one minute:
+`{ "success": true, "data": { "token": "..." } }`. Pass it as `auth: { token }` when connecting.
+The socket server is reached directly (not through the frontend's `/api` proxy), so it never sees
+the cookie. Fetch a new ticket for every connection attempt.
 
 ---
 
@@ -366,7 +398,7 @@ curl -X PUT http://localhost:5000/api/auth/updatepassword \
 **Example Request:**
 ```bash
 curl -X GET "http://localhost:5000/api/users?role=user&department=Frontend&isActive=true" \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -b cookies.txt
 ```
 
 **Error Response (Unauthorized):**
@@ -414,7 +446,7 @@ curl -X GET "http://localhost:5000/api/users?role=user&department=Frontend&isAct
 **Example Request:**
 ```bash
 curl -X GET http://localhost:5000/api/users/607f1f77bcf86cd799439012 \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -b cookies.txt
 ```
 
 **Error Response (Not Found):**
@@ -493,7 +525,7 @@ curl -X GET http://localhost:5000/api/users/607f1f77bcf86cd799439012 \
 **Example Request (User):**
 ```bash
 curl -X PUT http://localhost:5000/api/users/607f1f77bcf86cd799439012 \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json" \
   -d '{
     "name": "John Doe Updated",
@@ -505,7 +537,7 @@ curl -X PUT http://localhost:5000/api/users/607f1f77bcf86cd799439012 \
 **Example Request (Admin):**
 ```bash
 curl -X PUT http://localhost:5000/api/users/607f1f77bcf86cd799439012 \
-  -H "Authorization: Bearer ADMIN_TOKEN" \
+  -b admin-cookies.txt \
   -H "Content-Type: application/json" \
   -d '{
     "name": "John Doe Updated",
@@ -582,7 +614,7 @@ curl -X PUT http://localhost:5000/api/users/607f1f77bcf86cd799439012 \
 **Example Request:**
 ```bash
 curl -X PUT http://localhost:5000/api/users/607f1f77bcf86cd799439012/toggle-active \
-  -H "Authorization: Bearer ADMIN_TOKEN"
+  -b admin-cookies.txt
 ```
 
 **Effect:**
@@ -615,7 +647,7 @@ curl -X PUT http://localhost:5000/api/users/607f1f77bcf86cd799439012/toggle-acti
 **Example Request:**
 ```bash
 curl -X DELETE http://localhost:5000/api/users/607f1f77bcf86cd799439012 \
-  -H "Authorization: Bearer ADMIN_TOKEN"
+  -b admin-cookies.txt
 ```
 
 **Error Response (Not Found):**
@@ -694,9 +726,7 @@ Hash password with bcrypt
     ↓
 Create user record
     ↓
-Generate JWT token
-    ↓
-Return user data + token
+Return user data (the user signs in separately)
 ```
 
 ### Login Flow
@@ -712,17 +742,17 @@ Compare password with hash
     ↓
 Check if user is active
     ↓
-Generate JWT token
+Sign a session JWT and set it as the pandav_session cookie
     ↓
-Return user data + token
+Return user data
 ```
 
 ### Protected Route Flow
 
 ```
-Request with Authorization header
+Request with the pandav_session cookie
     ↓
-Verify JWT token signature
+Verify JWT token signature and audience
     ↓
 Check token expiration
     ↓
@@ -755,7 +785,7 @@ Proceed to route handler
 
 - Current password must be verified
 - Cannot reuse same password immediately
-- New token issued after successful change
+- This browser gets a new session cookie; sessions issued before the change stop working
 - New password takes effect immediately
 
 ---
@@ -765,7 +795,7 @@ Proceed to route handler
 ### Token Generation
 
 ```javascript
-JWT.sign({ id: userId }, JWT_SECRET, { expiresIn: '30d' })
+jwt.sign({ id: userId, remember }, JWT_SECRET, { audience: 'session', expiresIn: remember ? JWT_EXPIRE : '1d' })
 ```
 
 ### Token Validation
@@ -777,19 +807,8 @@ JWT.sign({ id: userId }, JWT_SECRET, { expiresIn: '30d' })
 
 ### Token Expiration
 
-- Default: 30 days
-- Configurable via JWT_EXPIRE environment variable
+- With "remember me": JWT_EXPIRE (default 30 days); otherwise 1 day
 - Expired tokens return 401 Unauthorized
-
----
-
-## Authentication
-
-All protected endpoints require a bearer token in the Authorization header:
-
-```
-Authorization: Bearer YOUR_JWT_TOKEN
-```
 
 ---
 
@@ -855,7 +874,7 @@ Authorization: Bearer YOUR_JWT_TOKEN
 
 ## Best Practices
 
-1. **Store Token Securely**: Keep JWT tokens in secure storage (httpOnly cookies or secure storage)
+1. **Session Storage**: The session lives in an HttpOnly cookie; never copy it into browser storage
 2. **Validate Input**: Always validate email format and password requirements
 3. **Use HTTPS**: Always transmit tokens over HTTPS
 4. **Token Expiration**: Implement token refresh mechanism for long sessions

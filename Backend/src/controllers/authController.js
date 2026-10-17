@@ -1,13 +1,6 @@
 import User from '../models/User.js';
-import jwt from 'jsonwebtoken';
 import { sendServerError } from '../utils/http.js';
-
-// Generate JWT Token
-const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRE || '30d',
-  });
-};
+import { clearSessionCookie, setSessionCookie, signSocketTicket } from '../utils/session.js';
 
 // @desc    Register user
 // @route   POST /api/auth/register
@@ -56,7 +49,6 @@ export const register = async (req, res) => {
           department: user.department,
           profileImage: user.profileImage,
           createdAt: user.createdAt,
-          token: generateToken(user._id),
         },
       });
     }
@@ -115,6 +107,8 @@ export const login = async (req, res) => {
       });
     }
 
+    // The token goes only into the HttpOnly cookie, never into the response body
+    setSessionCookie(req, res, user._id, req.body.rememberMe === true);
     res.json({
       success: true,
       data: {
@@ -126,7 +120,7 @@ export const login = async (req, res) => {
         department: user.department,
         profileImage: user.profileImage,
         createdAt: user.createdAt,
-        token: generateToken(user._id),
+        teamId: user.teamId,
       },
     });
   } catch (error) {
@@ -181,9 +175,11 @@ export const updatePassword = async (req, res) => {
       });
     }
 
-    // Saving a new password also invalidates every token issued before now
+    // Saving a new password also invalidates every token issued before now,
+    // so this browser gets a fresh session, kept as long as the old one was
     user.password = newPassword;
     await user.save();
+    setSessionCookie(req, res, user._id, req.session.remember === true);
 
     res.json({
       success: true,
@@ -192,10 +188,24 @@ export const updatePassword = async (req, res) => {
         name: user.name,
         email: user.email,
         role: user.role,
-        token: generateToken(user._id),
       },
     });
   } catch (error) {
     sendServerError(res, error);
   }
+};
+
+// @desc    Sign out of this browser
+// @route   POST /api/auth/logout
+// @access  Public (works even when the session has already expired)
+export const logout = (req, res) => {
+  clearSessionCookie(req, res);
+  res.json({ success: true });
+};
+
+// @desc    One-minute ticket for opening the chat socket
+// @route   POST /api/auth/socket-token
+// @access  Private
+export const getSocketToken = (req, res) => {
+  res.json({ success: true, data: { token: signSocketTicket(req.user._id) } });
 };

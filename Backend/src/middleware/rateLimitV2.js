@@ -1,6 +1,14 @@
 const store = new Map();
 
-const getKey = (req, keyPrefix) => `${keyPrefix}:${req.user?._id || req.ip || 'anon'}`;
+// Forget finished windows, so the map doesn't keep one entry per user and IP forever
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of store) {
+    if (entry.expiresAt <= now) store.delete(key);
+  }
+}, 60 * 1000).unref();
+
+const getKey = (req, keyPrefix) => `${keyPrefix}:${req.user?._id || req.clientIp || req.ip || 'anon'}`;
 
 export const createRateLimiterV2 = ({ keyPrefix, windowMs, max }) => {
   return (req, res, next) => {

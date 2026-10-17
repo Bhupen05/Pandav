@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/useAuth'
+import { useFeedback } from '../context/useFeedback'
+import { getErrorMessage } from '../api/axios'
 
 function Navbar() {
   const [open, setOpen] = useState(false)
@@ -11,6 +13,7 @@ function Navbar() {
   const location = useLocation()
 
   const { isAuthenticated, isAdmin, isTeamLeader, isTeamMember, logout, user, loading } = useAuth()
+  const { notify } = useFeedback()
 
   const isPublicRoute = useMemo(() => {
     const publicPaths = ['/', '/about', '/service', '/pricing', '/login', '/register', '/contact']
@@ -29,8 +32,13 @@ function Navbar() {
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     `block rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${isActive ? 'bg-white text-[--color-primary] border border-slate-200' : 'text-slate-600 hover:bg-white/70 hover:text-[--color-primary]'}`
 
-  const handleLogout = () => {
-    logout()
+  const handleLogout = async () => {
+    try {
+      await logout()
+    } catch (error) {
+      notify(getErrorMessage(error, 'Could not sign out. Please try again.'), 'error')
+      return
+    }
     close()
     setProfileOpen(false)
     navigate('/')

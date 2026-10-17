@@ -26,6 +26,9 @@ const request = async (path, options = {}) => {
   return { response, body };
 };
 
+// Requests as the signed-in user: the session lives in the pandav_session cookie
+const asUser = (token) => ({ Cookie: `pandav_session=${token}` });
+
 const registerAndLogin = async (name, email) => {
   const registerRes = await request('/auth/register', {
     method: 'POST',
@@ -35,12 +38,18 @@ const registerAndLogin = async (name, email) => {
   assert.ok([200, 201].includes(registerRes.response.status), `Register failed for ${email}: ${registerRes.body?.message}`);
   assert.equal(registerRes.body?.success, true);
 
-  const token = registerRes.body?.data?.token;
-  assert.ok(token, 'Missing token from register response');
+  const loginRes = await request('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password: PASSWORD }),
+  });
+  const token = loginRes.response.headers.getSetCookie()
+    .find((cookie) => cookie.startsWith('pandav_session='))
+    ?.split(';')[0].slice('pandav_session='.length);
+  assert.ok(token, 'Missing session cookie from login response');
 
   const meRes = await request('/auth/me', {
     method: 'GET',
-    headers: { Authorization: `Bearer ${token}` },
+    headers: asUser(token),
   });
 
   assert.equal(meRes.response.status, 200);
@@ -56,7 +65,7 @@ test('social integration: feed visibility by connections', async () => {
 
   const createPostRes = await request('/social/posts', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${userA.token}` },
+    headers: asUser(userA.token),
     body: JSON.stringify({
       title: 'Connections only update',
       content: 'Private to my accepted connections',
@@ -71,7 +80,7 @@ test('social integration: feed visibility by connections', async () => {
 
   const feedCBefore = await request('/social/feed', {
     method: 'GET',
-    headers: { Authorization: `Bearer ${userC.token}` },
+    headers: asUser(userC.token),
   });
   assert.equal(feedCBefore.response.status, 200);
   const hasPostForCBefore = (feedCBefore.body?.data || []).some((p) => p._id === postId);
@@ -79,14 +88,14 @@ test('social integration: feed visibility by connections', async () => {
 
   const requestConn = await request('/social/connections/request', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${userA.token}` },
+    headers: asUser(userA.token),
     body: JSON.stringify({ userId: userB.user._id }),
   });
   assert.equal(requestConn.response.status, 201);
 
   const listB = await request('/social/connections', {
     method: 'GET',
-    headers: { Authorization: `Bearer ${userB.token}` },
+    headers: asUser(userB.token),
   });
   assert.equal(listB.response.status, 200);
   const pending = listB.body?.data?.pendingReceived || [];
@@ -95,14 +104,14 @@ test('social integration: feed visibility by connections', async () => {
 
   const accept = await request(`/social/connections/${reqEntry._id}/respond`, {
     method: 'PATCH',
-    headers: { Authorization: `Bearer ${userB.token}` },
+    headers: asUser(userB.token),
     body: JSON.stringify({ action: 'accepted' }),
   });
   assert.equal(accept.response.status, 200);
 
   const feedBAfter = await request('/social/feed', {
     method: 'GET',
-    headers: { Authorization: `Bearer ${userB.token}` },
+    headers: asUser(userB.token),
   });
   assert.equal(feedBAfter.response.status, 200);
   const hasPostForBAfter = (feedBAfter.body?.data || []).some((p) => p._id === postId);
@@ -115,21 +124,21 @@ test('social integration: direct message requires connection', async () => {
 
   const blockedMsg = await request('/social/messages', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${userX.token}` },
+    headers: asUser(userX.token),
     body: JSON.stringify({ receiverId: userY.user._id, message: 'hello without connection' }),
   });
   assert.equal(blockedMsg.response.status, 403);
 
   const connReq = await request('/social/connections/request', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${userX.token}` },
+    headers: asUser(userX.token),
     body: JSON.stringify({ userId: userY.user._id }),
   });
   assert.equal(connReq.response.status, 201);
 
   const listY = await request('/social/connections', {
     method: 'GET',
-    headers: { Authorization: `Bearer ${userY.token}` },
+    headers: asUser(userY.token),
   });
   const pending = listY.body?.data?.pendingReceived || [];
   const reqEntry = pending.find((r) => r.requester?._id === userX.user._id);
@@ -137,14 +146,14 @@ test('social integration: direct message requires connection', async () => {
 
   const accept = await request(`/social/connections/${reqEntry._id}/respond`, {
     method: 'PATCH',
-    headers: { Authorization: `Bearer ${userY.token}` },
+    headers: asUser(userY.token),
     body: JSON.stringify({ action: 'accepted' }),
   });
   assert.equal(accept.response.status, 200);
 
   const allowedMsg = await request('/social/messages', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${userX.token}` },
+    headers: asUser(userX.token),
     body: JSON.stringify({ receiverId: userY.user._id, message: 'hello after connection' }),
   });
   assert.equal(allowedMsg.response.status, 201);
@@ -155,7 +164,7 @@ test('social integration: external publish blocked while pending approval', asyn
 
   const createPostRes = await request('/social/posts', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${userM.token}` },
+    headers: asUser(userM.token),
     body: JSON.stringify({
       title: 'Pending approval post',
       content: 'This should require approval before external publish',
@@ -171,7 +180,7 @@ test('social integration: external publish blocked while pending approval', asyn
 
   const publishRes = await request(`/social/posts/${postId}/publish`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${userM.token}` },
+    headers: asUser(userM.token),
     body: JSON.stringify({ targets: { pandav: true, linkedin: true, github: false } }),
   });
 

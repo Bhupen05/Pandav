@@ -31,7 +31,7 @@ File:
 - `Frontend/src/context/AuthContext.tsx`
 
 What happens:
-- Reads user + token from `sessionStorage` or `localStorage`.
+- Asks the server for the signed-in user (`GET /auth/me`); the session is an HttpOnly cookie.
 - Exposes:
   - `user`
   - `isAuthenticated`
@@ -48,9 +48,8 @@ File:
 - `Frontend/src/api/axios.ts`
 
 What happens:
-- Uses `VITE_API_URL` if present.
-- Otherwise defaults to `/api/v2`.
-- Adds `Authorization: Bearer <token>`.
+- Always calls `/api/v2` on the frontend's own origin (Vercel or Vite forwards it).
+- The browser sends the session cookie; no `Authorization` header.
 - Redirects to `/login` on non-auth 401 responses.
 
 ## 3. Route Map

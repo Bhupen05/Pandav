@@ -1,4 +1,4 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 const limiter = (windowMinutes, limit, message, options = {}) =>
   rateLimit({
@@ -7,6 +7,8 @@ const limiter = (windowMinutes, limit, message, options = {}) =>
     standardHeaders: 'draft-8',
     legacyHeaders: false,
     message: { success: false, message },
+    // The visitor's IP, not the frontend proxy's (see requireProxy)
+    keyGenerator: (req) => ipKeyGenerator(req.clientIp || req.ip),
     ...options,
   });
 

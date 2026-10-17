@@ -4,6 +4,10 @@ export const sendServerError = (res, error) => {
   if (error.name === 'CastError') {
     return res.status(400).json({ success: false, message: `Invalid ${error.path}` });
   }
+  // A value the schema refuses (wrong enum, too long, ...): name the fields, not the values
+  if (error.name === 'ValidationError') {
+    return res.status(400).json({ success: false, message: `Invalid ${Object.keys(error.errors).join(', ')}` });
+  }
 
   console.error(error);
   res.status(500).json({

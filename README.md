@@ -178,15 +178,17 @@ npm run preview
 | `PORT` | Server port | `5000` |
 | `MONGODB_URI` | MongoDB connection string | `mongodb://localhost:27017/pandav` |
 | `JWT_SECRET` | Secret key for JWT signing | `your_secret_key` |
-| `JWT_EXPIRE` | JWT token expiration | `7d` |
+| `JWT_EXPIRE` | How long a "remember me" session lasts (other sessions end when the browser closes, and after a day at most) | `30d` |
 | `NODE_ENV` | Environment mode | `development` or `production` |
-| `CLIENT_URL` | Deployed frontend origin(s) allowed by CORS, comma-separated (required in production) | `https://your-app.vercel.app` |
+| `CLIENT_URL` | Deployed frontend origin(s), comma-separated (required in production). Browsers on other origins can't call the API or post with the session cookie | `https://your-app.vercel.app` |
+| `ORIGIN_SECRET` | Shared with Vercel (same name and value there). When set, the API only answers requests that come through the frontend's `/api` proxy, and rate limits count each visitor's real IP | output of `openssl rand -hex 32` |
 | `APP_TIMEZONE` | Timezone that decides an attendance record's day | `Asia/Kolkata` |
 
 ### Frontend (`Frontend/.env`, or the host's environment settings)
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `VITE_API_URL` | Backend API URL, including the version prefix (`/api/v2` serves every module, including the Social Hub) | `http://localhost:5000/api/v2` |
+| `VITE_BACKEND_URL` | The backend's address, without `/api`. Chat sockets connect to it; in development Vite forwards `/api` to it. Production builds read it from `Frontend/.env.production` | `http://localhost:5000` |
+| `ORIGIN_SECRET` | Vercel only: the same value as the backend's `ORIGIN_SECRET`. `vercel.json` adds it to every proxied request | |
 | `VITE_CONTACT_EMAIL` | Email shown on the Contact page (hidden if unset) | `support@example.com` |
 | `VITE_CONTACT_PHONE` | Phone number shown on the Contact page (hidden if unset) | `+91 98765 43210` |
 | `VITE_CONTACT_WHATSAPP` | WhatsApp number shown on the Contact page (hidden if unset) | `+91 98765 43210` |
@@ -253,12 +255,37 @@ The audit steps fail on high or critical advisories.
 
 ## 🔐 Authentication & Authorization
 
-### JWT Token Flow
-1. User logs in with email/password
-2. Server validates credentials and returns JWT token
-3. Token stored in localStorage
-4. Token sent in Authorization header for protected routes
-5. Backend middleware verifies token and attaches user to request
+### Sessions
+1. User logs in with email/password (and optionally "remember me")
+2. The server sets the session, a JWT, in the `pandav_session` cookie: `HttpOnly` (page scripts
+   can't read it), `SameSite=Lax`, path `/api`, `Secure` over HTTPS. The token never appears in a
+   response body or in browser storage
+3. The browser sends the cookie with every API request; `protect` verifies it and attaches the user
+4. On page load the app asks `GET /auth/me` who is signed in; logout is `POST /auth/logout`
+
+"Remember me" keeps the cookie for `JWT_EXPIRE` (default 30 days). Without it the cookie ends
+when the browser closes, and its token stops working after a day.
+
+### How the browser reaches the API
+The frontend always calls `/api` on its own domain, so the cookie is first-party in every
+browser (Safari and iOS block cookies set by another site):
+- **Production:** `Frontend/vercel.json` forwards `/api/*` to the Render backend
+  (`https://pandav.onrender.com`) and adds the `ORIGIN_SECRET` header.
+- **Development:** Vite forwards `/api` to `VITE_BACKEND_URL` (default `http://localhost:5000`).
+
+Chat sockets can't go through Vercel's proxy, so they connect to the backend directly
+(`VITE_BACKEND_URL`, set for production in `Frontend/.env.production`). Each connection first
+gets a one-minute ticket from `POST /api/auth/socket-token`.
+
+If the backend moves, update both `Frontend/vercel.json` and `Frontend/.env.production`.
+
+### Deploying the cookie sessions
+1. Generate a secret: `openssl rand -hex 32`.
+2. Set `ORIGIN_SECRET` to it on **both** Render (backend) and Vercel (frontend), then redeploy
+   both. If Render has it and Vercel doesn't (or the values differ), the API refuses every
+   request. If neither has it, the app works but rate limits treat all visitors as one.
+3. `CLIENT_URL` on Render must be the frontend's address (the API refuses posts from other origins).
+4. Everyone is signed out once: tokens saved by the old version are no longer accepted.
 
 ### Role-Based Access Control
 - **User Role**: Access to own tasks, attendance, and profile
@@ -292,11 +319,14 @@ npm run migrate
 ```
 
 It fills in new fields on existing records (attendance `day` and `approvalStatus`, per-assignee
-task progress), replaces outdated indexes, and lists anything that needs a decision:
+task progress), replaces outdated indexes, encrypts LinkedIn/GitHub tokens linked before they
+were encrypted at rest (needs the production `JWT_SECRET`), and lists anything that needs a
+decision:
 
 - **Duplicate attendance days**: a user with two records on one day. Delete all but one, then
   run the migration again so the one-record-per-day rule can be enforced by the database.
-- **Data of deleted users**: run `npm run migrate -- --clean-orphans` to remove it.
+- **Data of deleted users** (including Social Hub posts and linked accounts): run
+  `npm run migrate -- --clean-orphans` to remove it.
 - **Oversized profile images**: run `npm run migrate -- --drop-oversized-images` to clear them;
   those users can upload a new picture (the app now resizes uploads).
 
@@ -364,11 +394,13 @@ kill -9 <PID>
 **Axios Network Error**
 - Ensure backend is running on correct port
 - Check CORS settings in backend
-- Verify `VITE_API_URL` in `Frontend/.env`
+- Verify `VITE_BACKEND_URL` in `Frontend/.env` (default `http://localhost:5000`); the app calls
+  `/api` on its own origin and Vite forwards it there
 
 **Task/Attendance Not Displaying**
 - Check browser console for errors
-- Verify JWT token in localStorage
+- Check the `pandav_session` cookie: DevTools → Application → Cookies (path `/api`)
+- A 403 "Requests must come through the app" means `ORIGIN_SECRET` differs between Vercel and Render
 - Check backend response format (should use `data` property)
 
 ## 📝 Development Tips

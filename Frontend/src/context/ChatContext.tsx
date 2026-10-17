@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import io, { Socket } from 'socket.io-client';
 import api, { socketBaseUrl } from '../api/axios';
+import { authAPI } from '../api/authAPI';
 import { useAuth } from './useAuth';
 import { ChatContext, participantId, type Message, type TypingStatus } from './useChat';
 
@@ -33,7 +34,7 @@ const mergeMessages = (current: Message[], incoming: Message | Message[]) => {
 };
 
 export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user, token, loading } = useAuth();
+  const { user, loading } = useAuth();
   const userId = user?._id;
   const [socket, setSocket] = useState<Socket | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -59,13 +60,19 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   useEffect(() => {
-    // Wait until a stored session has been confirmed: a rejected token would
+    // Wait until the session has been confirmed: a rejected session would
     // otherwise fail these requests and redirect to the login page
-    if (!userId || !token || loading) return;
+    if (!userId || loading) return;
 
-    // The server identifies the user from this token and joins their room itself
+    // The socket server never sees the session cookie, so every (re)connection
+    // gets a fresh one-minute ticket. The server identifies the user from it
+    // and joins their room itself.
     const newSocket = io(socketBaseUrl, {
-      auth: { token },
+      auth: (callback) => {
+        authAPI.socketToken()
+          .then((token) => callback({ token }))
+          .catch(() => callback({}));
+      },
     });
 
     newSocket.on('connect_error', (error) => {
@@ -139,7 +146,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       openChatUserIdRef.current = null;
       openTeamIdRef.current = null;
     };
-  }, [userId, token, loading, markTeamMessagesAsRead]);
+  }, [userId, loading, markTeamMessagesAsRead]);
 
   const sendMessage = useCallback(async (receiverId: string, message: string) => {
     const { data } = await api.post<Message>('/chat/send', { receiverId, message });

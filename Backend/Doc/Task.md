@@ -133,7 +133,7 @@ The Task Management API provides endpoints to create, retrieve, update, and mana
 **Example Request:**
 ```bash
 curl -X GET http://localhost:5000/api/tasks?status=in-progress&priority=high \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -b cookies.txt
 ```
 
 ---
@@ -204,7 +204,7 @@ curl -X GET http://localhost:5000/api/tasks?status=in-progress&priority=high \
 **Example Request:**
 ```bash
 curl -X GET http://localhost:5000/api/tasks/507f1f77bcf86cd799439011 \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -b cookies.txt
 ```
 
 **Error Response (Not Found):**
@@ -299,7 +299,7 @@ curl -X GET http://localhost:5000/api/tasks/507f1f77bcf86cd799439011 \
 **Example Request:**
 ```bash
 curl -X POST http://localhost:5000/api/tasks \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json" \
   -d '{
     "title": "Website Redesign",
@@ -383,7 +383,7 @@ curl -X POST http://localhost:5000/api/tasks \
 **Example Request (Admin):**
 ```bash
 curl -X PUT http://localhost:5000/api/tasks/507f1f77bcf86cd799439011 \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json" \
   -d '{
     "priority": "urgent",
@@ -394,7 +394,7 @@ curl -X PUT http://localhost:5000/api/tasks/507f1f77bcf86cd799439011 \
 **Example Request (User Progress):**
 ```bash
 curl -X PUT http://localhost:5000/api/tasks/507f1f77bcf86cd799439011 \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json" \
   -d '{
     "status": "in-progress",
@@ -455,7 +455,7 @@ curl -X PUT http://localhost:5000/api/tasks/507f1f77bcf86cd799439011 \
 **Example Request:**
 ```bash
 curl -X POST http://localhost:5000/api/tasks/507f1f77bcf86cd799439011/request-completion \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json" \
   -d '{
     "notes": "Task is complete and ready for review"
@@ -514,7 +514,7 @@ curl -X POST http://localhost:5000/api/tasks/507f1f77bcf86cd799439011/request-co
 **Example Request:**
 ```bash
 curl -X PUT http://localhost:5000/api/tasks/507f1f77bcf86cd799439011/approve \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -b cookies.txt
 ```
 
 **Error Response (Invalid State):**
@@ -574,7 +574,7 @@ curl -X PUT http://localhost:5000/api/tasks/507f1f77bcf86cd799439011/approve \
 **Example Request:**
 ```bash
 curl -X PUT http://localhost:5000/api/tasks/507f1f77bcf86cd799439011/reject \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json" \
   -d '{
     "rejectionReason": "Need to fix the header layout"
@@ -639,7 +639,7 @@ curl -X PUT http://localhost:5000/api/tasks/507f1f77bcf86cd799439011/reject \
 **Example Request:**
 ```bash
 curl -X GET http://localhost:5000/api/tasks/pending-approval \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -b cookies.txt
 ```
 
 ---
@@ -666,7 +666,7 @@ curl -X GET http://localhost:5000/api/tasks/pending-approval \
 **Example Request:**
 ```bash
 curl -X DELETE http://localhost:5000/api/tasks/507f1f77bcf86cd799439011 \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -b cookies.txt
 ```
 
 **Error Response (Not Found):**
@@ -701,11 +701,21 @@ not-started → in-progress → completion-requested → completed
 
 ## Authentication
 
-All endpoints require a bearer token in the Authorization header:
+Signing in sets a `pandav_session` cookie. Every endpoint here reads the session from it;
+the `Authorization` header is not used. The cookie is `HttpOnly` (page scripts can't read it),
+`SameSite=Lax`, limited to the `/api` path, and `Secure` over HTTPS. Sign in once with curl and
+reuse the cookie file:
 
+```bash
+curl -c cookies.txt -X POST http://localhost:5000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "admin@example.com", "password": "..."}'
+
+curl -b cookies.txt http://localhost:5000/api/auth/me
 ```
-Authorization: Bearer YOUR_JWT_TOKEN
-```
+
+POST, PUT, PATCH and DELETE requests from a browser must come from an allowed origin
+(`CLIENT_URL`); requests without an `Origin` header (curl, scripts) are allowed.
 
 ---
 

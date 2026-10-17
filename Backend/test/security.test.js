@@ -3,7 +3,7 @@
 // and rate limits
 import http from 'node:http';
 import { after, before, test } from 'node:test';
-import { ADMIN, USER, checker, connectSocket, sleep, startServer } from './helpers.js';
+import { ADMIN, USER, checker, connectSocket, openSocket, sleep, startServer } from './helpers.js';
 
 let server;
 before(async () => { server = await startServer('security'); });
@@ -51,7 +51,7 @@ test('security', async (t) => {
   await check('socket without token is refused', !anon.ok && anon.error === 'Not authorized', anon.error);
   anon.socket.close();
 
-  const forged = await connectSocket('not-a-real-token');
+  const forged = await openSocket(server.base, 'not-a-real-token');
   await check('socket with bad token is refused', !forged.ok);
   forged.socket.close();
 
@@ -161,7 +161,7 @@ test('security', async (t) => {
   await check('weak new password rejected', weak.status === 400);
   await sleep(1100); // token issue times have 1-second resolution
   const changed = await call('PUT', '/auth/updatepassword', { token: bobToken, body: { currentPassword: 'bobpass1', newPassword: 'bobpass2' } });
-  const newBobToken = changed.data?.data?.token;
+  const newBobToken = changed.session;
   await check('password change succeeds', changed.status === 200 && !!newBobToken);
   await check('old token revoked after password change', (await call('GET', '/auth/me', { token: bobToken })).status === 401);
   await check('new token works', (await call('GET', '/auth/me', { token: newBobToken })).status === 200);

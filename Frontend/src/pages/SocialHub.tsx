@@ -762,7 +762,9 @@ export default function SocialHub() {
                   const liked = post.likes.includes(user._id)
                   const needsGithubRepo = post.targets.github
                   const canApprove = post.approvalStatus === 'pending' && (isAdmin || isTeamLeader)
-                  const canQueueJobs = (post.author._id === user._id || isAdmin || isTeamLeader) && (post.targets.linkedin || post.targets.github) && post.approvalStatus !== 'pending' && post.approvalStatus !== 'rejected'
+                  // Same rules as the server: the author, an admin, or the author's team leader
+                  const leadsAuthor = isTeamLeader && !!user.teamId && post.author.teamId === user.teamId
+                  const canQueueJobs = (post.author._id === user._id || isAdmin || leadsAuthor) && (post.targets.linkedin || post.targets.github) && post.approvalStatus !== 'pending' && post.approvalStatus !== 'rejected' && post.moderationStatus !== 'hidden' && post.moderationStatus !== 'removed'
 
                   return (
                     <article key={post._id} className="rounded-[26px] border border-slate-200 bg-[linear-gradient(180deg,#ffffff_0%,#f8fbff_100%)] p-5">

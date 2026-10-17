@@ -1,6 +1,7 @@
 import express from 'express';
 import http from 'http';
 import { Server as SocketIO } from 'socket.io';
+import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
@@ -8,6 +9,7 @@ import mongoose from 'mongoose';
 import connectDB from './config/database.js';
 import { getUserFromToken } from './middleware/auth.js';
 import { sanitizeInput } from './middleware/sanitize.js';
+import { SOCKET_AUDIENCE, rejectForeignOrigin, requireProxy } from './utils/session.js';
 import authRoutes from './routes/authRoutes.js';
 import taskRoutes from './routes/taskRoutes.js';
 import attendanceRoutes from './routes/attendanceRoutes.js';
@@ -44,6 +46,9 @@ const allowedOrigins = [
 if (process.env.NODE_ENV === 'production' && !process.env.CLIENT_URL && !process.env.FRONTEND_URL) {
   console.warn('CLIENT_URL is not set: browsers on the deployed frontend will be blocked by CORS');
 }
+if (process.env.NODE_ENV === 'production' && !process.env.ORIGIN_SECRET) {
+  console.warn('ORIGIN_SECRET is not set: rate limits will count every visitor behind the frontend proxy as one');
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -59,10 +64,11 @@ const API_V1_PREFIX = process.env.API_V1_PREFIX || '/api/v1';
 const API_V2_PREFIX = process.env.API_V2_PREFIX || '/api/v2';
 
 // Socket.io: only authenticated users can connect, and the room each socket
-// joins comes from the verified token, never from the client
+// joins comes from the verified ticket (POST /api/auth/socket-token), never
+// from the client
 io.use(async (socket, next) => {
   try {
-    const user = await getUserFromToken(socket.handshake.auth?.token);
+    const { user } = (await getUserFromToken(socket.handshake.auth?.token, SOCKET_AUDIENCE)) || {};
     if (!user) return next(new Error('Not authorized'));
     socket.data.userId = user._id.toString();
     socket.data.userName = user.name;
@@ -124,12 +130,20 @@ app.use(cors({
     callback(null, !origin || allowedOrigins.includes(origin));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type']
 }));
+app.use('/api', requireProxy);
+// Responses are per-user; never let the proxy's CDN or the browser cache them
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
+app.use('/api', rejectForeignOrigin(allowedOrigins));
 // Largest legitimate body is a profile image, capped at ~200 KB by the User model
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+app.use(cookieParser());
 app.use(sanitizeInput);
 
 // Health check: 503 while the database is unreachable, so the host and

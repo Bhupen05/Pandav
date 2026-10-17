@@ -11,7 +11,10 @@ import Attendance, { fromLegacyStatus } from '../src/models/Attendance.js';
 import Task, { initialProgress } from '../src/models/Task.js';
 import User, { MAX_PROFILE_IMAGE_LENGTH } from '../src/models/User.js';
 import Chat from '../src/models/Chat.js';
+import SocialIntegration from '../src/models/SocialIntegrationV2.js';
+import SocialPost from '../src/models/SocialPostV2.js';
 import { toDayKey } from '../src/utils/dates.js';
+import { encryptSecret, isEncrypted } from '../src/utils/secrets.js';
 
 dotenv.config();
 
@@ -126,6 +129,58 @@ async function handleOrphans() {
   }
 }
 
+// Social Hub data of deleted users: linked accounts (with their LinkedIn/GitHub
+// tokens) and posts that no longer have an author
+async function handleSocialOrphans() {
+  const userIds = await User.collection.distinct('_id');
+  const orphanIntegrations = { user: { $nin: userIds } };
+  const orphanPosts = { author: { $nin: userIds } };
+
+  const [integrations, posts] = await Promise.all([
+    SocialIntegration.collection.countDocuments(orphanIntegrations),
+    SocialPost.collection.countDocuments(orphanPosts),
+  ]);
+  if (integrations + posts === 0) return;
+
+  if (args.has('--clean-orphans')) {
+    await Promise.all([
+      SocialIntegration.collection.deleteMany(orphanIntegrations),
+      SocialPost.collection.deleteMany(orphanPosts),
+    ]);
+    console.log(`Orphans: removed ${integrations} linked account(s) and ${posts} post(s) of deleted users`);
+  } else {
+    problems.push(
+      `Found Social Hub data of deleted users: ${integrations} linked account(s) with stored tokens, ${posts} post(s). ` +
+      'Run with --clean-orphans to remove it.'
+    );
+  }
+}
+
+// LinkedIn/GitHub tokens linked before they were encrypted at rest
+async function encryptProviderTokens() {
+  if (!process.env.JWT_SECRET) {
+    problems.push('JWT_SECRET is not set, so stored LinkedIn/GitHub tokens were not encrypted. Run again with it set.');
+    return;
+  }
+
+  let count = 0;
+  const linked = SocialIntegration.collection.find(
+    { $or: [{ accessToken: { $type: 'string' } }, { refreshToken: { $type: 'string' } }] },
+    { projection: { accessToken: 1, refreshToken: 1 } }
+  );
+  for await (const integration of linked) {
+    const update = {};
+    for (const field of ['accessToken', 'refreshToken']) {
+      if (integration[field] && !isEncrypted(integration[field])) update[field] = encryptSecret(integration[field]);
+    }
+    if (Object.keys(update).length > 0) {
+      await SocialIntegration.collection.updateOne({ _id: integration._id }, { $set: update });
+      count += 1;
+    }
+  }
+  if (count > 0) console.log(`Social: encrypted the stored tokens of ${count} linked account(s)`);
+}
+
 // Images uploaded before the app started resizing them are sent with every list that shows avatars
 async function handleOversizedImages() {
   const oversized = { $expr: { $gt: [{ $strLenBytes: { $ifNull: ['$profileImage', ''] } }, MAX_PROFILE_IMAGE_LENGTH] } };
@@ -149,6 +204,8 @@ async function main() {
   await migrateTasks();
   await updateIndexes(duplicateCount);
   await handleOrphans();
+  await handleSocialOrphans();
+  await encryptProviderTokens();
   await handleOversizedImages();
 
   if (problems.length) {

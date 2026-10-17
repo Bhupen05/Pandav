@@ -309,9 +309,9 @@ try {
 **Implementation Steps:**
 
 1. Create login form with email and password fields
-2. Call `authAPI.login(email, password)`
+2. Call `login(email, password, rememberMe)` from `useAuth()`
 3. On success:
-   - Store token in localStorage/sessionStorage
+   - The server has set the HttpOnly session cookie (never store a token yourself)
    - Store user data in context
    - Redirect to dashboard based on role
 4. Handle and display errors
@@ -722,14 +722,13 @@ export const ChatMessages = ({ userId }) => {
    ↓
 3. Axios sends: POST /api/v2/auth/login
    ↓
-4. Backend returns: { token, user }
+4. Backend sets the pandav_session cookie (HttpOnly) and returns { user }
    ↓
-5. Login component stores: 
-   - token in localStorage
-   - user in AuthContext
+5. AuthContext stores the user (nothing goes into browser storage)
    ↓
-6. Axios interceptor adds token to all future requests:
-   - Authorization: Bearer <token>
+6. The browser sends the cookie with every /api request; the request goes to
+   /api on the frontend's own origin and Vercel (or Vite in development)
+   forwards it to the backend
    ↓
 7. Navigation redirects based on user.role:
    - admin → /admin
@@ -740,51 +739,23 @@ export const ChatMessages = ({ userId }) => {
 8. Navbar updates to show authenticated state
 ```
 
-### Token Management
+### Session Management
 
-**Storage:**
-```typescript
-// In AuthContext.tsx
-localStorage.setItem('token', token)
-localStorage.setItem('user', JSON.stringify(user))
-```
+The session is a JWT in the `pandav_session` cookie, which is HttpOnly: scripts can't read it, so
+there is no token in the frontend at all.
 
-**Retrieval on App Load:**
-```typescript
-useEffect(() => {
-  const token = localStorage.getItem('token')
-  const user = localStorage.getItem('user')
-  
-  if (token && user) {
-    // Restore authentication state
-    setToken(token)
-    setUser(JSON.parse(user))
-  }
-}, [])
-```
+**On app load** (`AuthContext.tsx`): `GET /auth/me` asks the server whose session the cookie
+holds. Until it answers, `loading` is true and `RequireAuth` shows a spinner.
 
-**Axios Interceptor:**
-```typescript
-// In axios.ts
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token')
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`
-  }
-  return config
-})
-```
+**Requests** (`axios.ts`): the base URL is `/api/v2` on the frontend's own origin. The browser
+attaches the cookie itself; there is no request interceptor.
 
-**Logout:**
-```typescript
-const logout = () => {
-  localStorage.removeItem('token')
-  localStorage.removeItem('user')
-  setToken(null)
-  setUser(null)
-  navigate('/login')
-}
-```
+**Chat socket** (`ChatContext.tsx`): sockets can't go through the `/api` proxy, so they connect
+to `VITE_BACKEND_URL` directly. Every connection attempt first calls `POST /auth/socket-token`
+for a one-minute ticket and passes it as `auth: { token }`.
+
+**Logout:** `POST /auth/logout` clears the cookie; the user is only signed out locally once that
+succeeds.
 
 ---
 
@@ -1031,12 +1002,12 @@ const RealtimeComponent = () => {
 
 ### Issue 2: 401 Authorization Error
 
-**Cause:** Token missing or expired.
+**Cause:** Session cookie missing or expired.
 
 **Solution:**
-1. Check localStorage has token: Open DevTools → Application → Local Storage
-2. Log in again to get fresh token
-3. Verify token format in axios interceptor
+1. Check the `pandav_session` cookie: DevTools → Application → Cookies (path `/api`)
+2. Log in again to get a fresh session
+3. Make sure the request went to `/api` on the frontend's own origin, not straight to the backend
 
 ### Issue 3: CORS Error
 

@@ -80,8 +80,9 @@ const freePort = () =>
     });
   });
 
-// Fresh database, seeded accounts and a running server for one suite
-export async function startServer(suite) {
+// Fresh database, seeded accounts and a running server for one suite.
+// `env` adds or overrides server environment variables.
+export async function startServer(suite, env = {}) {
   await resetDatabase(suite);
   runScript(suite, 'create-users.js');
 
@@ -89,7 +90,7 @@ export async function startServer(suite) {
   const base = `http://127.0.0.1:${port}`;
   const server = spawn(process.execPath, [path.join(BACKEND_DIR, 'src/server.js')], {
     cwd: TEST_DIR,
-    env: childEnv(databaseUri(`pandav_test_${suite}`), { PORT: String(port) }),
+    env: childEnv(databaseUri(`pandav_test_${suite}`), { PORT: String(port), ...env }),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
@@ -120,24 +121,42 @@ export async function startServer(suite) {
   };
 }
 
+export const SESSION_COOKIE = 'pandav_session';
+
+// The session cookie a response sets: { value, attributes } with attribute
+// names lowercased, or null if it sets none
+export const sessionCookie = (headers) => {
+  const header = headers.getSetCookie().find((cookie) => cookie.startsWith(`${SESSION_COOKIE}=`));
+  if (!header) return null;
+  const [pair, ...parts] = header.split(';').map((part) => part.trim());
+  const attributes = Object.fromEntries(parts.map((part) => {
+    const [key, ...value] = part.split('=');
+    return [key.toLowerCase(), value.join('=') || true];
+  }));
+  return { value: pair.slice(SESSION_COOKIE.length + 1), attributes };
+};
+
 export function apiClient(apiBase) {
+  // `token` is a session: the value of the session cookie, as returned by login()
   const call = async (method, urlPath, { token, body, raw, headers } = {}) => {
     const res = await fetch(apiBase + urlPath, {
       method,
       headers: {
         'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(token ? { Cookie: `${SESSION_COOKIE}=${token}` } : {}),
         ...headers,
       },
       body: raw ?? (body === undefined ? undefined : JSON.stringify(body)),
     });
     let data = null;
     try { data = await res.json(); } catch { /* empty or non-JSON body */ }
-    return { status: res.status, data, headers: res.headers };
+    const cookie = sessionCookie(res.headers);
+    return { status: res.status, data, headers: res.headers, cookie, session: cookie?.value || undefined };
   };
 
-  const login = async ({ email, password }) =>
-    (await call('POST', '/auth/login', { body: { email, password } })).data?.data?.token;
+  // Signs in and returns the session cookie's value (undefined if refused)
+  const login = async ({ email, password, rememberMe }) =>
+    (await call('POST', '/auth/login', { body: { email, password, rememberMe } })).session;
 
   const me = async (token) => (await call('GET', '/auth/me', { token })).data?.data;
 
@@ -151,10 +170,19 @@ export function apiClient(apiBase) {
   return { call, login, me, register };
 }
 
+// Opens a socket the way the app does: a ticket from the session, then the
+// socket. A session the server refuses leaves the socket without a ticket.
+export const connectSocket = async (base, token) => {
+  const ticket = token
+    ? (await apiClient(`${base}/api`).call('POST', '/auth/socket-token', { token })).data?.data?.token
+    : undefined;
+  return openSocket(base, ticket);
+};
+
 // Resolves once the socket connects or is refused; collects what it receives
-export const connectSocket = (base, token) =>
+export const openSocket = (base, ticket) =>
   new Promise((resolve) => {
-    const socket = io(base, { auth: token ? { token } : {}, reconnection: false, forceNew: true });
+    const socket = io(base, { auth: ticket ? { token: ticket } : {}, reconnection: false, forceNew: true });
     const inbox = [];
     const online = [];
     socket.on('receive_message', (message) => inbox.push(message));
