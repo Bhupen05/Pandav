@@ -108,6 +108,22 @@ export default function TeamManagement() {
     }
   }
 
+  // A frozen team can be looked at but not changed: no new tasks, invites,
+  // leaders or chat messages, and its waiting reviews come to admins
+  const handleToggleFrozen = async (team: Team) => {
+    const freezing = team.isActive
+    if (freezing && !confirm(`Freeze "${team.name}"? Its leaders can't add, change or approve anything, and its chat becomes read-only, until you unfreeze it.`)) return
+    setActionLoading(p => ({ ...p, [`freeze-${team._id}`]: true }))
+    try {
+      await teamAPI.updateTeam(team._id, { isActive: !freezing })
+      setTeams(p => p.map(t => (t._id === team._id ? { ...t, isActive: !freezing } : t)))
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, freezing ? 'Failed to freeze team' : 'Failed to unfreeze team'))
+    } finally {
+      setActionLoading(p => ({ ...p, [`freeze-${team._id}`]: false }))
+    }
+  }
+
   const handleInviteMember = async () => {
     if (!selectedTeam || !inviteUserId.trim()) return
     setActionLoading(p => ({ ...p, invite: true }))
@@ -203,7 +219,7 @@ export default function TeamManagement() {
                     <div className="flex items-center gap-2">
                       <h2 className="text-lg font-semibold text-gray-900">{team.name}</h2>
                       {!team.isActive && (
-                        <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Inactive</span>
+                        <span className="text-xs bg-sky-100 text-sky-800 px-2 py-0.5 rounded-full">Frozen</span>
                       )}
                     </div>
                     {team.description && <p className="text-sm text-gray-500 mt-0.5">{team.description}</p>}
@@ -225,6 +241,13 @@ export default function TeamManagement() {
                       className="px-3 py-1.5 border border-purple-600 text-purple-600 text-sm rounded-lg hover:bg-purple-50"
                     >
                       Add Leader
+                    </button>
+                    <button
+                      onClick={() => handleToggleFrozen(team)}
+                      disabled={actionLoading[`freeze-${team._id}`]}
+                      className="px-3 py-1.5 border border-sky-600 text-sky-700 text-sm rounded-lg hover:bg-sky-50 disabled:opacity-50"
+                    >
+                      {team.isActive ? 'Freeze' : 'Unfreeze'}
                     </button>
                     <button
                       onClick={() => handleDeleteTeam(team._id, team.name)}

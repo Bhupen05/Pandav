@@ -5,14 +5,21 @@ A full-stack MERN application for managing employee tasks, attendance, and perfo
 ## 🚀 Features
 
 ### For Regular Users
+- **Teams**: Anyone can sign up, start a team and lead it, or join a team by invite
 - **Task Management**: View and manage assigned tasks with priority levels and status tracking
 - **Attendance System**: Check-in/check-out functionality with work hours calculation
 - **Profile Management**: Update personal information and upload profile pictures
 - **Activity Dashboard**: View task completion streaks and performance metrics
 
+### For Team Leaders
+- **Team Tasks**: Give tasks to the team, edit and delete them (an edited task shows who changed it and when), and approve finished work
+- **Team Attendance**: Review the team's check-ins and leave requests
+- **Social Hub**: Approve and publish the team's posts
+
 ### For Administrators
 - **Complete Task Oversight**: View, create, edit, and delete all tasks across the organization
 - **User Management**: Manage employee accounts and permissions
+- **Team Oversight**: Create teams with a chosen leader, and freeze a team (it can be read but not changed; its waiting approvals come to admins)
 - **Attendance Monitoring**: Track all employee attendance records and work hours
 - **Analytics Dashboard**: View comprehensive statistics including:
   - Task completion rates
@@ -171,7 +178,9 @@ npm run preview
 
 The backend has end-to-end tests in `Backend/test/`. Each suite starts the real server on its own
 throwaway database (`pandav_test_<suite>`, dropped before every run) and exercises the API the way
-the app uses it: security, everyday workflows, data integrity, and the migration script.
+the app uses it: security, everyday workflows, data integrity, teams, the Social Hub, the
+project owner's rules (`decisions.test.js`: who runs teams, frozen teams, task edits, messaging,
+sharing), and the migration script.
 
 They need Node.js 22 or newer and a running MongoDB server:
 
@@ -185,8 +194,8 @@ On Windows PowerShell, set the variable with `$env:TEST_MONGODB_URL = "mongodb:/
 The tests never read `Backend/.env`, so they can't touch your development or production database.
 
 The frontend has browser tests in `Frontend/e2e/` (Playwright, Chromium): sign-in, sessions and
-"remember me", route guards, live chat (including after a backend restart) and the admin flows
-for tasks, attendance and password resets. They start their own backend (port 5055, on a fresh
+"remember me", route guards, live chat (including after a backend restart), the admin flows
+for tasks, attendance and password resets, and a user starting a team and managing its tasks. They start their own backend (port 5055, on a fresh
 `pandav_test_e2e` database) and Vite dev server (port 5180), and need the same MongoDB server as
 the backend tests:
 
@@ -209,8 +218,9 @@ The API lives under `/api/v2`. The full reference, one page per area, is in
 [`Backend/Doc/`](Backend/Doc/README.md): sessions, errors, paging and rate limits on its front
 page, then users, tasks, attendance, teams, chat (with the Socket.io events) and the Social Hub.
 
-`GET /api/health` answers `200` when the server and database are up and `503` while the
-database is unreachable.
+`GET /api/v2/health` answers `200` when the server and database are up and `503` while the
+database is unreachable. Point the host's health check (Render: Settings → Health Check Path)
+at it. The old unversioned `/api/*` and `/api/v1/*` copies of the routes were removed.
 
 ## 🔐 Authentication & Authorization
 
@@ -234,7 +244,7 @@ browser (Safari and iOS block cookies set by another site):
 
 Chat sockets can't go through Vercel's proxy, so they connect to the backend directly
 (`VITE_BACKEND_URL`, set for production in `Frontend/.env.production`). Each connection first
-gets a one-minute ticket from `POST /api/auth/socket-token`.
+gets a one-minute ticket from `POST /api/v2/auth/socket-token`.
 
 If the backend moves, update both `Frontend/vercel.json` and `Frontend/.env.production`.
 
@@ -247,15 +257,25 @@ If the backend moves, update both `Frontend/vercel.json` and `Frontend/.env.prod
 4. Everyone is signed out once: tokens saved by the old version are no longer accepted.
 
 ### Role-Based Access Control
-- **User Role**: Access to own tasks, attendance, and profile
-- **Admin Role**: Full access to all features and data
+- **User**: own tasks, attendance and profile. Can start a team (and becomes its leader) or join one by invite.
+- **Team member**: as a user, plus the team's chat and tasks.
+- **Team leader**: manages the team they lead: invites, team tasks (create, edit, delete, approve),
+  attendance reviews, and members' Social Hub posts. Never reviews their own work. None of this
+  while an admin has frozen the team.
+- **Admin**: full access to all features and data.
+
+Direct messages follow one rule in the chat and the Social Hub: admins can message anyone;
+otherwise people message their teammates, their Social Hub connections, or someone who messaged
+them first. 45 messages a minute per sender.
 
 ### Protected Routes
 Backend uses middleware to protect routes:
 ```javascript
 router.get('/tasks', protect, getTasks);  // Requires authentication
-router.delete('/tasks/:id', protect, authorize('admin'), deleteTask);  // Admin only
+router.get('/teams', protect, authorize('admin'), getTeams);  // Admin only
 ```
+Finer rules (a leader acting only on their own team, never on themselves) are checked in the
+controllers, with the helpers in `Backend/src/utils/teams.js` and `utils/messaging.js`.
 
 ## 👤 Default Users
 
@@ -264,8 +284,9 @@ admin (`admin@example.com`) and a regular user (`user@example.com`) and prints a
 password for each, once. Set `SEED_ADMIN_PASSWORD` / `SEED_USER_PASSWORD` in `Backend/.env`
 to choose them yourself.
 
-Self-registration (`POST /api/auth/register`) always creates a regular user; the `role`
-field is ignored. An admin can promote a user with `PUT /api/users/:id` and `{ "role": "admin" }`.
+Self-registration (`POST /api/v2/auth/register`) always creates a regular user; the `role`
+field is ignored. An admin can promote a user with `PUT /api/v2/users/:id` and `{ "role": "admin" }`.
+Team roles come from teams: creating a team makes you its leader, accepting an invite makes you a member.
 
 ## ⬆️ Upgrading an Existing Database
 
@@ -386,6 +407,9 @@ export const getFeatures = async (req, res) => {
 ```javascript
 // routes/featureRoutes.js
 router.get('/', protect, getFeatures);
+
+// routes/v2Routes.js: the API is served under /api/v2 only
+router.use('/features', featureRoutes);
 ```
 
 4. **Create API Service** (Frontend)

@@ -1,5 +1,5 @@
 import type { TaskInput } from './Tasksadd'
-import { canRequestCompletion, canStart, isWaitingForTeammates, progressOf } from '../utils/taskProgress'
+import { canRequestCompletion, canStart, editedLabel, isWaitingForTeammates, progressOf } from '../utils/taskProgress'
 
 interface ExtendedTask extends TaskInput {
   rejectionReason?: string
@@ -13,6 +13,9 @@ type Props = {
   onDelete?: (index: number) => void
   onStatusChange?: (index: number, next: TaskInput['status']) => void
   isAdmin?: boolean
+  // Whether the viewer may edit and delete this task (admins, and the leader
+  // of everyone on it). Defaults to isAdmin.
+  canManage?: (task: ExtendedTask) => boolean
   // Decides which actions the viewer gets on their own part of a task
   currentUserId?: string
 }
@@ -93,7 +96,7 @@ function statusIcon(status: TaskInput['status']) {
   }
 }
 
-export default function Taskscard({ tasks, onStatusChange, onEdit, onDelete, isAdmin = false, currentUserId }: Props) {
+export default function Taskscard({ tasks, onStatusChange, onEdit, onDelete, isAdmin = false, canManage, currentUserId }: Props) {
   if (!tasks || tasks.length === 0) {
     return (
       <div className="mx-auto max-w-4xl rounded-xl border bg-white p-12 text-center shadow-sm">
@@ -116,6 +119,8 @@ export default function Taskscard({ tasks, onStatusChange, onEdit, onDelete, isA
         const due = formatDate(task.dueDate)
         const isOverdue = due && new Date(task.dueDate!) < new Date() && task.status !== 'completed'
         const isRejected = task.rejectionReason ? true : false
+        const manageable = canManage ? canManage(task) : isAdmin
+        const edited = editedLabel(task)
 
         return (
           <article
@@ -180,6 +185,12 @@ export default function Taskscard({ tasks, onStatusChange, onEdit, onDelete, isA
                   <span className="font-medium">
                     {formatDate(task.startDate)} → {formatDate(task.dueDate)}
                   </span>
+                </div>
+              )}
+              {edited && (
+                <div className="flex items-center gap-2 text-xs text-neutral-500" title="Last change to the task's details">
+                  <span>✏️</span>
+                  {edited}
                 </div>
               )}
               {isOverdue && (
@@ -280,7 +291,7 @@ export default function Taskscard({ tasks, onStatusChange, onEdit, onDelete, isA
                   )}
                 </>
               )}
-              {isAdmin && onEdit && (
+              {manageable && onEdit && (
                 <button
                   className="rounded-lg border border-neutral-300 px-3 py-2 text-xs font-semibold text-neutral-700 hover:bg-neutral-50 transition-colors"
                   onClick={() => onEdit(idx)}
@@ -288,7 +299,7 @@ export default function Taskscard({ tasks, onStatusChange, onEdit, onDelete, isA
                   Edit
                 </button>
               )}
-              {isAdmin && onDelete && (
+              {manageable && onDelete && (
                 <button
                   className="rounded-lg border border-red-300 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50 transition-colors"
                   onClick={() => onDelete(idx)}

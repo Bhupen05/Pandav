@@ -10,8 +10,7 @@ team endpoints, not here; see [Teams.md](Teams.md).
 Sign-in, the session cookie, allowed origins, the error format, paging (`?page=&limit=`) and rate
 limits are covered in [README.md](README.md).
 
-Paths on this page are under `/api/v2`. The same routers are also mounted under `/api/v1` and,
-for older clients, directly under `/api` (for example `/api/auth/login`), with the same behavior.
+Paths on this page are under `/api/v2`.
 
 ## User fields
 
@@ -41,7 +40,7 @@ registration (the password endpoints check the length themselves, with their own
 |---|---|
 | `user` | Every new account. Users go back to it when they are removed from their team or the team is deleted |
 | `admin` | Can call every endpoint on this page and read or edit any profile. Never in a team: an admin can't lead a team or be invited to one |
-| `team_leader` | Leads a team. Given when the user is made a team's leader (when the team is created, or as an extra leader) |
+| `team_leader` | Leads a team. Given when the user is made a team's leader (when they create a team, when an admin creates one with them as its leader, or as an extra leader) |
 | `team_member` | Belongs to a team. Given when the user accepts a team invite |
 
 A user is in at most one team, recorded in `teamId`. An admin can switch an account between `user`
@@ -316,8 +315,11 @@ If `q` is missing or shorter than 2 characters after trimming, the response is
 
 `GET /api/v2/users/chat-list`. Signed in.
 
-Returns every active account except the caller, with `_id`, `name` and `email` only. Not paged,
-and there is no `count`.
+Returns the active accounts the caller may send a direct message to (see
+[Chat.md](Chat.md#who-can-message-whom)): for an admin, every active account except their own;
+for anyone else, the people in their team (unless it is frozen), their accepted Social Hub
+connections, and anyone who has messaged them. Each has `_id`, `name`, `email` and `role` only.
+Sorted by name. Not paged, and there is no `count`.
 
 `200 OK`:
 
@@ -325,7 +327,7 @@ and there is no `count`.
 {
   "success": true,
   "data": [
-    { "_id": "6ad388243ae17d6a41f662b9", "name": "Admin User", "email": "admin@example.com" }
+    { "_id": "6ad388243ae17d6a41f662b9", "name": "Admin User", "email": "admin@example.com", "role": "admin" }
   ]
 }
 ```

@@ -42,8 +42,10 @@ export const socialWriteRateLimiter = createRateLimiterV2({
   max: 30,
 });
 
-export const socialMessageRateLimiter = createRateLimiterV2({
-  keyPrefix: 'social-message',
+// Direct messages, from the main chat and the Social Hub together: they are
+// one conversation store, so one limit per sender
+export const directMessageRateLimiter = createRateLimiterV2({
+  keyPrefix: 'direct-message',
   windowMs: 60 * 1000,
   max: 45,
 });

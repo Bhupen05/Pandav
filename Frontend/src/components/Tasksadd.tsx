@@ -23,6 +23,9 @@ export type TaskInput = {
 	notes?: string
 	createdBy?: string | UserRef
 	assigneeProgress?: AssigneeProgress[]
+	// Last change to the details by an admin or team leader
+	editedBy?: string | UserRef
+	editedAt?: string
 }
 
 type AssigneeOption = { _id: string; name: string; email: string }

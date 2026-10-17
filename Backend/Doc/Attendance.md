@@ -6,8 +6,7 @@ one record per day. Records come from check-in and check-out, from a user's own 
 or from an admin. Two fields describe a record: `status` says what kind of day it was, and
 `approvalStatus` says whether a reviewer has accepted it. Admins can review anyone's records; team
 leaders can review the people in their teams but not themselves. Paths below use
-`/api/v2/attendance`; the same router is also mounted at `/api/v1/attendance` and the legacy
-`/api/attendance`. Team-scoped attendance endpoints (`/api/v2/teams/:teamId/attendance/...`)
+`/api/v2/attendance`. Team-scoped attendance endpoints (`/api/v2/teams/:teamId/attendance/...`)
 follow the same approval flow and are covered in [Teams.md](Teams.md).
 
 Sign-in, the session cookie, allowed origins, the error format, paging (`?page=&limit=`) and rate
@@ -21,7 +20,9 @@ limits are covered in [README.md](README.md).
   request time, not from the record's `team` field.
 - **Owner**: the user the record belongs to (`user`).
 - **Reviewer** of a record: an admin, or a team leader whose reach includes the owner, unless the
-  leader is the owner.
+  leader is the owner. Only teams that aren't frozen count here: the leader of a frozen team (see
+  [Teams.md](Teams.md#frozen-teams)) is not a reviewer of its people's records, so those wait
+  for an admin.
 
 ## Attendance fields
 
@@ -75,11 +76,12 @@ of `requested`, `approved` or `rejected` becomes `status: "present"` with the ma
 ## Who sees which records
 
 - Admins: all records.
-- Team leaders: records of everyone currently in the teams they lead, their own included; only
-  their own if they lead no team.
+- Team leaders: records of everyone currently in the teams they lead (frozen teams too), their own
+  included; only their own if they lead no team.
 - Everyone else: their own records.
 
-A single record (`GET /attendance/:id`) is visible to its owner and its reviewers.
+A single record (`GET /attendance/:id`) is visible to the same people: its owner, admins, and a
+leader of a team its owner is in, frozen or not.
 
 ## Endpoints
 
@@ -389,7 +391,8 @@ Sets `approvalStatus` to `approved` and `approvedBy` to the caller, whatever the
 
 - `403` `Only admins or team leaders can access this route`
 - `404` `Attendance record not found`
-- `403` `Not authorized to review this record`
+- `403` `Not authorized to review this record`: the caller is not a reviewer of the record, for
+  example it is their own, or the owner's team is frozen.
 
 ### Disapprove a record
 

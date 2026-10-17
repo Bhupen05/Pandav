@@ -13,7 +13,7 @@ test('security', async (t) => {
   const check = checker(t);
   const { call, login, me } = server.api;
   const rawGet = (path, headers) => new Promise((resolve, reject) => {
-    http.get(`${server.base}/api${path}`, { headers }, (res) => { res.resume(); resolve(res.headers); }).on('error', reject);
+    http.get(`${server.base}/api/v2${path}`, { headers }, (res) => { res.resume(); resolve(res.headers); }).on('error', reject);
   });
 
   // ---------- Registration ----------

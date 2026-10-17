@@ -121,6 +121,8 @@ function Navbar() {
           ]
         : [
             { to: '/dashboard', label: 'Dashboard' },
+            // Start a team, or accept an invite to one
+            { to: '/teams', label: 'Team' },
             { to: '/social', label: 'Social Hub' },
             { to: '/tasks', label: 'Tasks' },
             { to: '/attendance', label: 'Attendance' },

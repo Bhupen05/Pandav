@@ -11,10 +11,11 @@ import {
   markTeamMessagesAsRead,
 } from '../controllers/chatController.js';
 import { protect } from '../middleware/auth.js';
+import { directMessageRateLimiter } from '../middleware/rateLimitV2.js';
 
 const router = express.Router();
 
-router.post('/send', protect, sendMessage);
+router.post('/send', protect, directMessageRateLimiter, sendMessage);
 router.get('/messages/:userId', protect, getMessages);
 router.patch('/messages/:messageId/read', protect, markMessageAsRead);
 router.put('/read/:userId', protect, markAsRead);

@@ -1,8 +1,10 @@
 # Remaining Work
 
-What is still open after Phase 7 (the remaining-work pass), as of 2026-10-17. Phases 1–4 and the
-V2 merge are on `main` through PR #2. Phases 5 (cookie sessions), 6 (V2 social and teams security
-pass) and 7 are on `v1` and not merged into `main` yet.
+What is still open after Phase 8 (the project owner's decisions), as of 2026-10-18. Phases 1–4 and
+the V2 merge are on `main` through PR #2. Phases 5 (cookie sessions), 6 (V2 social and teams
+security pass), 7 (remaining-work pass) and 8 are on `v1` and not merged into `main` yet.
+
+Phase 8 carried out the decisions listed in [section 2](#2-decisions-made-in-phase-8).
 
 Phase 7 closed the earlier list's developer items:
 - the smaller fixes from the V2 security pass
@@ -19,7 +21,7 @@ didn't fix is in sections 3 and 4.
 | # | Item | Who | Priority | Size |
 |---|------|-----|----------|------|
 | 1 | [Deployment steps](#1-deployment-steps) | Project owner | Before the next deploy | Small |
-| 2 | [Decisions for the project owner](#2-decisions-for-the-project-owner) | Project owner, then developer | Medium | Small each |
+| 2 | [Decisions made in Phase 8](#2-decisions-made-in-phase-8) | Project owner | One left to confirm | Small |
 | 3 | [Workflow gaps](#3-workflow-gaps) | Developer | Medium | Small–Medium |
 | 4 | [Consistency and robustness](#4-consistency-and-robustness) | Developer | Low | Small each |
 | 5 | [Paging in the UI](#5-paging-in-the-ui) | Developer | Low while data is small | Medium |
@@ -63,6 +65,22 @@ These happen on GitHub, Render and Vercel, outside the code.
 - [ ] The GitHub Actions run for `v1` now has a third job, **e2e** (browser tests). Check it passes
       on GitHub; if it fails, the run keeps a `playwright-report` artifact with traces.
 
+**Phase 8 (owner decisions)**
+- [ ] **Before deploying:** on Render, open the backend service → Settings → **Health Check
+      Path**. If it is `/api/health` or `/api/v1/health`, change it to `/api/v2/health`. Those
+      old paths no longer exist, so Render would treat the new version as broken and keep
+      restarting it. Do the same for any uptime monitor.
+- [ ] Deploy the backend and frontend together. No new settings and no migration.
+- [ ] What users will notice:
+  - Messages: people who could message anyone before now need to be teammates, connected in the
+    Social Hub, or answering someone who wrote to them first. Admins can still message anyone.
+    The Chat page lists only people the user may message.
+  - Personal tasks created before this version keep their auto-share setting. With it on,
+    completing the task now shows a preview to confirm instead of posting at once.
+  - Any user can create a team from the new **Team** link (or the dashboard card).
+- [ ] Admins freeze and unfreeze a team with the new **Freeze** button on Teams. A team made
+      inactive before this version shows as **Frozen**.
+
 **Earlier phases (skip any you have already done)**
 - [ ] Run `npm run migrate` in `Backend/` against the production database (Phase 3) and act on its
       "Needs attention" list.
@@ -77,36 +95,34 @@ These happen on GitHub, Render and Vercel, outside the code.
 
 ---
 
-## 2. Decisions for the project owner
+## 2. Decisions made in Phase 8
 
-- **Anyone can sign up and reach every employee.** Self-registration is open. A new account can
-  list colleagues' names and emails (`GET /users/search`, `GET /users/chat-list`, Social Hub
-  discovery) and message any active user through the main chat. For an internal tool, consider
-  admin approval for new accounts, or only allowing your company's email domain.
-- **"Connect before messaging" isn't a real rule.** The Social Hub requires an accepted
-  connection, but the main chat (`POST /chat/send`) lets anyone message or read a conversation
-  with any active user, in the same message store. Either drop the Social Hub rule or apply one
-  rule to both. The rule lives in one place now (`canReceiveDirectMessages` in
-  `chatController.js`), and typing indicators already follow it. Main chat sends also have no
-  rate limit (Social Hub messages: 45 a minute).
-- **Completing a personal task shares it by default.** `autoGenerateLinkedInPost` defaults to on.
-  Completing the task then creates a *public* feed post that includes the task's description,
-  although personal tasks are otherwise private (the feed shows only a linked task's title and
-  status). For team leaders and admins with LinkedIn linked, it also goes to LinkedIn at once,
-  with no review. Consider defaulting it to off, or leaving the description out.
-- **Team leaders can publish their members' posts.** Publishing requires the author, an admin, or
-  a leader of the author's team, but always uses the *author's* LinkedIn or GitHub account. Decide
-  whether only authors should publish to their own accounts.
-- **Team leaders can create tasks but not edit or delete them** unless they are an assignee. Is
-  that intended?
-- **What a deactivated team means.** An inactive team blocks invites and team chat, but its
-  leaders still review their members' tasks and attendance, and it still accepts new tasks and
-  leaders. Decide what deactivating a team should switch off.
-- **Old `/api/*` and `/api/v1/*` routes.** The frontend uses only `/api/v2`, but the old aliases
-  are still mounted (`Backend/src/server.js`, "can be removed later"). Check whether anything
-  else calls them first, including Render's health check path (`/api/health` is one of them).
-- **Contact page "Office Hours"** (9:00 AM – 6:00 PM, `Frontend/src/components/Contactus.tsx`) is
-  sample content: confirm or replace it.
+Decided by the project owner and built in Phase 8, with tests (`Backend/test/decisions.test.js`,
+`Frontend/e2e/teams.spec.ts`):
+
+- **Open sign-up, and anyone can run a team.** Anyone can register. A user who isn't in a team can
+  create one (`POST /teams` without `leaderId`) and becomes its leader. One team per person
+  still holds. Admins still create teams with a chosen leader.
+- **Team leaders publish their members' posts**, with the author's linked account (unchanged).
+- **Team leaders create, edit and delete their team's tasks.** Not tasks they are on themselves,
+  which go to an admin, as approvals do. Any change to a task's details records `editedBy` and
+  `editedAt`, shown on the task as "Edited by <name> · <date and time>".
+- **One messaging rule** for the Chat page, the Social Hub and typing indicators
+  (`directMessageProblem` in `Backend/src/utils/messaging.js`): admins message anyone; others
+  message teammates (team not frozen), Social Hub connections, or someone who messaged them
+  first. Team leaders have no exception, since anyone can now become one. Both places share one
+  limit of 45 messages a minute.
+- **Deactivating a team freezes it.** Its tasks, attendance and chat stay readable. Nobody can
+  add tasks, invites, leaders or chat messages. Leaders can't edit, approve or remove anything.
+  Waiting approvals go to admins. An admin can unfreeze it.
+- **Auto-share asks first.** It is off by default. When it is on, completing a personal task shows
+  the post (editable) and posts only after the owner confirms. Optionally it also goes to
+  LinkedIn; members' LinkedIn posts still need a leader's approval.
+- **Old routes removed.** Only `/api/v2` is served; the health check is `/api/v2/health`.
+- **Contact page.** The form takes inquiries 24/7; the hours box is now "Call Us: Office Hours".
+
+**To confirm:** the call hours shown on the Contact page are still the sample ones (Mon–Fri 9:00 AM
+– 6:00 PM, Sat 10:00 AM – 4:00 PM, Sun closed, in `Frontend/src/components/Contactus.tsx`).
 
 ---
 
@@ -118,8 +134,8 @@ Found while writing the API reference (`Backend/Doc/`); each page describes the 
 - **The approval queue and the approve rule disagree.**
   - `GET /tasks/pending-approval` lists only tasks where *every* assignee has asked for
     completion, but approve and reject already work once *one* has.
-  - For a leader, the queue includes a task if *any* assignee is in their teams. Approving needs
-    *all* of them, so a listed task can answer 403.
+  - For a leader, the queue includes a task if *any* assignee is in their (active) teams.
+    Approving needs *all* of them, so a listed task can answer 403.
   - That 403 says "You cannot approve a task assigned to you" even when the real reason is an
     assignee outside the leader's teams.
 - **An admin's status override leaves progress behind.** Reopening a completed task leaves every
@@ -139,11 +155,10 @@ Found while writing the API reference (`Backend/Doc/`); each page describes the 
   can be flipped.
 
 **Teams and chat**
-- Inviting by `username` matches `name`, which isn't unique, and takes the first match.
-- `GET /chat/teams/chats` lists inactive teams (whose chat endpoints answer 404) and sorts by the
-  team's last change, not its last message.
-- `POST /teams` by a team leader always fails ("You already manage a team") under the one-team
-  rule; that path is dead.
+- Inviting by `username` matches `name`, which isn't unique, and takes the first match. This
+  matters more now that anyone can lead a team and invite people.
+- There is still no way to leave a team; an admin has to remove the member. Members of a frozen
+  team can't join another one until an admin removes them.
 
 **Social Hub** (`socialV2Controller.js`)
 - **Publishing twice publishes twice.**
@@ -165,8 +180,6 @@ Found while writing the API reference (`Backend/Doc/`); each page describes the 
   - There is no unlink endpoint.
   - `refreshToken` and `tokenExpiresAt` are stored but never used.
 - **Approval.**
-  - It compares the leader's and author's `teamId`, while publishing checks the team's leaders.
-  - Nothing stops a leader approving their own pending post.
   - `autoPostStatus` stays `pending_approval` after approval.
 - **Moderation and connections.**
   - Any moderation action works from any state (`unflag` restores a removed post).
@@ -179,6 +192,7 @@ Found while writing the API reference (`Backend/Doc/`); each page describes the 
 - **Response shapes differ.**
   - `POST /chat/send` and `PATCH /chat/messages/:id/read` return the bare message (no
     `success`/`data`).
+  - The Social Hub's `409 This task has already been shared` puts `postId` at the top level.
   - Some lists lack `count`.
   - Register returns fewer fields than login.
   - `approvedBy` is sometimes an id, sometimes `{ name, email }`.
@@ -197,8 +211,8 @@ Found while writing the API reference (`Backend/Doc/`); each page describes the 
   - Moving a contact message away from `resolved` keeps `resolvedBy`.
   - Re-sending a personal task's `completed` status resets `completedAt`.
   - `assigneeProgress[].notes` is never written.
-- **Rate limits count refused requests.** The Social Hub limiters run before validation and role
-  checks.
+- **Rate limits count refused requests.** The Social Hub limiters, and the shared direct-message
+  limit on `POST /chat/send`, run before validation and the messaging rule.
 - **Paging by date can skip an item.** The `?before=` cursors (chat, team chat, feed) compare
   timestamps strictly, so two items created in the same millisecond can straddle a page boundary
   and one is skipped.
@@ -258,6 +272,9 @@ Accepted for now; listed so nobody mistakes them for bugs.
   API refuses their POST/PUT/PATCH/DELETE requests.
 - **A sleeping Render server can time out requests.** Most requests give up after 30 seconds
   (`Frontend/src/api/axios.ts`); only the session check on page load waits 90 seconds.
+- **Users can't message an admin first** unless they are teammates or connected. The Contact page,
+  or a Social Hub connection request, is the way in.
+- **A frozen team's leaders keep the `team_leader` role.** They see the leader pages, read-only.
 - **The backend runs as one instance only.** Rate limits, the online-users list and the V2 rate
   limiter live in memory. Running more than one backend instance would need a shared store (e.g.
   Redis) and the Socket.io Redis adapter.

@@ -11,6 +11,7 @@ import SocialPublishJob from '../models/SocialPublishJobV2.js';
 import PersonalTask from '../models/PersonalTaskV2.js';
 import NetworkConnection from '../models/NetworkConnectionV2.js';
 import { escapeRegex, listResponse, pick, sendServerError } from '../utils/http.js';
+import { messageableUserIds } from '../utils/messaging.js';
 import { isInAnyTeam } from '../utils/teams.js';
 
 const TEAM_ROLES = ['team_leader', 'team_member'];
@@ -60,13 +61,20 @@ export const searchUsers = async (req, res) => {
   }
 };
 
-// @desc    Get all users for chat (any authenticated user)
+// @desc    The people the current user may message: everyone for an admin;
+//          otherwise teammates, Social Hub connections, and anyone who has
+//          messaged them (see directMessageProblem)
 // @route   GET /api/users/chat-list
 // @access  Private
 export const getChatUsers = async (req, res) => {
   try {
-    const users = await User.find({ _id: { $ne: req.user._id }, isActive: { $ne: false } })
-      .select('_id name email');
+    const ids = await messageableUserIds(req.user);
+    const users = await User.find({
+      _id: ids ? { $in: ids } : { $ne: req.user._id },
+      isActive: true,
+    })
+      .select('_id name email role')
+      .sort({ name: 1 });
     res.json({ success: true, data: users });
   } catch (error) {
     sendServerError(res, error);

@@ -65,7 +65,8 @@ export default function Contactus() {
         <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
           {/* Contact Form */}
           <div className="rounded-xl border bg-white p-6 shadow-sm">
-            <h2 className="mb-4 text-xl font-semibold text-neutral-900">Send us a Message</h2>
+            <h2 className="mb-1 text-xl font-semibold text-neutral-900">Send us a Message</h2>
+            <p className="mb-4 text-sm text-neutral-600">Open 24/7: send your inquiry any time and we'll get back to you.</p>
 
             {error && (
               <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -201,9 +202,10 @@ export default function Contactus() {
               </div>
             )}
 
-            {/* Office Hours */}
+            {/* Calls are answered in office hours; the form above takes messages any time */}
             <div className="rounded-xl border bg-white p-6 shadow-sm">
-              <h3 className="mb-3 text-lg font-semibold text-neutral-900">Office Hours</h3>
+              <h3 className="mb-1 text-lg font-semibold text-neutral-900">Call Us: Office Hours</h3>
+              <p className="mb-3 text-sm text-neutral-500">We answer calls at these times. Messages sent with the form are welcome 24/7.</p>
               <div className="space-y-2 text-sm text-neutral-600">
                 <div className="flex justify-between">
                   <span>Monday - Friday</span>

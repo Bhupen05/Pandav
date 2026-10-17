@@ -1,8 +1,9 @@
 # Teams
 
 A team is a group of users with one or more leaders and any number of members. Each user belongs
-to at most one team. Leaders invite members, create team tasks and review their members' task
-completions and attendance. Admins manage every team but never belong to one. Team chat is
+to at most one team. Any user who isn't in a team can create one and lead it. Leaders invite
+members, create, edit and delete team tasks, and review their members' task completions and
+attendance. Admins manage every team but never belong to one, and can freeze a team. Team chat is
 documented in [Chat.md](Chat.md). All paths below are under `/api/v2/teams`. None of these
 endpoints sends socket events.
 
@@ -21,8 +22,8 @@ Every document also has `_id` and Mongoose's version key `__v`.
 | `description` | String | Optional, trimmed |
 | `leaders` | [ObjectId → User] | Never empty: the endpoints refuse to remove a team's only leader or delete their account |
 | `members` | [ObjectId → User] | Members who aren't leaders. A member promoted to leader moves to `leaders` |
-| `createdBy` | ObjectId → User | Required. The admin or leader who created the team |
-| `isActive` | Boolean | Default `true`. Only admins change it (see [Membership rules](#membership-rules)) |
+| `createdBy` | ObjectId → User | Required. The admin who created the team, or the user who created it for themselves |
+| `isActive` | Boolean | Default `true`; `false` means the team is frozen. Only admins change it (see [Frozen teams](#frozen-teams)) |
 | `createdAt`, `updatedAt` | Date | Set automatically |
 
 ### TeamInvite
@@ -59,11 +60,12 @@ Tasks and attendance records also carry a `team` reference (default `null`); see
   go back to `user` when removed from the team or when the team is deleted.
   `PUT /api/v2/users/:id` refuses to set either team role
   (`Team roles are given by adding the user to a team`).
+- **Starting a team.** A user who isn't in any team can create one with `POST /api/v2/teams`; they
+  become its only leader. An admin can create a team for someone else, naming its leader.
 - **Joining.** Members join only by accepting an invite. Admins and the team's leaders send
   invites. Only an active user who is not an admin or team leader and is not in any team can be
-  invited, and the same is checked again when they accept. Leaders are appointed by an admin, when
-  creating the team or later with `POST /:teamId/leaders`; a member of the team can be promoted
-  this way.
+  invited, and the same is checked again when they accept. Further leaders are appointed by an
+  admin with `POST /:teamId/leaders`; a member of the team can be promoted this way.
 - **Leaving.** There is no endpoint for leaving a team. A leader can remove members of their own
   team; only an admin can remove a leader. A team's only leader can't be removed
   (`This is the team's only leader. Make someone else a leader first, or delete the team.`), and
@@ -73,38 +75,69 @@ Tasks and attendance records also carry a `team` reference (default `null`); see
   received, their team chat messages and their team chat read receipts.
 - **Reviewing.** Admins review anyone's team tasks and attendance. A leader reviews the people in
   the team they lead, never themselves, so a leader's own tasks and attendance go to an admin or
-  to another leader of the team.
-- **Inactive teams.** An admin can set `isActive: false` with `PUT /:id`. An inactive team can't
-  send invites, its pending invites can't be accepted, and its chat is closed. Membership changes,
-  team tasks and team attendance still work.
+  to another leader of the team. The same leaders can edit and delete their people's tasks (see
+  [Tasks.md](Tasks.md)). None of this works for a leader while the team is frozen.
+- **Frozen teams.** An admin can freeze a team; see [Frozen teams](#frozen-teams).
 - **Deactivated users.** Deactivating a user doesn't take them out of their team. A deactivated user
   can't be made a leader or be invited.
+
+## Frozen teams
+
+An admin freezes a team with `PUT /:id` and `isActive: false`, and unfreezes it with
+`isActive: true` (the app calls this "Freeze"). Freezing keeps the team's members, tasks, attendance
+and chat history, but stops its leaders from acting on it until an admin unfreezes it. Where a
+frozen team refuses something, the answer is
+`400 This team is frozen. An admin has to unfreeze it before anything can change.`
+
+| While frozen | Team's leaders | Admins |
+|---|---|---|
+| Read the team, its tasks (`GET /:teamId/tasks`), its attendance (`GET /:teamId/attendance`) and its chat history | Yes | Yes |
+| Rename it or change its description (`PUT /:id`) | `400` frozen | Yes |
+| Remove someone (`DELETE /:teamId/members/:userId`) | `400` frozen | Yes |
+| Invite (`POST /:teamId/invite`) | `400` frozen | `400` frozen |
+| Add a leader (`POST /:teamId/leaders`) | Admins only, frozen or not | `400` frozen |
+| Create a team task (`POST /:teamId/tasks`) | `400` frozen | `400` frozen |
+| Create a task for the team's people (`POST /api/v2/tasks`) | `400` frozen | Yes (admins' tasks have no team) |
+| List pending tasks or attendance, approve or reject team tasks, approve or disapprove team attendance (the `/:teamId/...` routes) | `400` frozen | Yes |
+| Approve, reject, edit or delete the team's tasks, or review and edit their attendance, through `/api/v2/tasks/:id` and `/api/v2/attendance/:id` | The routes' usual `403` | Yes |
+| `GET /api/v2/tasks/pending-approval` | The team's tasks are left out | Listed |
+| Send a team chat message | `400` frozen (members too) | `400` frozen |
+| Approve or publish members' Social Hub posts | `403` | Yes |
+
+Also, while a team is frozen:
+
+- Its pending invites can't be accepted (`400` frozen). Declining still works.
+- Being in it no longer lets its people send each other direct messages; they need one of the
+  other reasons, such as a Social Hub connection (see
+  [Chat.md](Chat.md#who-can-message-whom)).
+- Members still work on their own tasks (start them, request completion) and check in and out.
+  Their requests wait for an admin.
 
 ## Endpoints
 
 | Method | Path | Who may call |
 |--------|------|--------------|
 | `GET` | `/api/v2/teams` | Admins |
-| `POST` | `/api/v2/teams` | Admins; a team leader who doesn't already lead a team |
+| `POST` | `/api/v2/teams` | Admins (naming the leader); any other signed-in user who isn't in a team (leading it themselves) |
 | `GET` | `/api/v2/teams/my` | Any signed-in user |
 | `GET` | `/api/v2/teams/:id` | Admins; the team's leaders and members |
-| `PUT` | `/api/v2/teams/:id` | Admins; the team's leaders |
+| `PUT` | `/api/v2/teams/:id` | Admins; the team's leaders (not while frozen) |
 | `DELETE` | `/api/v2/teams/:id` | Admins |
-| `POST` | `/api/v2/teams/:teamId/invite` | Admins; the team's leaders |
+| `POST` | `/api/v2/teams/:teamId/invite` | Admins; the team's leaders. Not while frozen |
 | `GET` | `/api/v2/teams/invites/my` | Any signed-in user |
-| `PUT` | `/api/v2/teams/invites/:inviteId/accept` | The invited user |
+| `PUT` | `/api/v2/teams/invites/:inviteId/accept` | The invited user (not while the team is frozen) |
 | `PUT` | `/api/v2/teams/invites/:inviteId/decline` | The invited user |
-| `POST` | `/api/v2/teams/:teamId/leaders` | Admins |
-| `DELETE` | `/api/v2/teams/:teamId/members/:userId` | Admins; the team's leaders (members only) |
+| `POST` | `/api/v2/teams/:teamId/leaders` | Admins. Not while frozen |
+| `DELETE` | `/api/v2/teams/:teamId/members/:userId` | Admins; the team's leaders (members only, not while frozen) |
 | `GET` | `/api/v2/teams/:teamId/tasks` | Admins; the team's leaders and members |
-| `POST` | `/api/v2/teams/:teamId/tasks` | Admins; the team's leaders |
-| `GET` | `/api/v2/teams/:teamId/tasks/pending-approval` | Admins; the team's leaders |
-| `PUT` | `/api/v2/teams/:teamId/tasks/:taskId/approve` | Admins; the team's leaders who aren't assignees |
-| `PUT` | `/api/v2/teams/:teamId/tasks/:taskId/reject` | Admins; the team's leaders who aren't assignees |
+| `POST` | `/api/v2/teams/:teamId/tasks` | Admins; the team's leaders. Not while frozen |
+| `GET` | `/api/v2/teams/:teamId/tasks/pending-approval` | Admins; the team's leaders (not while frozen) |
+| `PUT` | `/api/v2/teams/:teamId/tasks/:taskId/approve` | Admins; the team's leaders who aren't assignees (not while frozen) |
+| `PUT` | `/api/v2/teams/:teamId/tasks/:taskId/reject` | Admins; the team's leaders who aren't assignees (not while frozen) |
 | `GET` | `/api/v2/teams/:teamId/attendance` | Admins; the team's leaders |
-| `GET` | `/api/v2/teams/:teamId/attendance/pending` | Admins; the team's leaders |
-| `PUT` | `/api/v2/teams/:teamId/attendance/:attendanceId/approve` | Admins; the team's leaders (not for their own records) |
-| `PUT` | `/api/v2/teams/:teamId/attendance/:attendanceId/disapprove` | Admins; the team's leaders (not for their own records) |
+| `GET` | `/api/v2/teams/:teamId/attendance/pending` | Admins; the team's leaders (not while frozen) |
+| `PUT` | `/api/v2/teams/:teamId/attendance/:attendanceId/approve` | Admins; the team's leaders (not for their own records, not while frozen) |
+| `PUT` | `/api/v2/teams/:teamId/attendance/:attendanceId/disapprove` | Admins; the team's leaders (not for their own records, not while frozen) |
 
 Errors shared by many endpoints:
 
@@ -114,6 +147,7 @@ Errors shared by many endpoints:
 | `403` | `Only admins or team leaders can access this route` | An admin-or-leader route, called by a `user` or `team_member` |
 | `400` | `Invalid _id` | A malformed id in the path or body |
 | `404` | `Team not found` | No team has that id |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` | The team is frozen and the caller may not make this change (see [Frozen teams](#frozen-teams)) |
 
 The admin-or-leader check looks only at the role. A leader of a different team passes it and is
 then refused by the endpoint's own check, listed under each endpoint.
@@ -157,19 +191,20 @@ paged.
 
 `POST /api/v2/teams`
 
-**Who:** admins, and team leaders who don't already lead a team.
+**Who:** any signed-in user. An admin creates a team for someone else and names its leader. Anyone
+else creates a team they lead themselves, and must not be in any team.
 
 | Field | Required | Notes |
 |-------|----------|-------|
 | `name` | Yes | Non-blank string; must not match an existing team's name |
 | `description` | No | String |
-| `leaderId` | Admins: yes | User id of the leader. Ignored when a team leader calls: they lead the team they create |
+| `leaderId` | Admins: yes | User id of the leader. Ignored when anyone else calls: they lead the team they create |
 
-The leader must exist, be active, not be an admin and not be in any team.
+The leader an admin names must exist, be active, not be an admin and not be in any team.
 
 Creates the team with the leader in `leaders` and no members, sets the leader's `role` to
 `team_leader` and their `teamId` to the new team, and returns `201` with the team populated as in
-[List teams](#list-teams).
+[List teams](#list-teams). `createdBy` is the caller.
 
 ```json
 {
@@ -194,12 +229,12 @@ Creates the team with the leader in `leaders` and no members, sets the leader's 
 | Status | Message |
 |--------|---------|
 | `400` | `A team name is required` (name missing, blank or not a string, or description not a string) |
-| `400` | `You already manage a team` (a team leader who already leads a team) |
-| `400` | `leaderId is required` |
-| `404` | `Leader user not found` |
-| `400` | `This account is deactivated` |
-| `400` | `An admin cannot lead a team` |
-| `400` | `This user already belongs to another team` or `Selected leader already belongs to a team` |
+| `400` | `You already belong to a team` (a caller other than an admin who leads or belongs to a team) |
+| `400` | `leaderId is required` (admins) |
+| `404` | `Leader user not found` (admins) |
+| `400` | `This account is deactivated` (admins) |
+| `400` | `An admin cannot lead a team` (admins) |
+| `400` | `This user already belongs to another team` or `Selected leader already belongs to a team` (admins) |
 | `400` | `A team with this name already exists` |
 
 ### Get my team
@@ -248,15 +283,15 @@ Returns the team in the same shape as [Get my team](#get-my-team).
 
 `PUT /api/v2/teams/:id`
 
-**Who:** admins, and the team's leaders.
+**Who:** admins, and the team's leaders while the team isn't frozen.
 
 | Field | Required | Notes |
 |-------|----------|-------|
 | `name` | No | Non-blank string; must not match another team's name |
 | `description` | No | String |
-| `isActive` | No | Boolean. Admins only; ignored when a leader sends it |
+| `isActive` | No | Boolean; `"true"`/`"false"` as text work too. `false` freezes the team, `true` unfreezes it (see [Frozen teams](#frozen-teams)). Admins only; ignored when a leader sends it |
 
-Changes only the fields sent. Deactivating a team leaves its membership alone. Returns the team
+Changes only the fields sent. Freezing a team leaves its membership alone. Returns the team
 populated as in [List teams](#list-teams).
 
 ```json
@@ -270,6 +305,8 @@ populated as in [List teams](#list-teams).
 |--------|---------|
 | `404` | `Team not found` |
 | `403` | `Only the team leader can perform this action` (a leader of another team) |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` (a leader, while the team is frozen) |
+| `400` | `isActive must be true or false` (checked even when a leader sends it) |
 | `400` | `Team name and description must be text` (either is not a string, or the name is blank) |
 | `400` | `A team with this name already exists` |
 
@@ -305,8 +342,9 @@ Deletes the team and cleans up after it:
 | `userId` | One of the two | Id of the user to invite. Wins if both fields are sent |
 | `username` | One of the two | The user's `name`, matched exactly but case-insensitively. If several users share the name, one of them is picked |
 
-The team must be active. The invitee must be active, must not be an admin or team leader, must not
-be in any team, and must not already have a pending invite to this team.
+The team must not be frozen, whoever sends the invite. The invitee must be active, must not be an
+admin or team leader, must not be in any team, and must not already have a pending invite to this
+team.
 
 Creates a `pending` invite that expires in 7 days and returns `201` with it. `team` is populated
 with `name` and `description`, `invitedUser` with `name`, `email` and `profileImage`, `invitedBy`
@@ -334,7 +372,7 @@ with `name` and `email`. The invitee is not notified in real time; they see the 
 |--------|---------|
 | `404` | `Team not found` |
 | `403` | `Only the team leader can perform this action` (a leader of another team) |
-| `400` | `This team is inactive` |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` (admins too) |
 | `404` | `User "<username>" not found` |
 | `400` | `Please provide userId or username` |
 | `404` | `User not found` |
@@ -390,7 +428,8 @@ accepting one of them later fails with `This user already belongs to a team`.
 | `403` | `This invite is not for you` |
 | `400` | `Invite is already accepted` or `Invite is already declined` |
 | `400` | `This invite has expired` |
-| `400` | `This team no longer accepts members` (the team is inactive) |
+| `400` | `This team no longer accepts members` (the team no longer exists) |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` |
 | `400` | `Admins and team leaders cannot be invited to a team` |
 | `400` | `This user already belongs to a team` |
 
@@ -425,7 +464,7 @@ Marks the invite `declined`. Works on expired invites too.
 The user must be active, must not be an admin, and must not be in another team. A member of this
 team moves from `members` to `leaders`; a user in no team joins directly as a leader, with no
 invite. Sets the user's `role` to `team_leader` and `teamId` to the team. Adding someone who
-already leads this team changes nothing. Works on inactive teams too.
+already leads this team changes nothing. Refused while the team is frozen.
 
 Returns the team with `leaders` and `members` populated (`name`, `email`, `profileImage`, `role`);
 `createdBy` is returned as an id.
@@ -450,6 +489,7 @@ Returns the team with `leaders` and `members` populated (`name`, `email`, `profi
 | Status | Message |
 |--------|---------|
 | `404` | `Team not found` |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` |
 | `404` | `User not found` (also when `userId` is missing) |
 | `400` | `This account is deactivated` |
 | `400` | `An admin cannot lead a team` |
@@ -459,8 +499,9 @@ Returns the team with `leaders` and `members` populated (`name`, `email`, `profi
 
 `DELETE /api/v2/teams/:teamId/members/:userId`
 
-**Who:** admins, who can remove anyone in the team except its only leader; the team's leaders, who
-can remove members but not leaders (themselves included).
+**Who:** admins, who can remove anyone in the team except its only leader, frozen or not; the
+team's leaders, who can remove members but not leaders (themselves included), and not while the
+team is frozen.
 
 Removes the user from `members` or `leaders` and then:
 
@@ -492,6 +533,7 @@ populated as in [Add a leader](#add-a-leader).
 |--------|---------|
 | `404` | `Team not found` |
 | `403` | `Only team leaders can remove members` (a leader of another team) |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` (a leader, while the team is frozen) |
 | `404` | `User is not in this team` (also for a malformed `userId`) |
 | `403` | `Only admin can remove a team leader` |
 | `400` | `This is the team's only leader. Make someone else a leader first, or delete the team.` |
@@ -502,9 +544,11 @@ Team tasks are ordinary tasks with `team` set. Assignees work on them and reques
 through the task endpoints in [Tasks.md](Tasks.md); a task's `status` becomes
 `completion-requested` once every assignee has asked.
 
-**Who may approve or reject:** admins, for any task in the team. A leader of the team, when they
-are not one of the task's assignees and every assignee is in a team they lead. A leader can assign
-a task to themselves, but then an admin or another leader of the team has to review it.
+**Who may approve or reject:** admins, for any task in the team, frozen or not. A leader of the
+team, while it isn't frozen, when they are not one of the task's assignees and every assignee is in
+a team they lead. A leader can assign a task to themselves, but then an admin or another leader of
+the team has to review it. The same leaders can edit and delete the task through
+`PUT /api/v2/tasks/:id` and `DELETE /api/v2/tasks/:id` (see [Tasks.md](Tasks.md)).
 
 ### List team tasks
 
@@ -513,8 +557,10 @@ a task to themselves, but then an admin or another leader of the team has to rev
 **Who:** admins, and the team's leaders and members.
 
 Returns every task of the team, newest first, with `assignedTo` populated (`name`, `email`,
-`profileImage`) and `createdBy`, `approvedBy`, `rejectedBy` and `completionRequestedBy`
-populated (`name`, `email`). No filters, not paged.
+`profileImage`), `createdBy`, `approvedBy`, `rejectedBy` and `completionRequestedBy` populated
+(`name`, `email`), and `editedBy` populated (`name`). `editedBy` and `editedAt` say who last
+changed the task's details and when; they are missing on a task nobody has edited. No filters, not
+paged. Works while the team is frozen.
 
 ```json
 {
@@ -531,7 +577,9 @@ populated (`name`, `email`). No filters, not paged.
       "priority": "high",
       "startDate": "2026-10-14T00:00:00.000Z",
       "dueDate": "2026-10-21T00:00:00.000Z",
-      "team": "6650a1f0c2b1a3d4e5f60100"
+      "team": "6650a1f0c2b1a3d4e5f60100",
+      "editedBy": { "_id": "6650a1f0c2b1a3d4e5f60002", "name": "Asha Rao" },
+      "editedAt": "2026-10-15T08:00:00.000Z"
     }
   ]
 }
@@ -546,7 +594,8 @@ populated (`name`, `email`). No filters, not paged.
 
 `POST /api/v2/teams/:teamId/tasks`
 
-**Who:** admins, and the team's leaders.
+**Who:** admins, and the team's leaders. Nobody can create one while the team is frozen, not even
+an admin.
 
 | Field | Required | Notes |
 |-------|----------|-------|
@@ -583,6 +632,7 @@ Other fields are ignored. The task starts as `pending`, with `createdBy` set to 
 |--------|---------|
 | `404` | `Team not found` |
 | `403` | `Only team leaders can create team tasks` (a leader of another team) |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` (admins too) |
 | `400` | `Assign the task to at least one team member` (`assignedTo` missing, empty or holding a malformed id) |
 | `400` | `All assignees must be members of the team` |
 | `400` | Schema messages, joined with `; `: `Task title is required`, `Task description is required`, `Start date is required`, `Due date is required`, `Due date cannot be before the start date`, `Invalid priority` |
@@ -591,7 +641,8 @@ Other fields are ignored. The task starts as `pending`, with `createdBy` set to 
 
 `GET /api/v2/teams/:teamId/tasks/pending-approval`
 
-**Who:** admins, and the team's leaders.
+**Who:** admins, and the team's leaders while the team isn't frozen. Admins can use it on a frozen
+team, whose waiting reviews go to them.
 
 Returns the team's tasks whose `status` is `completion-requested`, most recently requested first.
 For a leader, tasks assigned to them are left out. `assignedTo` (`name`, `email`, `profileImage`),
@@ -618,6 +669,7 @@ assignees have asked are not listed, although they can be approved.
 |--------|---------|
 | `404` | `Team not found` |
 | `403` | `Only team leaders can view pending approvals` (a leader of another team) |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` (a leader, while the team is frozen) |
 
 ### Approve a team task
 
@@ -648,6 +700,7 @@ marks every assignee's progress `completed`. Returns the task with `assignedTo`,
 |--------|---------|
 | `404` | `Team not found` |
 | `403` | `Only team leaders can approve tasks` (a leader of another team) |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` (a leader, while the team is frozen) |
 | `404` | `Task not found in this team` |
 | `403` | `You cannot approve a task assigned to you` (also when an assignee is outside the teams the leader leads, or the task has no assignees) |
 | `400` | `Task completion has not been requested` |
@@ -686,6 +739,7 @@ Allowed once at least one assignee has requested completion. Sends the task back
 |--------|---------|
 | `404` | `Team not found` |
 | `403` | `Only team leaders can reject tasks` (a leader of another team) |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` (a leader, while the team is frozen) |
 | `404` | `Task not found in this team` |
 | `403` | `You cannot reject a task assigned to you` (also when an assignee is outside the teams the leader leads, or the task has no assignees) |
 | `400` | `Task completion has not been requested` |
@@ -697,8 +751,8 @@ are matched by user, not by the record's `team` field: records from before someo
 included, and a former member's records drop out. Records are created through the attendance
 endpoints in [Attendance.md](Attendance.md).
 
-**Who may approve or disapprove:** admins, for anyone in the team. A leader of the team, for anyone
-in it except themselves.
+**Who may approve or disapprove:** admins, for anyone in the team, frozen or not. A leader of the
+team, for anyone in it except themselves, while the team isn't frozen.
 
 ### List team attendance
 
@@ -714,7 +768,7 @@ in it except themselves.
 
 Returns matching records, newest first, including the leader's own. `user` is populated (`name`,
 `email`, `department`, `profileImage`), `team` (`name`) and `approvedBy` (`name`, `email`). Not
-paged.
+paged. Works while the team is frozen.
 
 ```json
 {
@@ -745,7 +799,7 @@ paged.
 
 `GET /api/v2/teams/:teamId/attendance/pending`
 
-**Who:** admins, and the team's leaders.
+**Who:** admins, and the team's leaders while the team isn't frozen.
 
 Returns the team's records whose `approvalStatus` is `pending`, newest first, with `user` and
 `team` populated as above. A leader's own records are left out. Not paged.
@@ -758,6 +812,7 @@ Returns the team's records whose `approvalStatus` is `pending`, newest first, wi
 |--------|---------|
 | `404` | `Team not found` |
 | `403` | `Only team leaders can view pending attendance` (a leader of another team) |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` (a leader, while the team is frozen) |
 
 ### Approve a team attendance record
 
@@ -783,6 +838,7 @@ state. Returns the record with `user`, `team` and `approvedBy` populated.
 |--------|---------|
 | `404` | `Team not found` |
 | `403` | `Only team leaders can approve attendance` (a leader of another team) |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` (a leader, while the team is frozen) |
 | `404` | `Attendance record not found` |
 | `403` | `This attendance does not belong to your team` (the record's user isn't in this team; applies to admins too) |
 | `403` | `You cannot review your own attendance` |
@@ -812,6 +868,7 @@ approval.
 |--------|---------|
 | `404` | `Team not found` |
 | `403` | `Only team leaders can disapprove attendance` (a leader of another team) |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` (a leader, while the team is frozen) |
 | `404` | `Attendance record not found` |
 | `403` | `This attendance does not belong to your team` (the record's user isn't in this team; applies to admins too) |
 | `403` | `You cannot review your own attendance` |

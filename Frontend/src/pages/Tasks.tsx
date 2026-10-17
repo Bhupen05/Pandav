@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { taskAPI } from '../api/taskAPI'
+import { teamAPI } from '../api/teamAPI'
 import { getErrorMessage } from '../api/axios'
 import { useAuth } from '../context/useAuth'
 import { usePagination } from '../utils/usePagination'
@@ -23,6 +24,30 @@ export default function Tasks() {
   const [rejectingTaskId, setRejectingTaskId] = useState<string | null>(null)
   const [isRejectSubmitting, setIsRejectSubmitting] = useState(false)
   const { user, isAuthenticated, isAdmin } = useAuth()
+  // For a team leader: who is in the team they lead, and whether it is frozen
+  const [ledTeam, setLedTeam] = useState<{ memberIds: string[]; isActive: boolean } | null>(null)
+
+  useEffect(() => {
+    if (user?.role !== 'team_leader') return
+    teamAPI
+      .getMyTeam()
+      .then((response) => {
+        const team = response?.data
+        if (!team) return
+        const people: Array<{ _id: string }> = [...team.leaders, ...team.members]
+        setLedTeam({ memberIds: people.map((person) => person._id), isActive: team.isActive !== false })
+      })
+      .catch(() => setLedTeam(null))
+  }, [user?.role])
+
+  // Same rule as the server: admins manage every task; a leader manages a
+  // task when everyone on it is in their team (not frozen) and they aren't on it
+  const canManage = useCallback((task: TaskInput) => {
+    if (isAdmin) return true
+    if (!ledTeam?.isActive || !user) return false
+    const ids = task.assignedTo.map((assignee) => (typeof assignee === 'string' ? assignee : assignee._id))
+    return ids.length > 0 && !ids.includes(user._id) && ids.every((id) => ledTeam.memberIds.includes(id))
+  }, [isAdmin, ledTeam, user])
 
   useEffect(() => {
     if (isAuthenticated && user) {
@@ -436,6 +461,7 @@ export default function Tasks() {
               onEdit={handleEdit}
               onDelete={handleDelete}
               isAdmin={isAdmin}
+              canManage={canManage}
               currentUserId={user?._id}
             />
             

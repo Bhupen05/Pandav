@@ -11,7 +11,7 @@ import {
   getPendingApprovalTasks,
   getLeaderboard,
 } from '../controllers/taskController.js';
-import { protect, authorize, adminOrLeader } from '../middleware/auth.js';
+import { protect, adminOrLeader } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -31,6 +31,6 @@ router
   .route('/:id')
   .get(protect, getTask)
   .put(protect, updateTask)
-  .delete(protect, authorize('admin'), deleteTask);
+  .delete(protect, deleteTask);
 
 export default router;

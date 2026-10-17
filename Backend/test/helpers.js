@@ -110,14 +110,14 @@ export async function launchServer(suite, port, env = {}) {
       server.kill();
       throw new Error(`Server did not become healthy within 20s:\n${output}`);
     }
-    const healthy = await fetch(`${base}/api/health`).then((res) => res.ok, () => false);
+    const healthy = await fetch(`${base}/api/v2/health`).then((res) => res.ok, () => false);
     if (healthy) break;
     await sleep(100);
   }
 
   return {
     base,
-    api: apiClient(`${base}/api`),
+    api: apiClient(`${base}/api/v2`),
     stop: async () => {
       if (!exited) server.kill();
       await exit;
@@ -171,14 +171,21 @@ export function apiClient(apiBase) {
     return { token, ...(await me(token)) };
   };
 
-  return { call, login, me, register };
+  // Makes two registered users an accepted Social Hub connection, so they
+  // may message each other
+  const connect = async (a, b) => {
+    const request = (await call('POST', '/social/connections/request', { token: a.token, body: { userId: b._id } })).data.data;
+    await call('PATCH', `/social/connections/${request._id}/respond`, { token: b.token, body: { action: 'accepted' } });
+  };
+
+  return { call, login, me, register, connect };
 }
 
 // Opens a socket the way the app does: a ticket from the session, then the
 // socket. A session the server refuses leaves the socket without a ticket.
 export const connectSocket = async (base, token) => {
   const ticket = token
-    ? (await apiClient(`${base}/api`).call('POST', '/auth/socket-token', { token })).data?.data?.token
+    ? (await apiClient(`${base}/api/v2`).call('POST', '/auth/socket-token', { token })).data?.data?.token
     : undefined;
   return openSocket(base, ticket);
 };

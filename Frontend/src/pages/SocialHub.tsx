@@ -16,6 +16,7 @@ import {
   Users,
 } from 'lucide-react'
 import { socialV2API } from '../api/socialV2API'
+import ShareTaskDialog, { type ShareOffer } from '../components/ShareTaskDialog'
 import { useAuth } from '../context/useAuth'
 
 type Role = 'admin' | 'team_leader' | 'team_member' | 'user'
@@ -147,7 +148,7 @@ const initialTaskForm = {
   description: '',
   priority: 'medium' as 'low' | 'medium' | 'high',
   dueDate: '',
-  autoGenerateLinkedInPost: true,
+  autoGenerateLinkedInPost: false,
 }
 
 const initialTokenForm = {
@@ -269,6 +270,8 @@ export default function SocialHub() {
   const [submittingPost, setSubmittingPost] = useState(false)
   const [submittingTask, setSubmittingTask] = useState(false)
   const [busyMap, setBusyMap] = useState<Record<string, boolean>>({})
+  // A completed task's share draft, waiting for the owner to confirm it
+  const [shareOffer, setShareOffer] = useState<ShareOffer | null>(null)
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -489,9 +492,10 @@ export default function SocialHub() {
           current.map((task) => (task._id === taskId ? (response.data as PersonalTask) : task)),
         )
       }
-      if (response?.autoShare?.generated) {
-        await loadDashboard(true)
-        setNotice('Task completed and a social post was generated from it.')
+      // With auto-share on, the server only sends a draft; nothing is posted
+      // until the owner confirms it
+      if (response?.autoShare?.suggested) {
+        setShareOffer({ taskId, draft: response.autoShare.draft })
       }
     } catch (toggleError) {
       setError(toggleError instanceof Error ? toggleError.message : 'Unable to update personal task')
@@ -896,7 +900,7 @@ export default function SocialHub() {
                 </div>
                 <label className="flex items-center gap-3 rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-700">
                   <input type="checkbox" checked={taskForm.autoGenerateLinkedInPost} onChange={(event) => setTaskForm((current) => ({ ...current, autoGenerateLinkedInPost: event.target.checked }))} />
-                  Auto-generate a LinkedIn-target post when completed
+                  Offer to share it when completed (you see the post before anything goes out)
                 </label>
                 <button type="submit" disabled={submittingTask} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-bold text-white">
                   {submittingTask ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
@@ -1094,6 +1098,18 @@ export default function SocialHub() {
           </div>
         </div>
       </div>
+
+      {shareOffer && (
+        <ShareTaskDialog
+          offer={shareOffer}
+          onClose={() => setShareOffer(null)}
+          onShared={(summary) => {
+            setShareOffer(null)
+            setNotice(summary)
+            void loadDashboard(true)
+          }}
+        />
+      )}
     </div>
   )
 }

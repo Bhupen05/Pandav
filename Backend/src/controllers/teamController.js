@@ -7,7 +7,7 @@ import TeamChatMessage from '../models/TeamChatMessage.js';
 import mongoose from 'mongoose';
 import { escapeRegex, pick, sendServerError } from '../utils/http.js';
 import { dayRange } from '../utils/dates.js';
-import { canReviewFor, isInAnyTeam, teamUserIds } from '../utils/teams.js';
+import { FROZEN_TEAM_MESSAGE, canReviewFor, isInAnyTeam, isTeamLeader, teamUserIds } from '../utils/teams.js';
 
 const TEAM_ROLES = ['team_leader', 'team_member'];
 
@@ -33,6 +33,29 @@ const inviteeProblem = async (user) => {
 
 const isTextOrUnset = (value) => value === undefined || typeof value === 'string';
 
+// Loads the team in req.params.teamId for a leader's action, or sends why the
+// caller can't take it and returns null. Admins act on any team, frozen or
+// not, so a frozen team's waiting reviews go to them; leaders act only on
+// their own team while it is active.
+const findTeamToManage = async (req, res, action) => {
+  const team = await Team.findById(req.params.teamId);
+  if (!team) {
+    res.status(404).json({ success: false, message: 'Team not found' });
+    return null;
+  }
+  if (req.user.role !== 'admin') {
+    if (!isTeamLeader(team, req.user.id)) {
+      res.status(403).json({ success: false, message: `Only team leaders can ${action}` });
+      return null;
+    }
+    if (!team.isActive) {
+      res.status(400).json({ success: false, message: FROZEN_TEAM_MESSAGE });
+      return null;
+    }
+  }
+  return team;
+};
+
 // Fields a leader may set when creating a team task; progress and approval
 // go through the task workflow
 const TEAM_TASK_FIELDS = [
@@ -51,22 +74,16 @@ const TEAM_TASK_FIELDS = [
 
 // @desc    Create team
 // @route   POST /api/teams
-// @access  Private (Admin or team leader)
+// @access  Private. An admin picks the leader; anyone else who isn't in a
+//          team creates their own and becomes its leader.
 export const createTeam = async (req, res) => {
   try {
     const { name, description } = req.body;
-    let { leaderId } = req.body;
+    const isAdmin = req.user.role === 'admin';
+    const leaderId = isAdmin ? req.body.leaderId : req.user.id;
 
     if (typeof name !== 'string' || !name.trim() || !isTextOrUnset(description)) {
       return res.status(400).json({ success: false, message: 'A team name is required' });
-    }
-
-    if (req.user.role === 'team_leader') {
-      const existingTeam = await Team.findOne({ leaders: req.user.id });
-      if (existingTeam) {
-        return res.status(400).json({ success: false, message: 'You already manage a team' });
-      }
-      leaderId = req.user.id;
     }
 
     if (!leaderId) {
@@ -79,8 +96,11 @@ export const createTeam = async (req, res) => {
     }
 
     const problem = await leaderProblem(leader);
-    if (problem || (req.user.role === 'admin' && leader.teamId)) {
-      return res.status(400).json({ success: false, message: problem || 'Selected leader already belongs to a team' });
+    if (problem || (isAdmin && leader.teamId)) {
+      const message = isAdmin
+        ? problem || 'Selected leader already belongs to a team'
+        : 'You already belong to a team';
+      return res.status(400).json({ success: false, message });
     }
 
     const team = await Team.create({
@@ -190,7 +210,16 @@ export const updateTeam = async (req, res) => {
     if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
 
     // isLeaderOfTeam middleware already verified if not admin
-    const { name, description, isActive } = req.body;
+    if (!team.isActive && req.user.role !== 'admin') {
+      return res.status(400).json({ success: false, message: FROZEN_TEAM_MESSAGE });
+    }
+
+    const { name, description } = req.body;
+    // "true"/"false" as text are read as booleans, as on users
+    const isActive = ['true', 'false'].includes(req.body.isActive) ? req.body.isActive === 'true' : req.body.isActive;
+    if (isActive !== undefined && typeof isActive !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'isActive must be true or false' });
+    }
     if (!isTextOrUnset(name) || !isTextOrUnset(description) || (name !== undefined && !name.trim())) {
       return res.status(400).json({ success: false, message: 'Team name and description must be text' });
     }
@@ -260,7 +289,7 @@ export const inviteMember = async (req, res) => {
 
     const team = await Team.findById(teamId);
     if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
-    if (!team.isActive) return res.status(400).json({ success: false, message: 'This team is inactive' });
+    if (!team.isActive) return res.status(400).json({ success: false, message: FROZEN_TEAM_MESSAGE });
 
     // If username provided instead of userId, look up the user
     if (!userId && username) {
@@ -332,8 +361,11 @@ export const acceptInvite = async (req, res) => {
     }
 
     const team = invite.team;
-    if (!team || !team.isActive) {
+    if (!team) {
       return res.status(400).json({ success: false, message: 'This team no longer accepts members' });
+    }
+    if (!team.isActive) {
+      return res.status(400).json({ success: false, message: FROZEN_TEAM_MESSAGE });
     }
 
     // Things may have changed since the invite was sent
@@ -418,6 +450,9 @@ export const removeMember = async (req, res) => {
       if (!isLeader) {
         return res.status(403).json({ success: false, message: 'Only team leaders can remove members' });
       }
+      if (!team.isActive) {
+        return res.status(400).json({ success: false, message: FROZEN_TEAM_MESSAGE });
+      }
     }
 
     // Only people in this team can be removed from it
@@ -466,6 +501,7 @@ export const addLeader = async (req, res) => {
     const { userId } = req.body;
     const team = await Team.findById(req.params.teamId);
     if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
+    if (!team.isActive) return res.status(400).json({ success: false, message: FROZEN_TEAM_MESSAGE });
 
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
@@ -521,6 +557,7 @@ export const getTeamTasks = async (req, res) => {
       .populate('approvedBy', 'name email')
       .populate('rejectedBy', 'name email')
       .populate('completionRequestedBy', 'name email')
+      .populate('editedBy', 'name')
       .sort({ createdAt: -1 });
 
     res.json({ success: true, count: tasks.length, data: tasks });
@@ -536,15 +573,10 @@ export const createTeamTask = async (req, res) => {
   try {
     const { teamId } = req.params;
 
-    const team = await Team.findById(teamId);
-    if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
-
-    if (req.user.role !== 'admin') {
-      const isLeader = team.leaders.some(l => l.toString() === req.user.id.toString());
-      if (!isLeader) {
-        return res.status(403).json({ success: false, message: 'Only team leaders can create team tasks' });
-      }
-    }
+    const team = await findTeamToManage(req, res, 'create team tasks');
+    if (!team) return;
+    // A frozen team takes no new work, not even from an admin
+    if (!team.isActive) return res.status(400).json({ success: false, message: FROZEN_TEAM_MESSAGE });
 
     // Validate assignees are part of the team
     const allTeamUserIds = [
@@ -585,15 +617,8 @@ export const getTeamPendingApprovalTasks = async (req, res) => {
   try {
     const { teamId } = req.params;
 
-    const team = await Team.findById(teamId);
-    if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
-
-    if (req.user.role !== 'admin') {
-      const isLeader = team.leaders.some(l => l.toString() === req.user.id.toString());
-      if (!isLeader) {
-        return res.status(403).json({ success: false, message: 'Only team leaders can view pending approvals' });
-      }
-    }
+    const team = await findTeamToManage(req, res, 'view pending approvals');
+    if (!team) return;
 
     const filter = { team: teamId, status: 'completion-requested' };
     if (req.user.role !== 'admin') filter.assignedTo = { $ne: req.user._id };
@@ -617,15 +642,8 @@ export const approveTeamTask = async (req, res) => {
   try {
     const { teamId, taskId } = req.params;
 
-    const team = await Team.findById(teamId);
-    if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
-
-    if (req.user.role !== 'admin') {
-      const isLeader = team.leaders.some(l => l.toString() === req.user.id.toString());
-      if (!isLeader) {
-        return res.status(403).json({ success: false, message: 'Only team leaders can approve tasks' });
-      }
-    }
+    const team = await findTeamToManage(req, res, 'approve tasks');
+    if (!team) return;
 
     const task = await Task.findOne({ _id: taskId, team: teamId });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found in this team' });
@@ -660,15 +678,8 @@ export const rejectTeamTask = async (req, res) => {
   try {
     const { teamId, taskId } = req.params;
 
-    const team = await Team.findById(teamId);
-    if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
-
-    if (req.user.role !== 'admin') {
-      const isLeader = team.leaders.some(l => l.toString() === req.user.id.toString());
-      if (!isLeader) {
-        return res.status(403).json({ success: false, message: 'Only team leaders can reject tasks' });
-      }
-    }
+    const team = await findTeamToManage(req, res, 'reject tasks');
+    if (!team) return;
 
     const task = await Task.findOne({ _id: taskId, team: teamId });
     if (!task) return res.status(404).json({ success: false, message: 'Task not found in this team' });
@@ -747,17 +758,8 @@ export const getTeamAttendance = async (req, res) => {
 // @access  Private (Admin or team leader)
 export const getTeamPendingAttendance = async (req, res) => {
   try {
-    const { teamId } = req.params;
-
-    const team = await Team.findById(teamId);
-    if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
-
-    if (req.user.role !== 'admin') {
-      const isLeader = team.leaders.some(l => l.toString() === req.user.id.toString());
-      if (!isLeader) {
-        return res.status(403).json({ success: false, message: 'Only team leaders can view pending attendance' });
-      }
-    }
+    const team = await findTeamToManage(req, res, 'view pending attendance');
+    if (!team) return;
 
     const filter = { user: { $in: teamUserIds(team) }, approvalStatus: 'pending' };
     if (req.user.role !== 'admin') filter.user.$ne = req.user._id;
@@ -778,17 +780,10 @@ export const getTeamPendingAttendance = async (req, res) => {
 // @access  Private (Admin or team leader)
 export const approveTeamAttendance = async (req, res) => {
   try {
-    const { teamId, attendanceId } = req.params;
+    const { attendanceId } = req.params;
 
-    const team = await Team.findById(teamId);
-    if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
-
-    if (req.user.role !== 'admin') {
-      const isLeader = team.leaders.some(l => l.toString() === req.user.id.toString());
-      if (!isLeader) {
-        return res.status(403).json({ success: false, message: 'Only team leaders can approve attendance' });
-      }
-    }
+    const team = await findTeamToManage(req, res, 'approve attendance');
+    if (!team) return;
 
     const attendance = await Attendance.findById(attendanceId);
     if (!attendance) return res.status(404).json({ success: false, message: 'Attendance record not found' });
@@ -822,17 +817,10 @@ export const approveTeamAttendance = async (req, res) => {
 // @access  Private (Admin or team leader)
 export const disapproveTeamAttendance = async (req, res) => {
   try {
-    const { teamId, attendanceId } = req.params;
+    const { attendanceId } = req.params;
 
-    const team = await Team.findById(teamId);
-    if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
-
-    if (req.user.role !== 'admin') {
-      const isLeader = team.leaders.some(l => l.toString() === req.user.id.toString());
-      if (!isLeader) {
-        return res.status(403).json({ success: false, message: 'Only team leaders can disapprove attendance' });
-      }
-    }
+    const team = await findTeamToManage(req, res, 'disapprove attendance');
+    if (!team) return;
 
     const attendance = await Attendance.findById(attendanceId);
     if (!attendance) return res.status(404).json({ success: false, message: 'Attendance record not found' });

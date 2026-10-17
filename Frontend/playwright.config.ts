@@ -24,7 +24,7 @@ export default defineConfig({
   webServer: [
     {
       command: 'node ../Backend/test/e2e-server.js',
-      url: `http://127.0.0.1:${BACKEND_PORT}/api/health`,
+      url: `http://127.0.0.1:${BACKEND_PORT}/api/v2/health`,
       env: {
         E2E_BACKEND_PORT: String(BACKEND_PORT),
         E2E_CONTROL_PORT: new URL(CONTROL_URL).port,

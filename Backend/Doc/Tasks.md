@@ -4,8 +4,7 @@ A task is a piece of work that an admin or team leader assigns to one or more us
 assignee has their own entry in `assigneeProgress`, and the task's overall `status` follows those
 entries: it becomes `completion-requested` once every assignee has marked their part done, and
 only a reviewer (an admin, or a leader of the assignees' team who is not an assignee) can turn it
-into `completed` or send it back. Paths below use `/api/v2/tasks`; the same router is also mounted
-at `/api/v1/tasks` and the legacy `/api/tasks`. Team-scoped task endpoints
+into `completed` or send it back. Paths below use `/api/v2/tasks`. Team-scoped task endpoints
 (`/api/v2/teams/:teamId/tasks/...`) follow the same workflow and are covered in
 [Teams.md](Teams.md).
 
@@ -17,7 +16,9 @@ limits are covered in [README.md](README.md).
 - **Admin**: a user with `role: "admin"`.
 - **Team leader**: a user with `role: "team_leader"`. Their reach is everyone currently in the
   teams that list them in `leaders`: members, co-leaders and themselves. Membership is read at
-  request time, not from the task's `team` field.
+  request time, not from the task's `team` field. For reviewing, editing and deleting, only teams
+  that aren't frozen count (see [Teams.md](Teams.md#frozen-teams)); for viewing, frozen teams
+  count too.
 - **Assignee**: a user listed in the task's `assignedTo`.
 
 ## Task fields
@@ -26,7 +27,7 @@ limits are covered in [README.md](README.md).
 | --- | --- | --- | --- |
 | `title` | String | Required (`Task title is required`); trimmed | |
 | `description` | String | Required (`Task description is required`) | |
-| `assignedTo` | ObjectId[] (User) | User ids; creating a task needs at least one | `[]` |
+| `assignedTo` | ObjectId[] (User) | User ids; creating a task, or changing `assignedTo`, needs at least one | `[]` |
 | `createdBy` | ObjectId (User) | Required; always set by the server to the caller | |
 | `status` | String | `pending`, `in-progress`, `completion-requested`, `completed`, `cancelled` | `pending` |
 | `priority` | String | `low`, `medium`, `high`, `urgent` | `medium` |
@@ -49,23 +50,30 @@ limits are covered in [README.md](README.md).
 | `rejectionReason` | String | Trimmed; set on rejection | |
 | `rejectedBy` | ObjectId (User) | Set on rejection | |
 | `rejectedAt` | Date | Set on rejection | |
+| `editedBy` | ObjectId (User) | The admin or team leader who last changed the task with `PUT /tasks/:id` | |
+| `editedAt` | Date | When that change was made | |
 | `createdAt`, `updatedAt` | Date | Mongoose timestamps | |
 
 Request bodies can only set `title`, `description`, `assignedTo`, `status`, `priority`,
-`startDate`, `dueDate`, `estimatedDays`, `tags` and `notes`; any other key is ignored. A due date
-before the start date fails with `Due date cannot be before the start date`.
+`startDate`, `dueDate`, `estimatedDays`, `tags` and `notes` (team leaders all but `status`); any
+other key is ignored. A due date before the start date fails with
+`Due date cannot be before the start date`.
+
+`editedBy` and `editedAt` are set only when an admin or team leader's `PUT /tasks/:id` actually
+changes one of those fields. Saving without a change, an assignee starting work, requesting
+completion, approval and rejection leave them alone.
 
 In responses, `assignedTo`, `createdBy`, `completionRequestedBy`, `approvedBy` and `rejectedBy` are
-populated with `_id`, `name` and `email`. `team` and `assigneeProgress[].user` stay plain ids.
-Fields without a value are left out. The model's `durationInDays` virtual is not included in JSON
-responses.
+populated with `_id`, `name` and `email`, and `editedBy` with `_id` and `name`. `team` and
+`assigneeProgress[].user` stay plain ids. Fields without a value are left out. The model's
+`durationInDays` virtual is not included in JSON responses.
 
 ## Status workflow
 
 1. **Create.** Each assignee gets a progress entry whose starting value follows the task's
    `status`: `in-progress`, `completion-requested` and `completed` carry over; `pending` and
-   `cancelled` give `not-started`. Assignees added later by an admin get an entry the same way,
-   and entries for removed assignees are dropped.
+   `cancelled` give `not-started`. Assignees added later by an admin or team leader get an entry
+   the same way, and entries for removed assignees are dropped.
 2. **Start.** An assignee whose own progress is `not-started` sends `PUT /tasks/:id` with
    `{"status": "in-progress"}` while the task is `pending` or `in-progress`. Their progress and the
    task both become `in-progress`.
@@ -87,8 +95,9 @@ responses.
    other value leaves progress unchanged. `cancelled` is only reachable this way.
 
 **Who reviews.** Admins can approve or reject any task. A team leader can review a task only when
-every assignee is in a team they lead and they are not an assignee themselves, so a leader's own
-tasks go to an admin or a co-leader.
+every assignee is in a team they lead that isn't frozen and they are not an assignee themselves,
+so a leader's own tasks go to an admin or a co-leader, and a frozen team's tasks go to an admin.
+The same people can edit and delete the task.
 
 ## Endpoints
 
@@ -101,8 +110,8 @@ Schema validation failures return `400` with the schema's message. JSON examples
 | GET | `/api/v2/tasks` | Any signed-in user; results limited by role |
 | POST | `/api/v2/tasks` | Admin, team leader |
 | GET | `/api/v2/tasks/:id` | Admin, assignee, leader of an assignee's team |
-| PUT | `/api/v2/tasks/:id` | Admin (any field); assignee (start own part only) |
-| DELETE | `/api/v2/tasks/:id` | Admin |
+| PUT | `/api/v2/tasks/:id` | Admin (any field); team leader of every assignee who is not an assignee (any field but `status`); assignee (start own part only) |
+| DELETE | `/api/v2/tasks/:id` | Admin; team leader of every assignee who is not an assignee |
 | POST | `/api/v2/tasks/:id/request-completion` | Assignee |
 | PUT | `/api/v2/tasks/:id/approve` | Admin; team leader of every assignee who is not an assignee |
 | PUT | `/api/v2/tasks/:id/reject` | Admin; team leader of every assignee who is not an assignee |
@@ -156,8 +165,9 @@ Results are sorted newest first (`createdAt` descending).
 `POST /api/v2/tasks`
 
 **Who may call:** admins and team leaders. A team leader can only assign people who are all in one
-team they lead (they may include themselves); the task's `team` is set to that team. Tasks created
-by admins have `team: null`, and their assignee ids are not checked against existing users.
+team they lead (they may include themselves), and that team must not be frozen; the task's `team`
+is set to that team. Tasks created by admins have `team: null`, and their assignee ids are not
+checked against existing users.
 
 **Body**
 
@@ -198,6 +208,8 @@ by admins have `team: null`, and their assignee ids are not checked against exis
 - `400` `Task must be assigned to at least one user`: `assignedTo` missing or empty.
 - `403` `You can only assign tasks to members of your team`: a team leader listed someone outside
   every team they lead, or leads no team.
+- `400` `This team is frozen. An admin has to unfreeze it before anything can change.`: the team
+  leader's team is frozen.
 - `400` validation message, for example `Task title is required`,
   `Due date cannot be before the start date` or `Invalid priority`.
 
@@ -227,6 +239,8 @@ lead.
     "estimatedDays": 3,
     "tags": ["release"],
     "team": "6710a0aae4b0f5a3c8d90a01",
+    "editedBy": { "_id": "6710a0f1e4b0f5a3c8d90b01", "name": "Neha Iyer" },
+    "editedAt": "2026-10-13T08:00:00.000Z",
     "assigneeProgress": [
       {
         "user": "6710a0f1e4b0f5a3c8d90b11",
@@ -257,12 +271,18 @@ lead.
 - Admins can change any writable field (see [Task fields](#task-fields)). Status changes have the
   side effects in step 5 of the [status workflow](#status-workflow); changing `assignedTo` adds or
   drops progress entries.
+- A team leader can edit a task when every assignee is in a team they lead that isn't frozen and
+  they are not an assignee themselves (the same rule as for approving). They can change every
+  writable field except `status`, which is ignored. A new `assignedTo` must also be made up only of
+  people in those teams, not including the leader.
 - Any other caller (team leaders included) can only start their own part: they must be an
   assignee, send `{"status": "in-progress"}`, have progress `not-started`, and the task must be
-  `pending` or `in-progress`. Other body fields are ignored. Team leaders cannot edit tasks they
-  are not assigned to.
+  `pending` or `in-progress`. Other body fields are ignored.
 
-Returns `200` with the updated task (same shape as [Get a task](#get-a-task)) and no `message`.
+An `assignedTo` sent by an admin or team leader must hold at least one user id (a single id string
+is also accepted). An edit that changes anything sets `editedBy` to the caller and `editedAt` to
+now. Returns `200` with the updated task (same shape as [Get a task](#get-a-task)) and no
+`message`.
 
 ```json
 {
@@ -280,16 +300,23 @@ Returns `200` with the updated task (same shape as [Get a task](#get-a-task)) an
 **Errors**
 
 - `404` `Task not found`
-- `403` `Not authorized to make this change to the task`: a non-admin who is not an assignee, sent
-  anything other than `status: "in-progress"`, has already started or finished their part, or the
-  task is `completion-requested`, `completed` or `cancelled`.
+- `400` `Task must be assigned to at least one user`: an admin or team leader sent an empty
+  `assignedTo`.
+- `403` `You can only assign tasks to members of your team`: a team leader's new `assignedTo`
+  includes someone outside the teams they lead, a frozen team's member, or themselves.
+- `403` `Not authorized to make this change to the task`: a caller who can't edit the task and is
+  not an assignee, sent anything other than `status: "in-progress"`, has already started or
+  finished their part, or the task is `completion-requested`, `completed` or `cancelled`. This is
+  also what the leader of a frozen team gets.
 - `400` validation message, for example `Due date cannot be before the start date`.
 
 ### Delete a task
 
 `DELETE /api/v2/tasks/:id`
 
-**Who may call:** admins. The task is removed permanently.
+**Who may call:** admins, and team leaders when every assignee is in a team they lead that isn't
+frozen and they are not an assignee (the same rule as for editing). The task is removed
+permanently.
 
 ```json
 { "success": true, "message": "Task deleted successfully" }
@@ -297,8 +324,8 @@ Returns `200` with the updated task (same shape as [Get a task](#get-a-task)) an
 
 **Errors**
 
-- `403` `User role <role> is not authorized to access this route`
 - `404` `Task not found`
+- `403` `Not authorized to delete this task`
 
 ### Request completion
 
@@ -338,8 +365,8 @@ The `message` tells the caller whether the task went to review:
 
 `PUT /api/v2/tasks/:id/approve`
 
-**Who may call:** admins, and team leaders when every assignee is in a team they lead and they are
-not an assignee. No body.
+**Who may call:** admins, and team leaders when every assignee is in a team they lead that isn't
+frozen and they are not an assignee. No body.
 
 Allowed once the task is `completion-requested` or any assignee's progress is. Sets the task to
 `completed`, every assignee's progress to `completed`, and `approvedBy`, `approvedAt` and
@@ -409,8 +436,9 @@ step 4 of the [status workflow](#status-workflow).
 **Who may call:** admins and team leaders.
 
 Returns tasks whose `status` is `completion-requested`, newest request first
-(`completionRequestedAt` descending). Admins see all of them. Team leaders see those with at least
-one assignee in the teams they lead other than themselves, excluding tasks they are assigned to.
+(`completionRequestedAt` descending). Admins see all of them, frozen teams' included. Team leaders
+see those with at least one assignee in the teams they lead other than themselves, excluding tasks
+they are assigned to and leaving out frozen teams, whose tasks wait for an admin.
 Tasks where only some assignees have finished are not listed, although they can already be
 approved. A listed task with an assignee outside the leader's teams still returns `403` on approve
 or reject. Supports `page` and `limit`; the response has the same shape as

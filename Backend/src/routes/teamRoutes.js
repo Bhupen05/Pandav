@@ -37,7 +37,7 @@ router.get('/my', protect, getMyTeam);
 // ── Team CRUD ─────────────────────────────────────────────────────────────────
 router.route('/')
   .get(protect, authorize('admin'), getTeams)
-  .post(protect, adminOrLeader, createTeam);
+  .post(protect, createTeam);
 
 router.route('/:id')
   .get(protect, getTeam)

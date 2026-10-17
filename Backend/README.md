@@ -46,7 +46,7 @@ All of them are described in [`.env.example`](.env.example).
 | `APP_TIMEZONE` | No | Which calendar day an attendance record belongs to (default `Asia/Kolkata`) |
 | `CLIENT_URL` | Production | The deployed frontend's origin (comma-separated for several); browsers elsewhere can't save data |
 | `ORIGIN_SECRET` | Production | Shared with the frontend's `/api` proxy; requests that skip the proxy are refused and rate limits count each visitor |
-| `API_V1_PREFIX`, `API_V2_PREFIX` | No | Default `/api/v1` and `/api/v2` |
+| `API_V2_PREFIX` | No | Where the API is served (default `/api/v2`); the frontend proxy and tests assume the default |
 | `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `SEED_USER_EMAIL`, `SEED_USER_PASSWORD` | No | Accounts `create-users.js` creates (random passwords if unset) |
 | `GITHUB_*`, `LINKEDIN_*` | For the Social Hub's linked accounts | OAuth client ids, secrets, redirect URIs and scopes |
 | `GITHUB_DEFAULT_REPO` | No | Repository (`owner/repo`) to publish to when a request names none |

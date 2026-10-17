@@ -43,6 +43,9 @@ export const socialV2API = {
     (await api.patch(`/social/personal-tasks/${taskId}`, payload)).data,
   togglePersonalTask: async (taskId: string) =>
     (await api.patch(`/social/personal-tasks/${taskId}/toggle-complete`)).data,
+  // Posts a completed task after its owner reviewed the draft
+  sharePersonalTask: async (taskId: string, payload: { content?: string; linkedin?: boolean }) =>
+    (await api.post(`/social/personal-tasks/${taskId}/share`, payload)).data,
   deletePersonalTask: async (taskId: string) =>
     (await api.delete(`/social/personal-tasks/${taskId}`)).data,
 

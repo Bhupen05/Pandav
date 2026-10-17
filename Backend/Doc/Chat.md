@@ -1,10 +1,11 @@
 # Chat
 
-Pandav has two kinds of chat. Direct messages go between two users: any signed-in user can message
-any active user. Team chat is one shared conversation per team for its leaders and members;
-admins can read and write every team's chat but leave no read receipts. Messages are sent and
-loaded over HTTP, and a Socket.io connection pushes new messages, read receipts, typing indicators
-and who is online. All HTTP paths below are under `/api/v2/chat`.
+Pandav has two kinds of chat. Direct messages go between two users, when the sender is allowed to
+message the recipient (see [Who can message whom](#who-can-message-whom)). Team chat is one shared
+conversation per team for its leaders and members; admins can read and write every team's chat but
+leave no read receipts. A frozen team's chat can be read but takes no new messages. Messages are
+sent and loaded over HTTP, and a Socket.io connection pushes new messages, read receipts, typing
+indicators and who is online. All HTTP paths below are under `/api/v2/chat`.
 
 Sign-in, the session cookie, allowed origins, the error format, paging and rate limits are covered
 in [README.md](README.md).
@@ -41,6 +42,27 @@ conversations and in the unread counts.
 
 Deleting a team deletes its messages. Deleting a user deletes their direct messages (sent and
 received), their team messages and their entries in `readBy`.
+
+## Who can message whom
+
+One rule decides who may send a direct message, in this chat (`POST /chat/send`), in the Social
+Hub (`POST /api/v2/social/messages`) and for typing indicators. A sender may message an active user
+other than themselves when:
+
+- the sender is an admin;
+- they are in the same team, and that team isn't frozen (see [Teams.md](Teams.md#frozen-teams));
+- they have an accepted Social Hub connection, in either direction (see
+  [SocialHub.md](SocialHub.md)); or
+- the recipient has messaged the sender before, so anyone can reply.
+
+Team leaders have no exception of their own: outside their team they need one of these reasons too.
+Reading needs none of them, because each user only ever reads their own conversations.
+`GET /api/v2/users/chat-list` lists the people the caller may message (see [Users.md](Users.md)).
+
+Direct messages are limited to 45 a minute per sender, counted across `POST /chat/send` and
+`POST /api/v2/social/messages` together. Over the limit the answer is `429` with a `Retry-After`
+header and `Too many requests. Try again in <n> seconds.` Requests count before the message is
+checked, so refused ones use up the limit too.
 
 ## Connecting to the socket
 
@@ -90,12 +112,12 @@ resets its password.
 
 | Method | Path | Who may call |
 |--------|------|--------------|
-| `POST` | `/api/v2/chat/send` | Any signed-in user |
+| `POST` | `/api/v2/chat/send` | Any signed-in user, to someone they may message (see [Who can message whom](#who-can-message-whom)) |
 | `GET` | `/api/v2/chat/messages/:userId` | Any signed-in user, for their own conversation with `:userId` |
 | `PATCH` | `/api/v2/chat/messages/:messageId/read` | The message's receiver |
 | `PUT` | `/api/v2/chat/read/:userId` | Any signed-in user |
 | `GET` | `/api/v2/chat/unread` | Any signed-in user |
-| `POST` | `/api/v2/chat/teams/:teamId/send` | Admins; the team's leaders and members |
+| `POST` | `/api/v2/chat/teams/:teamId/send` | Admins; the team's leaders and members. Not while the team is frozen |
 | `GET` | `/api/v2/chat/teams/:teamId/messages` | Admins; the team's leaders and members |
 | `PATCH` | `/api/v2/chat/teams/:teamId/read` | Admins (records nothing); the team's leaders and members |
 | `GET` | `/api/v2/chat/teams/chats` | Any signed-in user |
@@ -104,11 +126,13 @@ resets its password.
 
 `POST /api/v2/chat/send`
 
-**Who:** any signed-in user. No connection or shared team is needed.
+**Who:** any signed-in user, to someone they may message under
+[Who can message whom](#who-can-message-whom). Rate limited to 45 a minute, shared with the Social
+Hub's `POST /messages`.
 
 | Field | Required | Notes |
 |-------|----------|-------|
-| `receiverId` | Yes | Id of an active user |
+| `receiverId` | Yes | Id of an active user other than the caller |
 | `message` | Yes | Non-blank string of at most 2000 characters (counted before trimming). Stored trimmed |
 
 Stores the message and sends it to the receiver's sockets as `receive_message`. The sender's
@@ -129,10 +153,13 @@ other tabs are not told. Returns `201` with the message itself, not wrapped in
 
 | Status | Message |
 |--------|---------|
-| `400` | `Invalid receiver` (`receiverId` is not an id) |
 | `400` | `Message cannot be empty` |
 | `400` | `Message cannot be longer than 2000 characters` |
+| `400` | `Invalid receiver` (`receiverId` is not an id) |
+| `400` | `You cannot message yourself` |
 | `404` | `Recipient not found` (no active user has that id) |
+| `403` | `Connect with this person in the Social Hub before messaging them` (none of the reasons in [Who can message whom](#who-can-message-whom) applies) |
+| `429` | `Too many requests. Try again in <n> seconds.` |
 
 ### Get a conversation
 
@@ -246,8 +273,9 @@ nothing unread are left out.
 |-------|----------|-------|
 | `message` | Yes | Non-blank string of at most 2000 characters (counted before trimming). Stored trimmed |
 
-The team must exist and be active. Stores the message, sends it as `receive_team_message` to every
-leader and member of the team (the sender included), and records a `team_message_sent` audit
+The team must exist and not be frozen; a frozen team's chat takes no new messages, from admins
+either. Stores the message, sends it as `receive_team_message` to every leader and member of the
+team (the sender included), and records a `team_message_sent` audit
 event. Admins aren't in any team, so an admin's sockets don't receive team messages, not even
 their own. Returns `201` with the message; `team` and `sender` are populated with `name`.
 
@@ -274,8 +302,9 @@ their own. Returns `201` with the message; `team` and `sender` are populated wit
 | `400` | `Message is required` |
 | `400` | `Message cannot be longer than 2000 characters` |
 | `400` | `Invalid _id` (`:teamId` is not an id) |
-| `404` | `Team not found or inactive` |
+| `404` | `Team not found` |
 | `403` | `Not authorized for this team chat` |
+| `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` |
 
 The message is checked before the team, so an invalid message gets `400` even for a team that
 doesn't exist.
@@ -284,7 +313,7 @@ doesn't exist.
 
 `GET /api/v2/chat/teams/:teamId/messages`
 
-**Who:** the team's leaders and members, and admins.
+**Who:** the team's leaders and members, and admins. Works while the team is frozen.
 
 | Query | Notes |
 |-------|-------|
@@ -329,7 +358,7 @@ read](#mark-team-messages-as-read) for that.
 | Status | Message |
 |--------|---------|
 | `400` | `Invalid _id` |
-| `404` | `Team not found or inactive` |
+| `404` | `Team not found` |
 | `403` | `Not authorized for this team chat` |
 | `400` | `Invalid before date` |
 
@@ -338,6 +367,7 @@ read](#mark-team-messages-as-read) for that.
 `PATCH /api/v2/chat/teams/:teamId/read`
 
 **Who:** the team's leaders and members. Admins may call it, but nothing is recorded for them.
+Works while the team is frozen.
 
 For a leader or member: adds `{ user, readAt }` to `readBy` on every message in the team, sent up
 to now, that the caller didn't send and hasn't read yet. If any message changed, every leader and
@@ -353,7 +383,7 @@ For an admin: returns `{ "success": true, "count": 0 }`, changes nothing and sen
 | Status | Message |
 |--------|---------|
 | `400` | `Invalid _id` |
-| `404` | `Team not found or inactive` |
+| `404` | `Team not found` |
 | `403` | `Not authorized for this team chat` |
 
 ### List my team chats
@@ -362,11 +392,11 @@ For an admin: returns `{ "success": true, "count": 0 }`, changes nothing and sen
 
 **Who:** any signed-in user.
 
-For admins, every team, inactive ones included (opening an inactive team's chat gives `404`). For
-everyone else, the team they lead or belong to; an empty list if none. Teams are ordered by the
-team's own `updatedAt`, newest first, not by their latest message. Each entry has the team's id
-and name and its latest message; the `lastMessage*` fields are `null` for a team with no messages.
-`lastMessageSender` is a user id.
+For admins, every team, frozen ones included. For everyone else, the team they lead or belong to;
+an empty list if none. Teams are ordered by their latest message, newest first; teams with no
+messages come last, sorted by name. Each entry has the team's id and name, `isActive` (`false`
+while the team is frozen: its chat can be read but takes no new messages) and its latest message;
+the `lastMessage*` fields are `null` for a team with no messages. `lastMessageSender` is a user id.
 
 ```json
 {
@@ -376,6 +406,7 @@ and name and its latest message; the `lastMessage*` fields are `null` for a team
     {
       "teamId": "6650a1f0c2b1a3d4e5f60100",
       "teamName": "Design",
+      "isActive": true,
       "lastMessage": "Stand-up moves to 11:00 today",
       "lastMessageSender": "6650a1f0c2b1a3d4e5f60002",
       "lastMessageAt": "2026-10-17T09:30:00.000Z"
@@ -405,6 +436,7 @@ catches up over HTTP (unread counts and message lists).
 Typing indicators are for direct chats only; there are none for team chat. The client sends only
 the recipient: `userId` and `userName` in the relayed event come from the sender's ticket. The
 server relays the event to the recipient's sockets when `recipientId` is a string, is not the
-sender's own id, and belongs to an active user (checked the first time per connection). This is the
-same rule as for sending a direct message, so no connection or shared team is needed. Otherwise
-the event is dropped without a reply, as is any payload that isn't an object.
+sender's own id, and the sender may message that user under
+[Who can message whom](#who-can-message-whom). An allowed recipient is remembered for the rest of
+the connection; a refused one is checked again on the next event. Otherwise the event is dropped
+without a reply, as is any payload that isn't an object.

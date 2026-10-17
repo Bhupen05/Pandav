@@ -19,12 +19,18 @@ Use `/api/v2`, as the frontend does. In development the backend listens on
 `http://localhost:5000` (`PORT`); the frontend reaches it through its own `/api` path (Vite's proxy
 locally, Vercel's in production), so browsers only ever talk to the frontend's origin.
 
-The same routers are also mounted under `/api/v1` and, for older clients, directly under `/api`
-(for example `/api/tasks`). New code should use `/api/v2`. The Social Hub exists only under
-`/api/v2/social`.
+The API is mounted only under `/api/v2`. The older copies under `/api/v1` and directly under
+`/api` (for example `/api/tasks`) are gone.
 
-Health checks: `GET /api/health` and `GET /api/v1/health` answer 503 while the database is
-unreachable; `GET /api/v2/health` (also `/api/v2/status`) only says the process is running.
+Health check: `GET /api/v2/health` (also `/api/v2/status`). It needs no session and no proxy
+secret. It answers `200` while the database is connected:
+
+```json
+{ "status": "OK", "version": "v2", "database": "connected", "timestamp": "2026-10-17T10:00:00.000Z" }
+```
+
+and `503` while the database is unreachable, with `status: "UNAVAILABLE"` and
+`database: "disconnected"`.
 
 ## Signing in and sessions
 
@@ -63,12 +69,13 @@ the frontend's proxy). They authenticate with a one-minute ticket from
 | Role | Can |
 |------|-----|
 | `admin` | Everything, including user administration and moderation. Never belongs to a team |
-| `team_leader` | Lead one team: invite and remove members, review their tasks and attendance (never their own) |
+| `team_leader` | Lead one team: invite and remove members, review, edit and delete their tasks, review their attendance (never their own). Not while an admin has frozen the team |
 | `team_member` | Belong to one team |
 | `user` | Their own tasks, attendance, chat and Social Hub |
 
 Team roles follow team membership: they are given and taken away by the team endpoints, not set
-directly. See [Teams.md](Teams.md).
+directly. A user who isn't in a team can create one and becomes its leader; an admin creating a
+team names its leader. See [Teams.md](Teams.md).
 
 ## Where requests may come from
 
@@ -138,7 +145,7 @@ feed posts newest first.
 | `POST /auth/register` | 10 per hour | Address |
 | `POST /contact` | 5 per hour | Address |
 | Social Hub writes | 30 per minute | User |
-| Social Hub messages | 45 per minute | User |
+| Direct messages: `POST /chat/send` and `POST /social/messages`, counted together | 45 per minute | User |
 | Social Hub account linking and OAuth | 10 per minute | User |
 
 The limits live in the server's memory, so they reset on restart and assume a single instance.

@@ -75,9 +75,12 @@ export const getAttendanceById = async (req, res) => {
       });
     }
 
-    // The user themselves, an admin, or their team leader
+    // The user themselves, an admin, or their team leader: the same people who
+    // see it in the list, so a frozen team's leader can still look it up
     const isOwn = attendance.user?._id.toString() === req.user.id;
-    if (!isOwn && !(await canReviewFor(req.user, [attendance.user]))) {
+    const isTheirLeader = req.user.role === 'team_leader' &&
+      (await ledUserIds(req.user.id)).includes(String(attendance.user?._id));
+    if (!isOwn && req.user.role !== 'admin' && !isTheirLeader) {
       return res.status(403).json({
         success: false,
         message: 'Not authorized to access this record'

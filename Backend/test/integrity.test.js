@@ -20,7 +20,7 @@ after(async () => {
 
 test('integrity', async (t) => {
   const check = checker(t);
-  const { call, login, register } = server.api;
+  const { call, connect, login, register } = server.api;
 
   const adminToken = await login(ADMIN);
   const alice = await register('Alice', 'alice3@test.com');
@@ -121,6 +121,8 @@ test('integrity', async (t) => {
   await check('lists without ?page still return everything', (await call('GET', '/tasks', { token: adminToken })).data.data.length >= 2);
 
   // ---------- Chat: read state and paging ----------
+  await connect(alice, bob);
+  await connect(carol, bob);
   for (let i = 0; i < 3; i++) await call('POST', '/chat/send', { token: alice.token, body: { receiverId: bob._id, message: `hi ${i}` } });
   const unread = await call('GET', '/chat/unread', { token: bob.token });
   await check('unread counts come from the server', unread.data.data[alice._id] === 3, JSON.stringify(unread.data));
@@ -130,7 +132,12 @@ test('integrity', async (t) => {
   await call('PUT', `/chat/read/${alice._id}`, { token: bob.token });
   await check('mark-as-read endpoint clears new messages', !(await call('GET', '/chat/unread', { token: bob.token })).data.data[alice._id]);
 
-  for (let i = 0; i < 52; i++) await call('POST', '/chat/send', { token: carol.token, body: { receiverId: bob._id, message: `bulk ${i}` } });
+  // Written directly: sending 52 through the API would hit the limit of 45 a minute
+  const start = Date.now() - 60_000;
+  await db.collection('chats').insertMany(Array.from({ length: 52 }, (_, i) => ({
+    sender: new mongoose.Types.ObjectId(carol._id), receiver: new mongoose.Types.ObjectId(bob._id),
+    message: `bulk ${i}`, timestamp: new Date(start + i * 100), isRead: false,
+  })));
   const latest = await call('GET', `/chat/messages/${carol._id}`, { token: bob.token });
   await check('conversation loads the latest 50, oldest first', latest.data.data.length === 50 && latest.data.hasMore === true && latest.data.data.at(-1).message === 'bulk 51', `${latest.data.data.length} ${latest.data.hasMore}`);
   const older = await call('GET', `/chat/messages/${carol._id}?before=${encodeURIComponent(latest.data.data[0].timestamp)}`, { token: bob.token });
@@ -161,7 +168,7 @@ test('integrity', async (t) => {
 
 test('team chat pages and read receipts; a team keeps a leader', async (t) => {
   const check = checker(t);
-  const { call, login, me, register } = server.api;
+  const { call, connect, login, me, register } = server.api;
   const sockets = [];
   t.after(() => sockets.forEach(({ socket }) => socket.close()));
   const openSocket = async (user) => {
@@ -236,6 +243,10 @@ test('team chat pages and read receipts; a team keeps a leader', async (t) => {
   eveSocket.on('user_typing', (data) => typing.push(data));
   const gusSocket = await openSocket(gus);
   gusSocket.emit('typing', { recipientId: eve._id });
+  await sleep(300);
+  await check("typing doesn't reach someone the user may not message", typing.length === 0, JSON.stringify(typing));
+  await connect(gus, eve);
+  gusSocket.emit('typing', { recipientId: eve._id });
   gusSocket.emit('typing', { recipientId: 'not-a-user' });
   gusSocket.emit('typing', {});
   // These used to throw inside the handler and stop the whole server
@@ -245,7 +256,7 @@ test('team chat pages and read receipts; a team keeps a leader', async (t) => {
   await sleep(400);
   await check('typing reaches someone the user can message', typing.length === 1 && typing[0].userId === gus._id, JSON.stringify(typing));
   await check("and bad recipients don't break the socket", gusSocket.connected);
-  const health = await fetch(`${server.base}/api/health`).then((res) => res.status, () => 'unreachable');
+  const health = await fetch(`${server.base}/api/v2/health`).then((res) => res.status, () => 'unreachable');
   await check('malformed typing events leave the server running', health === 200, `health: ${health}`);
 
   // ---------- A team with nobody in it (data from before leaders were required) ----------

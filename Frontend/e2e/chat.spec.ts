@@ -19,8 +19,13 @@ const send = async (page: Page, to: Account, text: string) => {
 }
 
 test('chat messages arrive live, also after the backend restarts', async ({ browser }) => {
+  // The user isn't in a team or connected with anyone, so the admin (who may
+  // message anyone) writes first; after that the user can answer
   const admin = await openConversation(browser, ADMIN, USER)
+  const welcome = `Welcome from the e2e test ${Date.now()}`
+  await send(admin, USER, welcome)
   const user = await openConversation(browser, USER, ADMIN)
+  await expect(user.getByText(welcome)).toBeVisible()
   // Each sees the other online once both sockets are connected
   await expect(contact(admin, USER)).toContainText('online')
   await expect(contact(user, ADMIN)).toContainText('online')
