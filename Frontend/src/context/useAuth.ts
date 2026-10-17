@@ -5,15 +5,15 @@ export type { User };
 
 export interface AuthContextType {
   user: User | null;
-  token: string | null;
   isAuthenticated: boolean;
   isAdmin: boolean;
   isTeamLeader: boolean;
   isTeamMember: boolean;
-  // True while a session restored from storage is being confirmed with the server
+  // True until the server has said whether this browser is signed in
   loading: boolean;
   login: (email: string, password: string, rememberMe?: boolean) => Promise<User>;
-  logout: () => void;
+  // Rejects, leaving the user signed in, if the server can't clear the session
+  logout: () => Promise<void>;
   updateUser: (user: User) => void;
 }
 

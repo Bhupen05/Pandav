@@ -1,6 +1,6 @@
 const store = new Map();
 
-const getKey = (req, keyPrefix) => `${keyPrefix}:${req.user?._id || req.ip || 'anon'}`;
+const getKey = (req, keyPrefix) => `${keyPrefix}:${req.user?._id || req.clientIp || req.ip || 'anon'}`;
 
 export const createRateLimiterV2 = ({ keyPrefix, windowMs, max }) => {
   return (req, res, next) => {

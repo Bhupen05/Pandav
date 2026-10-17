@@ -3,6 +3,8 @@ import api from './axios';
 interface LoginCredentials {
   email: string;
   password: string;
+  // Keep the session after the browser closes
+  rememberMe?: boolean;
 }
 
 export interface RegisterData {
@@ -32,7 +34,7 @@ export interface User {
   teamId?: string | null;
 }
 
-// Keeps the profile fields of a user returned by the API (login also sends the token)
+// Keeps the profile fields of a user returned by the API
 const toUser = (data: User): User => ({
   _id: data._id,
   name: data.name,
@@ -52,24 +54,26 @@ export const authAPI = {
     return response.data;
   },
 
-  // Login user. Storing the session is up to the caller (AuthProvider).
+  // Login user. The server signs this browser in with an HttpOnly cookie.
   login: async (credentials: LoginCredentials) => {
     const response = await api.post('/auth/login', {
       email: credentials.email.trim(),
       password: credentials.password,
+      rememberMe: credentials.rememberMe === true,
     });
     const { success, data, message } = response.data;
     return {
       success: Boolean(success),
       message: message as string | undefined,
-      token: data?.token as string | undefined,
       user: data ? toUser(data) : null,
     };
   },
 
-  // The current user, fresh from the server
+  // The user this browser's session cookie belongs to. Rejects with status
+  // 401 when signed out. The first request can wake a sleeping server, so it
+  // waits longer than other requests.
   getMe: async (): Promise<User> => {
-    const response = await api.get('/auth/me');
+    const response = await api.get('/auth/me', { timeout: 90000 });
     return toUser(response.data.data);
   },
 
@@ -79,11 +83,14 @@ export const authAPI = {
     return response.data;
   },
 
-  // Logout - clear both storage types
-  logout: () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    sessionStorage.removeItem('token');
-    sessionStorage.removeItem('user');
+  // Clears the session cookie
+  logout: async () => {
+    await api.post('/auth/logout');
+  },
+
+  // One-minute ticket for opening the chat socket
+  socketToken: async (): Promise<string> => {
+    const response = await api.post('/auth/socket-token');
+    return response.data.data.token;
   },
 };

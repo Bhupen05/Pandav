@@ -167,7 +167,12 @@ Required environment variables (see `.env.example`):
 - `NODE_ENV` - Environment (development/production)
 - `MONGODB_URI` - MongoDB connection string
 - `JWT_SECRET` - Secret key for JWT tokens
-- `JWT_EXPIRE` - JWT token expiration time
+- `JWT_EXPIRE` - How long a "remember me" session lasts (default 30d)
+- `CLIENT_URL` - The deployed frontend's origin (production)
+- `ORIGIN_SECRET` - Shared with the frontend's `/api` proxy on Vercel (production; see the main README)
+
+Sessions live in the HttpOnly `pandav_session` cookie set by `POST /api/auth/login`; the API does
+not accept `Authorization` headers.
 
 ## License
 

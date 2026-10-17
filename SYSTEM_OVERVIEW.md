@@ -80,8 +80,8 @@ The project is a full-stack web application with separate frontend and backend a
 ## 5. Key User Flows
 
 1. Sign in
-- User logs in and receives JWT
-- Frontend sends token in Authorization header for protected endpoints
+- User logs in; the server sets an HttpOnly session cookie (the frontend never sees the token)
+- The browser sends the cookie with every /api request
 
 2. Task completion approval
 - User updates task progress and requests completion

@@ -1,62 +1,34 @@
-import { useEffect, useState, type FC, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type FC, type ReactNode } from 'react';
 import { authAPI, type User } from '../api/authAPI';
-import type { ApiError } from '../api/axios';
 import { AuthContext } from './useAuth';
 
-interface Session {
-  user: User;
-  token: string;
-}
-
-// "Remember me" sessions are kept in localStorage, others in sessionStorage
-// (cleared when the browser closes)
-const activeStorage = () =>
-  sessionStorage.getItem('token') ? sessionStorage : localStorage.getItem('token') ? localStorage : null;
-
-const readStoredSession = (): Session | null => {
-  const storage = activeStorage();
-  const token = storage?.getItem('token');
-  const storedUser = storage?.getItem('user');
-  if (!token || !storedUser) return null;
-  try {
-    return { token, user: JSON.parse(storedUser) as User };
-  } catch {
-    return null;
-  }
-};
-
-const storeUser = (user: User) => activeStorage()?.setItem('user', JSON.stringify(user));
+// Written by versions that kept the session in browser storage. Those tokens
+// no longer work (the session is an HttpOnly cookie now), so drop them.
+const LEGACY_KEYS = ['token', 'user', 'chat_uid', 'chat_uname'];
 
 export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
-  const [session, setSession] = useState<Session | null>(readStoredSession);
-  const [loading, setLoading] = useState(() => readStoredSession() !== null);
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+  // Set when the user signs in or out here, so a slow session check can't undo it
+  const sessionChangedRef = useRef(false);
 
-  // A stored session (and the role in it) is only trusted once the server
-  // confirms it. This also picks up profile changes made elsewhere.
+  // Scripts can't read the session cookie, so ask the server whose it is.
+  // This also picks up profile and role changes made elsewhere.
   useEffect(() => {
-    // Written by older versions; nothing reads them any more
-    localStorage.removeItem('chat_uid');
-    localStorage.removeItem('chat_uname');
-
-    const stored = readStoredSession();
-    if (!stored) return;
+    LEGACY_KEYS.forEach((key) => {
+      localStorage.removeItem(key);
+      sessionStorage.removeItem(key);
+    });
 
     let cancelled = false;
-    const isStillCurrent = (current: Session | null) => current?.token === stored.token;
-
     authAPI
       .getMe()
-      .then((user) => {
-        if (cancelled || !isStillCurrent(readStoredSession())) return;
-        storeUser(user);
-        setSession((current) => (isStillCurrent(current) ? { ...stored, user } : current));
+      .then((current) => {
+        if (!cancelled && !sessionChangedRef.current) setUser(current);
       })
-      .catch((error: ApiError) => {
-        // Expired, revoked or deactivated. If the server can't be reached,
-        // keep the session: every API call is checked by the server anyway.
-        if (cancelled || error.status !== 401) return;
-        if (isStillCurrent(readStoredSession())) authAPI.logout();
-        setSession((current) => (isStillCurrent(current) ? null : current));
+      .catch(() => {
+        // Signed out, expired, deactivated, or the server is unreachable:
+        // in every case this browser isn't signed in
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -68,43 +40,36 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
   }, []);
 
   const login = async (email: string, password: string, rememberMe = false) => {
-    const { success, token, user, message } = await authAPI.login({ email, password });
-    if (!success || !token || !user) {
+    const { success, user: signedIn, message } = await authAPI.login({ email, password, rememberMe });
+    if (!success || !signedIn) {
       throw new Error(message || 'Invalid credentials');
     }
 
-    authAPI.logout();
-    const storage = rememberMe ? localStorage : sessionStorage;
-    storage.setItem('token', token);
-    storage.setItem('user', JSON.stringify(user));
-    setSession({ user, token });
+    sessionChangedRef.current = true;
+    setUser(signedIn);
     setLoading(false);
-    return user;
+    return signedIn;
   };
 
-  const logout = () => {
-    authAPI.logout();
-    setSession(null);
+  // Only signs out here once the server has cleared the cookie; otherwise the
+  // browser would still be signed in after a reload
+  const logout = async () => {
+    await authAPI.logout();
+    sessionChangedRef.current = true;
+    setUser(null);
     setLoading(false);
   };
 
-  const updateUser = (user: User) => {
-    storeUser(user);
-    setSession((current) => (current ? { ...current, user } : current));
-  };
-
-  const user = session?.user ?? null;
   const value = {
     user,
-    token: session?.token ?? null,
-    isAuthenticated: session !== null,
+    isAuthenticated: user !== null,
     isAdmin: user?.role === 'admin',
     isTeamLeader: user?.role === 'team_leader',
     isTeamMember: user?.role === 'team_member',
     loading,
     login,
     logout,
-    updateUser,
+    updateUser: setUser,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

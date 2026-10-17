@@ -114,7 +114,7 @@ The Attendance Management API provides endpoints to track employee attendance wi
 **Example Request:**
 ```bash
 curl -X GET "http://localhost:5000/api/attendance?status=present&startDate=2024-01-01&endDate=2024-01-31" \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -b cookies.txt
 ```
 
 ---
@@ -163,7 +163,7 @@ curl -X GET "http://localhost:5000/api/attendance?status=present&startDate=2024-
 **Example Request:**
 ```bash
 curl -X GET http://localhost:5000/api/attendance/607f1f77bcf86cd799439011 \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -b cookies.txt
 ```
 
 **Error Response (Not Found):**
@@ -227,7 +227,7 @@ curl -X GET http://localhost:5000/api/attendance/607f1f77bcf86cd799439011 \
 **Example Request:**
 ```bash
 curl -X POST http://localhost:5000/api/attendance/checkin \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json"
 ```
 
@@ -284,7 +284,7 @@ curl -X POST http://localhost:5000/api/attendance/checkin \
 **Example Request:**
 ```bash
 curl -X POST http://localhost:5000/api/attendance/checkout \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json"
 ```
 
@@ -357,7 +357,7 @@ curl -X POST http://localhost:5000/api/attendance/checkout \
 **Example Request (Admin):**
 ```bash
 curl -X POST http://localhost:5000/api/attendance \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json" \
   -d '{
     "user": "607f1f77bcf86cd799439012",
@@ -440,7 +440,7 @@ curl -X POST http://localhost:5000/api/attendance \
 **Example Request (Admin):**
 ```bash
 curl -X PUT http://localhost:5000/api/attendance/607f1f77bcf86cd799439011 \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json" \
   -d '{
     "status": "late",
@@ -451,7 +451,7 @@ curl -X PUT http://localhost:5000/api/attendance/607f1f77bcf86cd799439011 \
 **Example Request (User):**
 ```bash
 curl -X PUT http://localhost:5000/api/attendance/607f1f77bcf86cd799439011 \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json" \
   -d '{
     "status": "present",
@@ -512,7 +512,7 @@ curl -X PUT http://localhost:5000/api/attendance/607f1f77bcf86cd799439011 \
 **Example Request:**
 ```bash
 curl -X PUT http://localhost:5000/api/attendance/607f1f77bcf86cd799439011/approve \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json" \
   -d '{
     "remarks": "Approved - All documents verified"
@@ -568,7 +568,7 @@ curl -X PUT http://localhost:5000/api/attendance/607f1f77bcf86cd799439011/approv
 **Example Request:**
 ```bash
 curl -X PUT http://localhost:5000/api/attendance/607f1f77bcf86cd799439011/disapprove \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -b cookies.txt \
   -H "Content-Type: application/json" \
   -d '{
     "remarks": "Missing required documents"
@@ -599,7 +599,7 @@ curl -X PUT http://localhost:5000/api/attendance/607f1f77bcf86cd799439011/disapp
 **Example Request:**
 ```bash
 curl -X DELETE http://localhost:5000/api/attendance/607f1f77bcf86cd799439011 \
-  -H "Authorization: Bearer YOUR_TOKEN"
+  -b cookies.txt
 ```
 
 **Error Response (Not Found):**
@@ -672,11 +672,21 @@ Disapprove → Status changed to absent, approvedBy cleared
 
 ## Authentication
 
-All endpoints require a bearer token in the Authorization header:
+Signing in sets a `pandav_session` cookie. Every endpoint here reads the session from it;
+the `Authorization` header is not used. The cookie is `HttpOnly` (page scripts can't read it),
+`SameSite=Lax`, limited to the `/api` path, and `Secure` over HTTPS. Sign in once with curl and
+reuse the cookie file:
 
+```bash
+curl -c cookies.txt -X POST http://localhost:5000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "admin@example.com", "password": "..."}'
+
+curl -b cookies.txt http://localhost:5000/api/auth/me
 ```
-Authorization: Bearer YOUR_JWT_TOKEN
-```
+
+POST, PUT, PATCH and DELETE requests from a browser must come from an allowed origin
+(`CLIENT_URL`); requests without an `Origin` header (curl, scripts) are allowed.
 
 ---
 

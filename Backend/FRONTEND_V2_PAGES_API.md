@@ -24,7 +24,7 @@ This document lists the recommended frontend pages for Pandav V2 and the backend
 ## 2. API Base
 
 - Base URL: `/api/v2`
-- Auth header: `Authorization: Bearer <token>`
+- Auth: the HttpOnly `pandav_session` cookie set by `POST /auth/login` (no `Authorization` header)
 
 ## 3. Page to API Details
 
