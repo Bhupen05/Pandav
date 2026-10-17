@@ -3,9 +3,33 @@ import TeamInvite from '../models/TeamInvite.js';
 import User from '../models/User.js';
 import Task from '../models/Task.js';
 import Attendance from '../models/Attendance.js';
+import TeamChatMessage from '../models/TeamChatMessage.js';
+import mongoose from 'mongoose';
 import { escapeRegex, pick, sendServerError } from '../utils/http.js';
 import { toDayKey } from '../utils/dates.js';
-import { canReviewFor, teamUserIds } from '../utils/teams.js';
+import { canReviewFor, isInAnyTeam, teamUserIds } from '../utils/teams.js';
+
+const TEAM_ROLES = ['team_leader', 'team_member'];
+
+// Why this user can't be made a team's leader, or null if they can. A user
+// belongs to at most one team, and admins never take a team role (it would
+// replace their admin role).
+const leaderProblem = async (user, teamId = null) => {
+  if (!user.isActive) return 'This account is deactivated';
+  if (user.role === 'admin') return 'An admin cannot lead a team';
+  if (await isInAnyTeam(user._id, teamId)) return 'This user already belongs to another team';
+  return null;
+};
+
+// Why this user can't join a team by invite, or null if they can
+const inviteeProblem = async (user) => {
+  if (!user.isActive) return 'This account is deactivated';
+  if (user.role === 'admin' || user.role === 'team_leader') return 'Admins and team leaders cannot be invited to a team';
+  if (await isInAnyTeam(user._id)) return 'This user already belongs to a team';
+  return null;
+};
+
+const isTextOrUnset = (value) => value === undefined || typeof value === 'string';
 
 // Fields a leader may set when creating a team task; progress and approval
 // go through the task workflow
@@ -31,6 +55,10 @@ export const createTeam = async (req, res) => {
     const { name, description } = req.body;
     let { leaderId } = req.body;
 
+    if (typeof name !== 'string' || !name.trim() || !isTextOrUnset(description)) {
+      return res.status(400).json({ success: false, message: 'A team name is required' });
+    }
+
     if (req.user.role === 'team_leader') {
       const existingTeam = await Team.findOne({ leaders: req.user.id });
       if (existingTeam) {
@@ -48,8 +76,9 @@ export const createTeam = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Leader user not found' });
     }
 
-    if (req.user.role === 'admin' && leader.teamId) {
-      return res.status(400).json({ success: false, message: 'Selected leader already belongs to a team' });
+    const problem = await leaderProblem(leader);
+    if (problem || (req.user.role === 'admin' && leader.teamId)) {
+      return res.status(400).json({ success: false, message: problem || 'Selected leader already belongs to a team' });
     }
 
     const team = await Team.create({
@@ -160,6 +189,9 @@ export const updateTeam = async (req, res) => {
 
     // isLeaderOfTeam middleware already verified if not admin
     const { name, description, isActive } = req.body;
+    if (!isTextOrUnset(name) || !isTextOrUnset(description) || (name !== undefined && !name.trim())) {
+      return res.status(400).json({ success: false, message: 'Team name and description must be text' });
+    }
     if (name !== undefined) team.name = name;
     if (description !== undefined) team.description = description;
     if (isActive !== undefined && req.user.role === 'admin') team.isActive = isActive;
@@ -173,6 +205,9 @@ export const updateTeam = async (req, res) => {
 
     res.json({ success: true, data: populated });
   } catch (error) {
+    if (error.code === 11000) {
+      return res.status(400).json({ success: false, message: 'A team with this name already exists' });
+    }
     sendServerError(res, error);
   }
 };
@@ -185,23 +220,24 @@ export const deleteTeam = async (req, res) => {
     const team = await Team.findById(req.params.id);
     if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
 
-    // Demote leaders and clear teamId from all affected users
-    const allUserIds = [...team.leaders.map(l => l.toString()), ...team.members.map(m => m.toString())];
+    // Leaders and members go back to plain users (only those whose team this
+    // was), and nothing is left pointing at the deleted team
+    const allUserIds = teamUserIds(team);
     await User.updateMany(
-      { _id: { $in: allUserIds } },
+      { _id: { $in: allUserIds }, teamId: team._id },
       { $set: { teamId: null } }
     );
     await User.updateMany(
-      { _id: { $in: team.members.map(m => m.toString()) }, role: 'team_member' },
-      { $set: { role: 'user' } }
-    );
-    // Demote leaders back to user role
-    await User.updateMany(
-      { _id: { $in: team.leaders.map(l => l.toString()) }, role: 'team_leader' },
+      { _id: { $in: allUserIds }, role: { $in: TEAM_ROLES } },
       { $set: { role: 'user' } }
     );
 
-    await TeamInvite.deleteMany({ team: team._id });
+    await Promise.all([
+      TeamInvite.deleteMany({ team: team._id }),
+      TeamChatMessage.deleteMany({ team: team._id }),
+      Task.updateMany({ team: team._id }, { $set: { team: null } }),
+      Attendance.updateMany({ team: team._id }, { $set: { team: null } }),
+    ]);
     await team.deleteOne();
 
     res.json({ success: true, message: 'Team deleted successfully' });
@@ -222,6 +258,7 @@ export const inviteMember = async (req, res) => {
 
     const team = await Team.findById(teamId);
     if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
+    if (!team.isActive) return res.status(400).json({ success: false, message: 'This team is inactive' });
 
     // If username provided instead of userId, look up the user
     if (!userId && username) {
@@ -239,23 +276,22 @@ export const inviteMember = async (req, res) => {
     const invitedUser = await User.findById(userId);
     if (!invitedUser) return res.status(404).json({ success: false, message: 'User not found' });
 
-    // Check if already a member or leader
-    const alreadyIn =
-      team.leaders.some(l => l.toString() === userId) ||
-      team.members.some(m => m.toString() === userId);
-    if (alreadyIn) {
+    if (teamUserIds(team).includes(String(invitedUser._id))) {
       return res.status(400).json({ success: false, message: 'User is already in this team' });
     }
 
+    const problem = await inviteeProblem(invitedUser);
+    if (problem) return res.status(400).json({ success: false, message: problem });
+
     // Check for existing pending invite
-    const existingInvite = await TeamInvite.findOne({ team: teamId, invitedUser: userId, status: 'pending' });
+    const existingInvite = await TeamInvite.findOne({ team: teamId, invitedUser: invitedUser._id, status: 'pending' });
     if (existingInvite) {
       return res.status(400).json({ success: false, message: 'A pending invite already exists for this user' });
     }
 
     const invite = await TeamInvite.create({
       team: teamId,
-      invitedUser: userId,
+      invitedUser: invitedUser._id,
       invitedBy: req.user.id,
     });
 
@@ -292,6 +328,13 @@ export const acceptInvite = async (req, res) => {
     }
 
     const team = invite.team;
+    if (!team || !team.isActive) {
+      return res.status(400).json({ success: false, message: 'This team no longer accepts members' });
+    }
+
+    // Things may have changed since the invite was sent
+    const problem = await inviteeProblem(req.user);
+    if (problem) return res.status(400).json({ success: false, message: problem });
 
     // Add user to team.members if not already there
     if (!team.members.some(m => m.toString() === req.user.id.toString())) {
@@ -373,21 +416,30 @@ export const removeMember = async (req, res) => {
       }
     }
 
-    const isLeaderTarget = team.leaders.some(l => l.toString() === userId);
+    // Only people in this team can be removed from it
+    if (!mongoose.isObjectIdOrHexString(userId) || !teamUserIds(team).includes(String(userId).toLowerCase())) {
+      return res.status(404).json({ success: false, message: 'User is not in this team' });
+    }
+
+    const isLeaderTarget = team.leaders.some(l => l.toString() === String(userId).toLowerCase());
     // Leaders can only be removed by admin
     if (isLeaderTarget && req.user.role !== 'admin') {
       return res.status(403).json({ success: false, message: 'Only admin can remove a team leader' });
     }
 
-    team.members = team.members.filter(m => m.toString() !== userId);
-    if (isLeaderTarget) {
-      team.leaders = team.leaders.filter(l => l.toString() !== userId);
-      await User.findByIdAndUpdate(userId, { role: 'user', teamId: null });
-    } else {
-      await User.findByIdAndUpdate(userId, { role: 'user', teamId: null });
-    }
-
+    team.members = team.members.filter(m => !m.equals(userId));
+    team.leaders = team.leaders.filter(l => !l.equals(userId));
     await team.save();
+
+    // Back to a plain user: only a team role is taken away, and only this team
+    await User.updateOne({ _id: userId, role: { $in: TEAM_ROLES } }, { $set: { role: 'user' } });
+    await User.updateOne({ _id: userId, teamId: team._id }, { $set: { teamId: null } });
+
+    // Their team tasks would otherwise wait on someone no longer in the team
+    await Task.updateMany(
+      { team: team._id, assignedTo: userId },
+      { $pull: { assignedTo: userId, assigneeProgress: { user: userId } } }
+    );
 
     const populated = await Team.findById(team._id)
       .populate('leaders', 'name email profileImage role')
@@ -411,11 +463,15 @@ export const addLeader = async (req, res) => {
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    if (!team.leaders.some(l => l.toString() === userId)) {
-      team.leaders.push(userId);
+    // A member of this team may be promoted; anyone in another team may not
+    const problem = await leaderProblem(user, team._id);
+    if (problem) return res.status(400).json({ success: false, message: problem });
+
+    if (!team.leaders.some(l => l.equals(user._id))) {
+      team.leaders.push(user._id);
     }
     // Remove from members if was a member
-    team.members = team.members.filter(m => m.toString() !== userId);
+    team.members = team.members.filter(m => !m.equals(user._id));
 
     await team.save();
     user.role = 'team_leader';
@@ -490,7 +546,10 @@ export const createTeamTask = async (req, res) => {
     ];
 
     const assignedTo = Array.isArray(req.body.assignedTo) ? req.body.assignedTo : [req.body.assignedTo];
-    const invalidAssignees = assignedTo.filter(id => !allTeamUserIds.includes(id.toString()));
+    if (assignedTo.length === 0 || !assignedTo.every((id) => mongoose.isObjectIdOrHexString(id))) {
+      return res.status(400).json({ success: false, message: 'Assign the task to at least one team member' });
+    }
+    const invalidAssignees = assignedTo.filter(id => !allTeamUserIds.includes(String(id).toLowerCase()));
     if (invalidAssignees.length > 0) {
       return res.status(400).json({ success: false, message: 'All assignees must be members of the team' });
     }
@@ -508,7 +567,7 @@ export const createTeamTask = async (req, res) => {
 
     res.status(201).json({ success: true, data: populated });
   } catch (error) {
-    res.status(400).json({ success: false, message: error.message });
+    sendServerError(res, error);
   }
 };
 

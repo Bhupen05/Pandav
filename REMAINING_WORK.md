@@ -1,13 +1,14 @@
 # Remaining Work
 
-What is still open after Phase 5 (cookie sessions, commit `444c2b0` on `v1`), as of 2026-10-17.
-Phases 1–4 (security, broken features, data integrity, code health) and the V2 merge are already
-on `main` through PR #2. Phase 5 is pushed to `v1` but not merged into `main` yet.
+What is still open after Phase 6 (security pass over the V2 social and teams code), as of
+2026-10-17. Phases 1–4 (security, broken features, data integrity, code health) and the V2 merge
+are on `main` through PR #2. Phase 5 (cookie sessions) and Phase 6 are on `v1` and not merged
+into `main` yet.
 
 | # | Item | Who | Priority | Size |
 |---|------|-----|----------|------|
 | 1 | [Deployment steps](#1-deployment-steps) | Project owner | Before the next deploy | Small |
-| 2 | [Security pass over the V2 social and teams code](#2-security-pass-over-the-v2-social-and-teams-code) | Developer | High | Large |
+| 2 | [Follow-ups from the V2 security pass](#2-follow-ups-from-the-v2-security-pass) | Owner decisions, then developer | Medium | Small–Medium |
 | 3 | [Frontend tests in CI](#3-frontend-tests-in-ci) | Developer | High | Medium |
 | 4 | [Paging in the UI](#4-paging-in-the-ui) | Developer | Medium | Medium |
 | 5 | [Documentation](#5-documentation) | Developer | Medium | Medium |
@@ -40,6 +41,13 @@ These happen on GitHub, Render and Vercel, outside the code.
         and **Secure**.
   - [ ] Chat messages arrive without reloading the page.
 
+**Phase 6 (V2 security pass)**
+- [ ] After deploying, run `npm run migrate` in `Backend/` with the production `MONGODB_URI` and
+      `JWT_SECRET`. It encrypts LinkedIn/GitHub tokens that were linked before Phase 6. It also
+      reports Social Hub data left behind by deleted users; remove that with `--clean-orphans`.
+- [ ] From now on, changing `JWT_SECRET` also means everyone has to link LinkedIn/GitHub again:
+      the stored tokens are encrypted with a key derived from it.
+
 **Earlier phases (skip any you have already done)**
 - [ ] Run `npm run migrate` in `Backend/` against the production database (Phase 3) and act on its
       "Needs attention" list.
@@ -56,56 +64,50 @@ These happen on GitHub, Render and Vercel, outside the code.
 
 ---
 
-## 2. Security pass over the V2 social and teams code
+## 2. Follow-ups from the V2 security pass
 
-**Why:** V2 (teams, invites, team chat, Social Hub, personal tasks, publish jobs, moderation) was
-written before Phases 1–4. The merge (`d2307db`) adapted it to v1's rules and added
-`Backend/test/teams.test.js` (33 checks), but the social module never had a Phase 1-style
-review. It is the largest file in the backend: `Backend/src/controllers/socialV2Controller.js`,
-1,653 lines and 32 endpoints. Only 3 integration tests cover it.
+Phase 6 fixed the Social Hub and team issues listed in this file before, plus the ones the audit
+found. They are covered by `Backend/test/social.test.js` and the "team membership rules" checks in
+`Backend/test/teams.test.js`. What's left:
 
-**Issues found while writing this list (not yet fixed or covered by tests):**
+**Decisions for the project owner**
+- **Anyone can sign up and reach every employee.** Self-registration is open. A new account can
+  list colleagues' names and emails (`GET /users/search`, Social Hub discovery) and message any
+  active user through the main chat. For an internal tool, consider admin approval for new
+  accounts, or only allowing your company's email domain.
+- **"Connect before messaging" isn't a real rule.** The Social Hub requires an accepted
+  connection, but the main chat (`POST /chat/send`) lets anyone message any active user. Either
+  drop the Social Hub rule or apply one rule to both.
+- **Completing a personal task posts to LinkedIn by default.** `autoGenerateLinkedInPost`
+  defaults to on (`socialV2Controller.js:875`). For team leaders and admins with LinkedIn linked,
+  the post goes out at once with no review. Consider defaulting it to off.
+- **Team leaders can publish their members' posts.** Publishing now requires the author, an
+  admin, or a leader of the author's team. Publishing still uses the *author's* LinkedIn or GitHub
+  account. Decide whether only authors should publish to their own accounts.
 
-1. **Team leaders can publish anyone's posts.** `publishPostToTargets`
-   (`socialV2Controller.js:1063`), `canManagePostPublish` (`:1206`), `processPublishJob` (`:1499`)
-   and `retryPublishJob` (`:1535`) allow any `team_leader`, with no check that the post's author
-   is in their team. Publishing uses the *author's* stored LinkedIn/GitHub token, so a leader of
-   one team can post another team member's approved post to that person's accounts.
-   Fix: the same-team rule `approvePost` already uses (`:765`).
-2. **Retrying a finished job publishes it again.** `retryPublishJob` (`:1540`) sets any job back
-   to `queued`, including completed ones, and processing it again posts a duplicate to LinkedIn
-   or GitHub. Fix: only allow retrying `failed` jobs.
-3. **User discovery takes a raw regular expression.** `discoverUsers` (`:742`) puts `?q=` straight
-   into `$regex`. Crafted patterns can make the database search very slow, and a non-string `q`
-   errors out. An empty `q` returns the names and **emails** of up to 30 active users to any
-   signed-in user. Fix: `escapeRegex` and a minimum length, as `GET /users/search` does
-   (`userController.js:33`). Also decide whether emails should be visible here at all.
-4. **Provider tokens are stored unencrypted.** `accessToken` and `refreshToken` in
-   `Backend/src/models/SocialIntegrationV2.js:33` are hidden from API responses
-   (`select: false`). Anyone with database access (a backup, a leaked connection string) can still
-   use them to post as the user on LinkedIn/GitHub. Fix: encrypt them at rest with a key from an
-   environment variable (e.g. AES-256-GCM via Node's `crypto`).
-5. **The V2 rate limiter never forgets.** `Backend/src/middleware/rateLimitV2.js` keeps every key
-   in a `Map` that is never pruned, so memory grows with every new user and IP until the server
-   restarts. Fix: delete expired entries periodically, or switch to `express-rate-limit` like the
-   rest of the API.
+**Smaller fixes (not done)**
+- **Team chat read receipts are slow.**
+  - `markTeamMessagesAsRead` (`chatController.js:292`) saves unread messages one at a time and
+    sends one event per message to every member.
+  - `getTeamMessages` (`:268`) returns the whole history.
+  - An admin who isn't in a team can mark its messages read.
+- **Typing indicators reach anyone.** The `typing` socket event (`server.js:95`) is relayed to
+  any user id, so anyone can show "X is typing" to anyone.
+- **A team can be left without a leader.** This happens when an admin removes the last leader or
+  deletes that user.
+- **Older handlers expose raw error messages.** Some answer 400 with the raw error message:
+  - `taskController.js:44`
+  - `attendanceController.js:149`, `:221`, `:293`, `:334`
+  - `userController.js:191`
 
-**Still to check:**
-- Feed and post visibility (`getFeed` `:466`, `getMyPosts`), comments and likes on posts the
-  user can't see.
-- Network messages and connection requests: who can message whom, and whether request/response
-  bodies are whitelisted as in Phase 1.
-- Moderation endpoints (admin only), publish-job listing (`getPublishJobs`: only your own jobs?),
-  personal tasks (owner only).
-- OAuth linking: `state` is checked against the signed-in user. Check that `redirect_uri`
-  cannot be chosen by the client.
-- Team chat and team invites beyond what `teams.test.js` covers.
-- `Backend/src/utils/auditLoggerV2.js`: what it records (no passwords or tokens).
-
-**How:** follow Phase 1's approach. For each endpoint, write down who may call it and which fields
-they may set, then add a `Backend/test/social.test.js` suite (using `startServer` from
-`test/helpers.js`) that proves each rule. Fold `test/integration/socialV2.integration.test.mjs`
-into it: today it needs a manually started server and isn't run by `npm test` or CI.
+  Use `sendServerError`, which now turns schema validation errors into a 400 naming the fields.
+- **The feed misses posts and runs extra queries.** It loads the newest 100 posts, then filters
+  them per user (`socialV2Controller.js:526`). Posts visible to a user but older than those 100
+  never show, and each connections-only post costs one query.
+- **Fast likes can be lost.** Liking saves the whole post, so two quick likes can lose one.
+  `$addToSet`/`$pull` would fix it.
+- **An unused API call is broken.** `chatAPI.sendSocialMessage` (`Frontend/src/api/chatAPI.ts:66`)
+  sends `userId` where the API expects `receiverId`. Nothing calls it; delete it or fix it.
 
 ---
 

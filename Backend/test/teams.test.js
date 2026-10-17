@@ -1,12 +1,16 @@
 // End-to-end checks for teams: leaders review only their own team's attendance
 // and tasks (never their own), team endpoints use the same approval workflow
-// as the rest of the app, and team chat stays inside the team
+// as the rest of the app, team chat stays inside the team, and membership
+// changes keep users and teams in step (one team per user, admins never take
+// a team role)
 import { after, before, test } from 'node:test';
-import { ADMIN, checker, startServer } from './helpers.js';
+import { ADMIN, checker, connectDatabase, startServer } from './helpers.js';
 
 let server;
 before(async () => { server = await startServer('teams'); });
 after(() => server?.stop());
+
+const DATES = { startDate: '2026-10-01', dueDate: '2026-10-20' };
 
 test('teams', async (t) => {
   const check = checker(t);
@@ -66,7 +70,6 @@ test('teams', async (t) => {
   await check('leader cannot filter into another user\'s attendance', filtered.data.data.length === 0);
 
   // Tasks
-  const DATES = { startDate: '2026-10-01', dueDate: '2026-10-20' };
   const forced = await call('POST', `/teams/${team._id}/tasks`, { token: lee.token, body: { title: 'Team task', description: 'd', ...DATES, assignedTo: [mia._id], status: 'completed', approvedBy: lee._id } });
   await check('team task ignores status and approval fields', forced.status === 201 && forced.data.data.status === 'pending' && !forced.data.data.approvedBy, JSON.stringify(forced.data).slice(0, 200));
   const teamTaskId = forced.data.data._id;
@@ -109,4 +112,93 @@ test('teams', async (t) => {
   await call('DELETE', `/users/${mia._id}`, { token: adminToken });
   const after = (await call('GET', `/teams/${team._id}`, { token: adminToken })).data.data;
   await check('deleted user is removed from the team', !after.members.some((m) => m._id === mia._id));
+});
+
+test('team membership rules', async (t) => {
+  const check = checker(t);
+  const { call, login, me, register } = server.api;
+  const db = await connectDatabase('teams');
+  t.after(() => db.close());
+
+  const adminToken = await login(ADMIN);
+  const admin = await me(adminToken);
+  const ann = await register('Ann Lead', 'ann@test.com');
+  const ben = await register('Ben Lead', 'ben@test.com');
+  const cat = await register('Cat Member', 'cat@test.com');
+  const dan = await register('Dan Newcomer', 'dan@test.com');
+  const userNow = async (user) => (await call('GET', `/users/${user._id}`, { token: adminToken })).data.data;
+
+  const gamma = (await call('POST', '/teams', { token: adminToken, body: { name: 'Gamma', leaderId: ann._id } })).data.data;
+  const delta = (await call('POST', '/teams', { token: adminToken, body: { name: 'Delta', leaderId: ben._id } })).data.data;
+  const catInvite = (await call('POST', `/teams/${gamma._id}/invite`, { token: ann.token, body: { userId: cat._id } })).data.data;
+  await call('PUT', `/teams/invites/${catInvite._id}/accept`, { token: cat.token });
+  await check('setup: Ann leads Gamma with Cat, Ben leads Delta', (await userNow(cat)).teamId === gamma._id && !!delta?._id);
+
+  // ---------- Admins never take a team role ----------
+  await check("an admin cannot be made a team's leader",
+    (await call('POST', '/teams', { token: adminToken, body: { name: 'Admins', leaderId: admin._id } })).status === 400);
+  await check('or added as a leader',
+    (await call('POST', `/teams/${delta._id}/leaders`, { token: adminToken, body: { userId: admin._id } })).status === 400);
+  await check('so the admin is still an admin', (await me(adminToken)).role === 'admin');
+
+  // ---------- Leaders only remove people in their own team ----------
+  await check('a leader cannot "remove" an admin from their team',
+    (await call('DELETE', `/teams/${gamma._id}/members/${admin._id}`, { token: ann.token })).status === 404);
+  await check('the admin keeps admin', (await me(adminToken)).role === 'admin');
+  await check("a leader cannot remove another team's leader",
+    (await call('DELETE', `/teams/${gamma._id}/members/${ben._id}`, { token: ann.token })).status === 404);
+  const benNow = await userNow(ben);
+  await check('who keeps their role and team', benNow.role === 'team_leader' && benNow.teamId === delta._id, `${benNow.role} ${benNow.teamId}`);
+  await check('a leader cannot remove someone in no team',
+    (await call('DELETE', `/teams/${gamma._id}/members/${dan._id}`, { token: ann.token })).status === 404);
+
+  // ---------- One team per user ----------
+  await check('admins cannot be invited',
+    (await call('POST', `/teams/${gamma._id}/invite`, { token: ann.token, body: { userId: admin._id } })).status === 400);
+  await check('team leaders cannot be invited',
+    (await call('POST', `/teams/${gamma._id}/invite`, { token: ann.token, body: { userId: ben._id } })).status === 400);
+  await check('members of another team cannot be invited',
+    (await call('POST', `/teams/${delta._id}/invite`, { token: ben.token, body: { userId: cat._id } })).status === 400);
+  const fromGamma = (await call('POST', `/teams/${gamma._id}/invite`, { token: ann.token, body: { userId: dan._id } })).data.data;
+  const fromDelta = (await call('POST', `/teams/${delta._id}/invite`, { token: ben.token, body: { userId: dan._id } })).data.data;
+  await check('a newcomer accepts one invite',
+    (await call('PUT', `/teams/invites/${fromGamma._id}/accept`, { token: dan.token })).status === 200);
+  await check("but not a second team's",
+    (await call('PUT', `/teams/invites/${fromDelta._id}/accept`, { token: dan.token })).status === 400);
+  const deltaNow = (await call('GET', `/teams/${delta._id}`, { token: adminToken })).data.data;
+  await check('so he is in one team only', (await userNow(dan)).teamId === gamma._id && !deltaNow.members.some((m) => m._id === dan._id));
+  await check("a member of one team cannot be made another team's leader",
+    (await call('POST', `/teams/${delta._id}/leaders`, { token: adminToken, body: { userId: cat._id } })).status === 400);
+
+  // ---------- Team roles follow team membership ----------
+  await check('admins cannot hand out team roles directly',
+    (await call('PUT', `/users/${dan._id}`, { token: adminToken, body: { role: 'team_leader' } })).status === 400);
+  await check('or change the role of someone in a team',
+    (await call('PUT', `/users/${ann._id}`, { token: adminToken, body: { role: 'user' } })).status === 400);
+
+  // ---------- Team tasks ----------
+  await check('a team task needs assignees',
+    (await call('POST', `/teams/${gamma._id}/tasks`, { token: ann.token, body: { title: 'x', description: 'd', ...DATES, assignedTo: [] } })).status === 400);
+  const noAssignees = await call('POST', `/teams/${gamma._id}/tasks`, { token: ann.token, body: { title: 'x', description: 'd', ...DATES } });
+  await check('a missing assignee list is a 400 with a clear message', noAssignees.status === 400 && !/undefined/.test(noAssignees.data.message), noAssignees.data.message);
+  const shared = (await call('POST', `/teams/${gamma._id}/tasks`, { token: ann.token, body: { title: 'Shared', description: 'd', ...DATES, assignedTo: [cat._id, dan._id] } })).data.data;
+
+  const removed = await call('DELETE', `/teams/${gamma._id}/members/${dan._id}`, { token: ann.token });
+  await check('a leader removes their own member', removed.status === 200);
+  const danNow = await userNow(dan);
+  await check('who becomes a plain user', danNow.role === 'user' && !danNow.teamId, `${danNow.role} ${danNow.teamId}`);
+  const sharedNow = (await call('GET', `/tasks/${shared._id}`, { token: adminToken })).data.data;
+  await check("and is taken off the team's tasks", !sharedNow.assignedTo.some((a) => (a._id || a) === dan._id));
+
+  await check('renaming a team to a taken name is a 400',
+    (await call('PUT', `/teams/${gamma._id}`, { token: adminToken, body: { name: 'Delta' } })).status === 400);
+
+  // ---------- Deleting a team leaves nothing pointing at it ----------
+  await call('POST', `/chat/teams/${gamma._id}/send`, { token: cat.token, body: { message: 'last words' } });
+  await check('admin deletes the team', (await call('DELETE', `/teams/${gamma._id}`, { token: adminToken })).status === 200);
+  const [annAfter, catAfter] = [await userNow(ann), await userNow(cat)];
+  await check('its leader and members become plain users',
+    annAfter.role === 'user' && !annAfter.teamId && catAfter.role === 'user' && !catAfter.teamId);
+  await check('its tasks no longer point at it', !(await call('GET', `/tasks/${shared._id}`, { token: adminToken })).data.data.team);
+  await check('its chat messages are deleted', (await db.collection('teamchatmessages').countDocuments({ message: 'last words' })) === 0);
 });

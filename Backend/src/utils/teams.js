@@ -8,6 +8,14 @@ export const teamUserIds = (team) => [...team.leaders, ...team.members].map(idOf
 // Whether the user is a leader of this team
 export const isTeamLeader = (team, userId) => team.leaders.some((leader) => idOf(leader) === idOf(userId));
 
+// Whether the user leads or is a member of any team, other than `exceptTeamId`.
+// Each user belongs to at most one team (User.teamId).
+export const isInAnyTeam = async (userId, exceptTeamId = null) =>
+  Boolean(await Team.exists({
+    ...(exceptTeamId ? { _id: { $ne: exceptTeamId } } : {}),
+    $or: [{ leaders: userId }, { members: userId }],
+  }));
+
 // Ids of everyone in the teams this user leads (including the user)
 export const ledUserIds = async (userId) => {
   const teams = await Team.find({ leaders: userId }).select('leaders members');

@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { decryptSecret, encryptSecret } from '../utils/secrets.js';
 
 const socialIntegrationSchema = new mongoose.Schema({
   user: {
@@ -30,15 +31,20 @@ const socialIntegrationSchema = new mongoose.Schema({
     type: [String],
     default: [],
   },
+  // Stored encrypted; reading the field gives the plain token back
   accessToken: {
     type: String,
     default: null,
     select: false,
+    set: encryptSecret,
+    get: decryptSecret,
   },
   refreshToken: {
     type: String,
     default: null,
     select: false,
+    set: encryptSecret,
+    get: decryptSecret,
   },
   tokenExpiresAt: {
     type: Date,

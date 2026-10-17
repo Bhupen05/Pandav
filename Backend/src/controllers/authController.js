@@ -120,6 +120,7 @@ export const login = async (req, res) => {
         department: user.department,
         profileImage: user.profileImage,
         createdAt: user.createdAt,
+        teamId: user.teamId,
       },
     });
   } catch (error) {

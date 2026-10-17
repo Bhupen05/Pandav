@@ -319,11 +319,14 @@ npm run migrate
 ```
 
 It fills in new fields on existing records (attendance `day` and `approvalStatus`, per-assignee
-task progress), replaces outdated indexes, and lists anything that needs a decision:
+task progress), replaces outdated indexes, encrypts LinkedIn/GitHub tokens linked before they
+were encrypted at rest (needs the production `JWT_SECRET`), and lists anything that needs a
+decision:
 
 - **Duplicate attendance days**: a user with two records on one day. Delete all but one, then
   run the migration again so the one-record-per-day rule can be enforced by the database.
-- **Data of deleted users**: run `npm run migrate -- --clean-orphans` to remove it.
+- **Data of deleted users** (including Social Hub posts and linked accounts): run
+  `npm run migrate -- --clean-orphans` to remove it.
 - **Oversized profile images**: run `npm run migrate -- --drop-oversized-images` to clear them;
   those users can upload a new picture (the app now resizes uploads).
 

@@ -5,7 +5,15 @@ import Chat from '../models/Chat.js';
 import Team from '../models/Team.js';
 import TeamInvite from '../models/TeamInvite.js';
 import TeamChatMessage from '../models/TeamChatMessage.js';
+import SocialPost from '../models/SocialPostV2.js';
+import SocialIntegration from '../models/SocialIntegrationV2.js';
+import SocialPublishJob from '../models/SocialPublishJobV2.js';
+import PersonalTask from '../models/PersonalTaskV2.js';
+import NetworkConnection from '../models/NetworkConnectionV2.js';
 import { escapeRegex, listResponse, pick, sendServerError } from '../utils/http.js';
+import { isInAnyTeam } from '../utils/teams.js';
+
+const TEAM_ROLES = ['team_leader', 'team_member'];
 
 // Fields a user may change on their own profile
 const SELF_EDITABLE_FIELDS = ['name', 'email', 'phone', 'department', 'profileImage'];
@@ -139,6 +147,26 @@ export const updateUser = async (req, res) => {
       });
     }
 
+    // Team roles follow team membership, so they change only through the
+    // team screens; otherwise the user and the team would disagree
+    if (updates.role !== undefined) {
+      const current = await User.findById(req.params.id).select('role');
+      if (current && updates.role !== current.role) {
+        if (TEAM_ROLES.includes(updates.role)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Team roles are given by adding the user to a team',
+          });
+        }
+        if (await isInAnyTeam(current._id)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Remove this user from their team before changing their role',
+          });
+        }
+      }
+    }
+
     const user = await User.findByIdAndUpdate(req.params.id, updates, {
       new: true,
       runValidators: true,
@@ -202,6 +230,18 @@ export const deleteUser = async (req, res) => {
       ),
       TeamInvite.deleteMany({ $or: [{ invitedUser: user._id }, { invitedBy: user._id }] }),
       TeamChatMessage.deleteMany({ sender: user._id }),
+      TeamChatMessage.updateMany({ 'readBy.user': user._id }, { $pull: { readBy: { user: user._id } } }),
+      // Social Hub: their posts, linked accounts (and stored tokens), jobs,
+      // personal tasks and connections go; their likes and comments too
+      SocialPost.deleteMany({ author: user._id }),
+      SocialPost.updateMany(
+        { $or: [{ likes: user._id }, { 'comments.user': user._id }] },
+        { $pull: { likes: user._id, comments: { user: user._id } } }
+      ),
+      SocialIntegration.deleteMany({ user: user._id }),
+      SocialPublishJob.deleteMany({ owner: user._id }),
+      PersonalTask.deleteMany({ user: user._id }),
+      NetworkConnection.deleteMany({ $or: [{ requester: user._id }, { recipient: user._id }] }),
     ]);
     await user.deleteOne();
     disconnectUserSockets(req, user._id);
