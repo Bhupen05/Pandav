@@ -69,7 +69,7 @@ test('migration', async (t) => {
 
   // ---------- Second run: after fixing duplicates, with cleanup flags ----------
   await db.collection('attendances').deleteOne({ user: worker, date: at('2026-09-05T09:00:00Z') });
-  const secondRun = migrate('--clean-orphans', '--drop-oversized-images');
+  migrate('--clean-orphans', '--drop-oversized-images');
 
   const indexes = await db.collection('attendances').indexes();
   await check('one-record-per-day index now exists', indexes.some((i) => i.name === 'user_1_day_1' && i.unique));

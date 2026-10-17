@@ -1,10 +1,11 @@
 import mongoose from 'mongoose';
 import Chat from '../models/Chat.js';
-import User from '../models/User.js';
 import Team from '../models/Team.js';
 import TeamChatMessage from '../models/TeamChatMessage.js';
 import { logAuditEventV2 } from '../utils/auditLoggerV2.js';
 import { sendServerError } from '../utils/http.js';
+import { directMessageProblem } from '../utils/messaging.js';
+import { FROZEN_TEAM_MESSAGE, teamUserIds } from '../utils/teams.js';
 
 const MAX_MESSAGE_LENGTH = 2000;
 const MESSAGE_PAGE_SIZE = 50;
@@ -33,10 +34,6 @@ export const sendMessage = async (req, res) => {
     const { receiverId, message } = req.body;
     const senderId = req.user._id;
 
-    if (!mongoose.isObjectIdOrHexString(receiverId)) {
-      return res.status(400).json({ success: false, message: 'Invalid receiver' });
-    }
-
     if (typeof message !== 'string' || !message.trim()) {
       return res.status(400).json({ success: false, message: 'Message cannot be empty' });
     }
@@ -48,9 +45,9 @@ export const sendMessage = async (req, res) => {
       });
     }
 
-    const receiver = await User.exists({ _id: receiverId, isActive: true });
-    if (!receiver) {
-      return res.status(404).json({ success: false, message: 'Recipient not found' });
+    const problem = await directMessageProblem(req.user, receiverId);
+    if (problem) {
+      return res.status(problem.status).json({ success: false, message: problem.message });
     }
 
     const newMessage = new Chat({
@@ -189,20 +186,23 @@ export const markMessageAsRead = async (req, res) => {
   }
 };
 
-const canAccessTeamChat = (team, user) => {
-  if (user.role === 'admin') return true;
+const isInTeam = (team, user) => teamUserIds(team).includes(user._id.toString());
 
-  const userId = user._id.toString();
-  const isLeader = team.leaders.some((leaderId) => leaderId.toString() === userId);
-  const isMember = team.members.some((memberId) => memberId.toString() === userId);
+// Admins can read and write every team's chat; everyone else only their own
+const canAccessTeamChat = (team, user) => user.role === 'admin' || isInTeam(team, user);
 
-  return isLeader || isMember;
+// Sends a socket event to everyone in the team. Never with an empty list:
+// io.to([]) would send it to every connected user.
+const emitToTeam = (req, team, event, payload) => {
+  const userIds = teamUserIds(team);
+  if (userIds.length > 0) req.app.get('io')?.to(userIds).emit(event, payload);
 };
 
+// The chat shows only names
 const populateTeamMessageDetails = (query) => query.populate([
-  { path: 'sender', select: 'name email role profileImage' },
-  { path: 'team', select: 'name leaders members' },
-  { path: 'readBy.user', select: 'name email role profileImage' },
+  { path: 'sender', select: 'name' },
+  { path: 'team', select: 'name' },
+  { path: 'readBy.user', select: 'name' },
 ]);
 
 export const sendTeamMessage = async (req, res) => {
@@ -222,12 +222,17 @@ export const sendTeamMessage = async (req, res) => {
     }
 
     const team = await Team.findById(teamId).select('name leaders members isActive');
-    if (!team || !team.isActive) {
-      return res.status(404).json({ success: false, message: 'Team not found or inactive' });
+    if (!team) {
+      return res.status(404).json({ success: false, message: 'Team not found' });
     }
 
     if (!canAccessTeamChat(team, req.user)) {
       return res.status(403).json({ success: false, message: 'Not authorized for this team chat' });
+    }
+
+    // A frozen team's chat can be read but takes no new messages
+    if (!team.isActive) {
+      return res.status(400).json({ success: false, message: FROZEN_TEAM_MESSAGE });
     }
 
     const teamMessage = await TeamChatMessage.create({
@@ -238,19 +243,7 @@ export const sendTeamMessage = async (req, res) => {
 
     await populateTeamMessageDetails(teamMessage);
 
-    const io = req.app.get('io');
-    if (io) {
-      const targetUserIds = [
-        ...new Set([
-          ...team.leaders.map((id) => id.toString()),
-          ...team.members.map((id) => id.toString()),
-        ]),
-      ];
-
-      targetUserIds.forEach((userId) => {
-        io.to(userId).emit('receive_team_message', teamMessage);
-      });
-    }
+    emitToTeam(req, team, 'receive_team_message', teamMessage);
 
     await logAuditEventV2(req, {
       action: 'team_message_sent',
@@ -265,81 +258,85 @@ export const sendTeamMessage = async (req, res) => {
   }
 };
 
+// Latest page of a team's chat, oldest first. Pass ?before=<createdAt of the
+// oldest message shown> to load the page before it.
 export const getTeamMessages = async (req, res) => {
   try {
     const { teamId } = req.params;
 
     const team = await Team.findById(teamId).select('name leaders members isActive');
-    if (!team || !team.isActive) {
-      return res.status(404).json({ success: false, message: 'Team not found or inactive' });
+    if (!team) {
+      return res.status(404).json({ success: false, message: 'Team not found' });
     }
 
     if (!canAccessTeamChat(team, req.user)) {
       return res.status(403).json({ success: false, message: 'Not authorized for this team chat' });
     }
 
-    const messages = await TeamChatMessage.find({ team: teamId })
-      .populate('sender', 'name email role profileImage')
-      .populate('readBy.user', 'name email role profileImage')
-      .sort({ createdAt: 1 });
+    const filter = { team: team._id };
+    if (req.query.before) {
+      const before = new Date(req.query.before);
+      if (Number.isNaN(before.getTime())) {
+        return res.status(400).json({ success: false, message: 'Invalid before date' });
+      }
+      filter.createdAt = { $lt: before };
+    }
 
-    return res.json({ success: true, count: messages.length, data: messages });
+    // One extra tells us whether there is an older page
+    const newestFirst = await populateTeamMessageDetails(
+      TeamChatMessage.find(filter).sort({ createdAt: -1 }).limit(MESSAGE_PAGE_SIZE + 1)
+    );
+
+    const hasMore = newestFirst.length > MESSAGE_PAGE_SIZE;
+    const messages = newestFirst.slice(0, MESSAGE_PAGE_SIZE).reverse();
+
+    return res.json({ success: true, count: messages.length, data: messages, hasMore });
   } catch (error) {
     sendServerError(res, error);
   }
 };
 
+// Marks everything sent to the team so far as read by the current user, and
+// tells the team once: every message up to `readAt` that someone else sent
+// now lists this reader
 export const markTeamMessagesAsRead = async (req, res) => {
   try {
     const { teamId } = req.params;
 
     const team = await Team.findById(teamId).select('name leaders members isActive');
-    if (!team || !team.isActive) {
-      return res.status(404).json({ success: false, message: 'Team not found or inactive' });
+    if (!team) {
+      return res.status(404).json({ success: false, message: 'Team not found' });
     }
 
     if (!canAccessTeamChat(team, req.user)) {
       return res.status(403).json({ success: false, message: 'Not authorized for this team chat' });
     }
 
-    const unreadMessages = await TeamChatMessage.find({
-      team: teamId,
-      sender: { $ne: req.user._id },
-      'readBy.user': { $ne: req.user._id },
-    });
-
-    if (unreadMessages.length === 0) {
-      return res.json({ success: true, count: 0, data: [] });
+    // Read receipts are for the team; an admin looking in leaves none
+    if (!isInTeam(team, req.user)) {
+      return res.json({ success: true, count: 0 });
     }
 
     const readAt = new Date();
-
-    for (const message of unreadMessages) {
-      message.readBy.push({ user: req.user._id, readAt });
-      await message.save();
-    }
-
-    const updatedMessages = await populateTeamMessageDetails(
-      TeamChatMessage.find({ _id: { $in: unreadMessages.map((message) => message._id) } }).sort({ createdAt: 1 })
+    const { modifiedCount } = await TeamChatMessage.updateMany(
+      {
+        team: team._id,
+        sender: { $ne: req.user._id },
+        'readBy.user': { $ne: req.user._id },
+        createdAt: { $lte: readAt },
+      },
+      { $push: { readBy: { user: req.user._id, readAt } } }
     );
 
-    const io = req.app.get('io');
-    if (io) {
-      const targetUserIds = [
-        ...new Set([
-          ...team.leaders.map((id) => id.toString()),
-          ...team.members.map((id) => id.toString()),
-        ]),
-      ];
-
-      updatedMessages.forEach((message) => {
-        targetUserIds.forEach((userId) => {
-          io.to(userId).emit('team_message_read', message);
-        });
+    if (modifiedCount > 0) {
+      emitToTeam(req, team, 'team_messages_read', {
+        teamId: team._id.toString(),
+        reader: { _id: req.user._id.toString(), name: req.user.name },
+        readAt,
       });
     }
 
-    return res.json({ success: true, count: updatedMessages.length, data: updatedMessages });
+    return res.json({ success: true, count: modifiedCount });
   } catch (error) {
     sendServerError(res, error);
   }
@@ -351,9 +348,7 @@ export const getMyTeamChats = async (req, res) => {
       ? {}
       : { $or: [{ leaders: req.user._id }, { members: req.user._id }] };
 
-    const teams = await Team.find(teamFilter)
-      .select('name leaders members')
-      .sort({ updatedAt: -1 });
+    const teams = await Team.find(teamFilter).select('name leaders members isActive');
 
     const teamIds = teams.map((team) => team._id);
 
@@ -377,11 +372,17 @@ export const getMyTeamChats = async (req, res) => {
       return {
         teamId: team._id,
         teamName: team.name,
+        // false: frozen, the chat is read-only
+        isActive: team.isActive,
         lastMessage: latest?.message || null,
         lastMessageSender: latest?.sender || null,
         lastMessageAt: latest?.createdAt || null,
       };
     });
+
+    // Most recent conversation first; teams without messages last, by name
+    chats.sort((a, b) =>
+      (b.lastMessageAt?.getTime() ?? 0) - (a.lastMessageAt?.getTime() ?? 0) || a.teamName.localeCompare(b.teamName));
 
     return res.json({ success: true, count: chats.length, data: chats });
   } catch (error) {

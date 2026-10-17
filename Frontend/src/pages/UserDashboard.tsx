@@ -6,6 +6,7 @@ import { getErrorMessage } from '../api/axios'
 import { canRequestCompletion, canStart, isWaitingForTeammates, type AssigneeProgress } from '../utils/taskProgress'
 import { useFeedback } from '../context/useFeedback'
 import { socialV2API } from '../api/socialV2API'
+import ShareTaskDialog, { type ShareOffer } from '../components/ShareTaskDialog'
 
 type Task = {
   _id: string
@@ -70,6 +71,8 @@ export default function UserDashboard() {
   const [socialPosts, setSocialPosts] = useState<SocialPost[]>([])
   const [personalTodos, setPersonalTodos] = useState<PersonalTodo[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  // A completed todo's share draft, waiting for the owner to confirm it
+  const [shareOffer, setShareOffer] = useState<ShareOffer | null>(null)
   // Admins have their own dashboard
   const isAdminUser = user?.role === 'admin'
 
@@ -166,6 +169,10 @@ export default function UserDashboard() {
       if (updated) {
         setPersonalTodos((prev) => prev.map((todo) => (todo._id === todoId ? updated : todo)))
       }
+      // With auto-share on, nothing is posted until the owner confirms the draft
+      if (response?.autoShare?.suggested) {
+        setShareOffer({ taskId: todoId, draft: response.autoShare.draft })
+      }
     } catch (error) {
       notify(getErrorMessage(error, 'Unable to update todo'), 'error')
     }
@@ -205,6 +212,22 @@ export default function UserDashboard() {
 
         </div>
       </div>
+
+      {/* Anyone outside a team can start one, or join one by invite */}
+      {user?.role === 'user' && (
+        <div className="flex flex-col gap-3 rounded-xl border bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="font-semibold text-neutral-900">You're not in a team yet</p>
+            <p className="text-sm text-neutral-600">Start your own team and invite people to it, or accept an invite you've received.</p>
+          </div>
+          <button
+            onClick={() => navigate('/teams')}
+            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+          >
+            Start or join a team
+          </button>
+        </div>
+      )}
 
       {/* Quick Actions */}
 
@@ -555,6 +578,17 @@ export default function UserDashboard() {
       <div className="mx-auto max-w-6xl px-4 py-6">
         {renderDashboard}
       </div>
+
+      {shareOffer && (
+        <ShareTaskDialog
+          offer={shareOffer}
+          onClose={() => setShareOffer(null)}
+          onShared={(summary) => {
+            setShareOffer(null)
+            notify(summary, 'success')
+          }}
+        />
+      )}
     </div>
   )
 }

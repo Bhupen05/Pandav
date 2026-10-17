@@ -43,3 +43,16 @@ export const canRequestCompletion = (task: TaskWithProgress, userId?: string) =>
 // Finished their part, but teammates haven't yet
 export const isWaitingForTeammates = (task: TaskWithProgress, userId?: string) =>
   task.status === 'in-progress' && progressOf(task, userId) === 'completion-requested'
+
+type EditedTask = {
+  editedAt?: string
+  editedBy?: string | { _id?: string; name?: string }
+}
+
+// "Edited by Pat · 18/10/2026, 15:42:07" for a task an admin or team leader
+// changed after creating it, or null if nobody has
+export const editedLabel = (task: EditedTask): string | null => {
+  if (!task.editedAt) return null
+  const who = typeof task.editedBy === 'object' && task.editedBy?.name ? task.editedBy.name : 'someone'
+  return `Edited by ${who} · ${new Date(task.editedAt).toLocaleString()}`
+}

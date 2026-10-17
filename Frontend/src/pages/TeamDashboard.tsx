@@ -1,7 +1,11 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/useAuth'
+import { authAPI } from '../api/authAPI'
+import { taskAPI } from '../api/taskAPI'
 import { teamAPI } from '../api/teamAPI'
+import { editedLabel } from '../utils/taskProgress'
+import type { TaskInput } from '../components/Tasksadd'
 
 type TeamMember = {
   _id: string
@@ -18,15 +22,21 @@ type Team = {
   description?: string
   leaders: TeamMember[]
   members: TeamMember[]
+  // false: an admin froze the team; it can be looked at but not changed
+  isActive?: boolean
 }
 
 type Task = {
   _id: string
   title: string
+  description?: string
   status: string
   priority: string
   assignedTo: Array<{ _id: string; name: string; email: string }>
+  startDate?: string
   dueDate?: string
+  editedBy?: { _id: string; name: string }
+  editedAt?: string
   completionRequestedBy?: { _id: string; name: string }
   completionRequestedAt?: string
   rejectionReason?: string
@@ -77,7 +87,7 @@ const getErrorMessage = (error: unknown, fallback: string) => {
 
 export default function TeamDashboard() {
   const navigate = useNavigate()
-  const { user, isAuthenticated } = useAuth()
+  const { user, isAuthenticated, updateUser } = useAuth()
 
   const [team, setTeam] = useState<Team | null>(null)
   const [tasks, setTasks] = useState<Task[]>([])
@@ -88,6 +98,8 @@ export default function TeamDashboard() {
   const [isLoading, setIsLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<'overview' | 'tasks' | 'attendance' | 'members' | 'invite'>('overview')
   const [showCreateTask, setShowCreateTask] = useState(false)
+  // Set while the task modal edits an existing task instead of creating one
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null)
   const [showCreateTeam, setShowCreateTeam] = useState(false)
   const [showInviteModal, setShowInviteModal] = useState(false)
   const [inviteIdentifier, setInviteIdentifier] = useState('')
@@ -105,6 +117,12 @@ export default function TeamDashboard() {
   })
 
   const isLeader = user?.role === 'team_leader' || user?.role === 'admin'
+  // Anyone outside a team can create one here (and becomes its leader) or
+  // accept an invite; team members have their own page
+  const canUsePage = isLeader || user?.role === 'user'
+  const frozen = team?.isActive === false
+  // Leaders act on their team only while it isn't frozen
+  const canAct = isLeader && !frozen
 
   const fetchData = useCallback(async () => {
     setIsLoading(true)
@@ -116,12 +134,14 @@ export default function TeamDashboard() {
       const t: Team = teamRes.data
       setTeam(t)
 
-      // Secondary fetches are non-fatal — show the dashboard even if they fail
+      // Secondary fetches are non-fatal — show the dashboard even if they fail.
+      // A frozen team has no review queues: its waiting work goes to an admin.
+      const isFrozen = t.isActive === false
       try {
         const [tasksRes, pendingTasksRes, pendingAttRes, invitesRes, attRes] = await Promise.all([
           teamAPI.getTeamTasks(t._id),
-          teamAPI.getTeamPendingApprovalTasks(t._id),
-          teamAPI.getTeamPendingAttendance(t._id),
+          isFrozen ? { data: [] } : teamAPI.getTeamPendingApprovalTasks(t._id),
+          isFrozen ? { data: [] } : teamAPI.getTeamPendingAttendance(t._id),
           teamAPI.getMyInvites(),
           teamAPI.getTeamAttendance(t._id),
         ])
@@ -153,6 +173,8 @@ export default function TeamDashboard() {
         setAttendance([])
         setPendingAttendance([])
         setError(null)
+        // Someone without a team may have been invited to one
+        teamAPI.getMyInvites().then((res) => setInvites(res.data || [])).catch(() => setInvites([]))
       } else {
         const errorMsg =
           message ||
@@ -169,9 +191,19 @@ export default function TeamDashboard() {
 
   useEffect(() => {
     if (!isAuthenticated) { navigate('/login'); return }
-    if (!isLeader) { navigate('/dashboard'); return }
+    if (user?.role === 'team_member') { navigate('/team-member'); return }
+    if (!canUsePage) { navigate('/dashboard'); return }
     void fetchData()
-  }, [fetchData, isAuthenticated, isLeader, navigate])
+  }, [fetchData, isAuthenticated, canUsePage, user?.role, navigate])
+
+  // Creating a team or joining one changes the user's role on the server
+  const refreshUser = async () => {
+    try {
+      updateUser(await authAPI.getMe())
+    } catch {
+      // The next page load picks the new role up
+    }
+  }
 
   const handleCreateTeam = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -183,6 +215,7 @@ export default function TeamDashboard() {
       })
       setShowCreateTeam(false)
       setNewTeam({ name: '', description: '' })
+      await refreshUser()
       await fetchData()
     } catch (err: unknown) {
       alert(getErrorMessage(err, 'Failed to create team'))
@@ -279,19 +312,57 @@ export default function TeamDashboard() {
     }
   }
 
+  const closeTaskModal = () => {
+    setShowCreateTask(false)
+    setEditingTaskId(null)
+    setNewTask({ title: '', description: '', assignedTo: [], priority: 'medium', startDate: '', dueDate: '' })
+  }
+
+  const openEditTask = (task: Task) => {
+    setEditingTaskId(task._id)
+    setNewTask({
+      title: task.title,
+      description: task.description || '',
+      assignedTo: task.assignedTo.map(u => u._id),
+      priority: task.priority,
+      startDate: task.startDate?.slice(0, 10) || '',
+      dueDate: task.dueDate?.slice(0, 10) || '',
+    })
+    setShowCreateTask(true)
+  }
+
+  // A leader manages tasks of the people they lead, never one they are on
+  const canManageTask = (task: Task) => canAct && !task.assignedTo.some(u => u._id === user?._id)
+
   const handleCreateTask = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!team) return
     setActionLoading(p => ({ ...p, createTask: true }))
     try {
-      await teamAPI.createTeamTask(team._id, { ...newTask, assignedTo: newTask.assignedTo })
-      setShowCreateTask(false)
-      setNewTask({ title: '', description: '', assignedTo: [], priority: 'medium', startDate: '', dueDate: '' })
+      if (editingTaskId) {
+        await taskAPI.updateTask(editingTaskId, { ...newTask, priority: newTask.priority as TaskInput['priority'] })
+      } else {
+        await teamAPI.createTeamTask(team._id, { ...newTask, assignedTo: newTask.assignedTo })
+      }
+      closeTaskModal()
       await fetchData()
     } catch (err: unknown) {
-      alert(getErrorMessage(err, 'Failed to create task'))
+      alert(getErrorMessage(err, editingTaskId ? 'Failed to save task' : 'Failed to create task'))
     } finally {
       setActionLoading(p => ({ ...p, createTask: false }))
+    }
+  }
+
+  const handleDeleteTask = async (task: Task) => {
+    if (!confirm(`Delete "${task.title}"? It will be removed for everyone.`)) return
+    setActionLoading(p => ({ ...p, [`delete-${task._id}`]: true }))
+    try {
+      await taskAPI.deleteTask(task._id)
+      await fetchData()
+    } catch (err: unknown) {
+      alert(getErrorMessage(err, 'Failed to delete task'))
+    } finally {
+      setActionLoading(p => ({ ...p, [`delete-${task._id}`]: false }))
     }
   }
 
@@ -299,7 +370,9 @@ export default function TeamDashboard() {
     setActionLoading(p => ({ ...p, [inviteId]: true }))
     try {
       await teamAPI.acceptInvite(inviteId)
-      await fetchData()
+      // Joining makes them a team member, whose page is /team-member
+      await refreshUser()
+      navigate('/team-member')
     } catch (err: unknown) {
       alert(getErrorMessage(err, 'Failed to accept invite'))
     } finally {
@@ -375,11 +448,11 @@ export default function TeamDashboard() {
       <div className="min-h-screen bg-gray-50 px-4 py-12">
         <div className="max-w-3xl mx-auto">
           <div className="bg-white border rounded-2xl shadow-sm p-8 text-center">
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-600">Team Leader</p>
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-600">Your team</p>
             <h1 className="text-3xl font-bold text-gray-900 mt-3">Create your team</h1>
             <p className="text-gray-500 mt-3 max-w-xl mx-auto">
-              You do not manage a team yet. Create one first, then you can invite members, assign team tasks,
-              track attendance, and approve work from this dashboard.
+              You are not in a team yet. Create one and you will lead it: invite people, give them tasks,
+              and approve their work and attendance from this page.
             </p>
             <button
               onClick={() => setShowCreateTeam(true)}
@@ -388,6 +461,40 @@ export default function TeamDashboard() {
               Create Team
             </button>
           </div>
+
+          {invites.length > 0 && (
+            <div className="mt-6 bg-white border rounded-2xl shadow-sm p-6">
+              <h2 className="font-semibold text-gray-900">Or join a team you were invited to</h2>
+              <div className="mt-4 space-y-3">
+                {invites.map(invite => (
+                  <div key={invite._id} className="flex flex-col gap-3 rounded-xl border p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="font-medium text-gray-900">{invite.team.name}</p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        Invited by {invite.invitedBy.name} · {new Date(invite.createdAt).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleAcceptInvite(invite._id)}
+                        disabled={actionLoading[invite._id]}
+                        className="px-4 py-2 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 disabled:opacity-50"
+                      >
+                        Accept
+                      </button>
+                      <button
+                        onClick={() => handleDeclineInvite(invite._id)}
+                        disabled={actionLoading[invite._id]}
+                        className="px-4 py-2 bg-gray-200 text-gray-700 text-sm rounded-lg hover:bg-gray-300 disabled:opacity-50"
+                      >
+                        Decline
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {showCreateTeam && (
@@ -396,8 +503,8 @@ export default function TeamDashboard() {
               <h3 className="text-lg font-semibold mb-4">Create Team</h3>
               <form onSubmit={handleCreateTeam} className="space-y-4">
                 <div>
-                  <label className="text-sm font-medium text-gray-700">Team Name *</label>
-                  <input
+                  <label htmlFor="team-name" className="text-sm font-medium text-gray-700">Team Name *</label>
+                  <input id="team-name"
                     required
                     value={newTeam.name}
                     onChange={e => setNewTeam(p => ({ ...p, name: e.target.value }))}
@@ -406,8 +513,8 @@ export default function TeamDashboard() {
                   />
                 </div>
                 <div>
-                  <label className="text-sm font-medium text-gray-700">Description</label>
-                  <textarea
+                  <label htmlFor="team-description" className="text-sm font-medium text-gray-700">Description</label>
+                  <textarea id="team-description"
                     rows={3}
                     value={newTeam.description}
                     onChange={e => setNewTeam(p => ({ ...p, description: e.target.value }))}
@@ -472,6 +579,14 @@ export default function TeamDashboard() {
             </div>
           </div>
 
+          {frozen && (
+            <div role="status" className="mt-4 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900">
+              <span className="font-semibold">This team is frozen.</span> An admin has paused it: you can look at its
+              tasks, attendance and chat, but nothing can be added, changed or approved until an admin unfreezes it.
+              Work waiting for approval goes to an admin.
+            </div>
+          )}
+
           {/* Tabs */}
           <div className="flex gap-1 mt-4 border-b -mb-px">
             {(['overview', 'tasks', 'attendance', 'members', 'invite'] as const).map(tab => (
@@ -526,7 +641,7 @@ export default function TeamDashboard() {
             </div>
 
             {/* Pending task approvals */}
-            {pendingTasks.length > 0 && (
+            {canAct && pendingTasks.length > 0 && (
               <div className="bg-white rounded-xl shadow-sm border p-5 mb-4">
                 <h2 className="font-semibold text-gray-800 mb-3">Tasks Awaiting Your Approval</h2>
                 <div className="space-y-3">
@@ -561,7 +676,7 @@ export default function TeamDashboard() {
             )}
 
             {/* Pending attendance */}
-            {pendingAttendance.length > 0 && (
+            {canAct && pendingAttendance.length > 0 && (
               <div className="bg-white rounded-xl shadow-sm border p-5">
                 <h2 className="font-semibold text-gray-800 mb-3">Attendance Requests</h2>
                 <div className="space-y-3">
@@ -604,17 +719,19 @@ export default function TeamDashboard() {
           <div>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold text-gray-800">Team Tasks</h2>
-              <button
-                onClick={() => setShowCreateTask(true)}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
-              >
-                + Create Task
-              </button>
+              {canAct && (
+                <button
+                  onClick={() => setShowCreateTask(true)}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+                >
+                  + Create Task
+                </button>
+              )}
             </div>
 
             {tasks.length === 0 ? (
               <div className="text-center py-12 bg-white rounded-xl border">
-                <p className="text-gray-500">No team tasks yet. Create the first one!</p>
+                <p className="text-gray-500">{canAct ? 'No team tasks yet. Create the first one!' : 'No team tasks yet.'}</p>
               </div>
             ) : (
               <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
@@ -632,7 +749,10 @@ export default function TeamDashboard() {
                   <tbody className="divide-y divide-gray-100">
                     {tasks.map(task => (
                       <tr key={task._id} className="hover:bg-gray-50">
-                        <td className="px-4 py-3 font-medium text-gray-900">{task.title}</td>
+                        <td className="px-4 py-3">
+                          <p className="font-medium text-gray-900">{task.title}</p>
+                          {editedLabel(task) && <p className="text-xs text-gray-400 mt-0.5">{editedLabel(task)}</p>}
+                        </td>
                         <td className="px-4 py-3 text-gray-600">
                           {task.assignedTo?.map(u => (typeof u === 'string' ? u : u.name)).join(', ')}
                         </td>
@@ -650,7 +770,25 @@ export default function TeamDashboard() {
                           {task.dueDate ? new Date(task.dueDate).toLocaleDateString() : '-'}
                         </td>
                         <td className="px-4 py-3">
-                          {task.status === 'completion-requested' && (
+                          <div className="flex flex-wrap gap-1">
+                          {canManageTask(task) && (
+                            <>
+                              <button
+                                onClick={() => openEditTask(task)}
+                                className="px-2 py-1 border border-gray-300 text-gray-700 text-xs rounded hover:bg-gray-50"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => handleDeleteTask(task)}
+                                disabled={actionLoading[`delete-${task._id}`]}
+                                className="px-2 py-1 border border-red-300 text-red-600 text-xs rounded hover:bg-red-50 disabled:opacity-50"
+                              >
+                                Delete
+                              </button>
+                            </>
+                          )}
+                          {canAct && task.status === 'completion-requested' && (
                             <div className="flex gap-1">
                               <button
                                 onClick={() => handleApproveTask(task._id)}
@@ -667,6 +805,7 @@ export default function TeamDashboard() {
                               </button>
                             </div>
                           )}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -682,7 +821,7 @@ export default function TeamDashboard() {
           <div>
             <h2 className="text-lg font-semibold text-gray-800 mb-4">Team Attendance</h2>
 
-            {pendingAttendance.length > 0 && (
+            {canAct && pendingAttendance.length > 0 && (
               <div className="mb-6">
                 <h3 className="text-sm font-semibold text-yellow-800 mb-2">Pending Requests</h3>
                 <div className="space-y-2">
@@ -767,12 +906,14 @@ export default function TeamDashboard() {
           <div>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold text-gray-800">Team Members ({allMembers.length})</h2>
-              <button
-                onClick={() => setShowInviteModal(true)}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
-              >
-                + Invite Member
-              </button>
+              {canAct && (
+                <button
+                  onClick={() => setShowInviteModal(true)}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+                >
+                  + Invite Member
+                </button>
+              )}
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -799,7 +940,7 @@ export default function TeamDashboard() {
                         <p className="text-xs text-gray-400">{member.department}</p>
                       )}
                     </div>
-                    {!isLeaderMember && member._id !== user?._id && (
+                    {canAct && !isLeaderMember && member._id !== user?._id && (
                       <button
                         onClick={() => handleRemoveMember(member._id, member.name)}
                         disabled={actionLoading[member._id]}
@@ -931,11 +1072,14 @@ export default function TeamDashboard() {
       {showCreateTask && team && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 overflow-y-auto">
           <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-lg my-4">
-            <h3 className="text-lg font-semibold mb-4">Create Team Task</h3>
+            <h3 className="text-lg font-semibold mb-4">{editingTaskId ? 'Edit Task' : 'Create Team Task'}</h3>
+            {editingTaskId && (
+              <p className="text-xs text-gray-500 -mt-2 mb-4">Saving a change marks the task as edited by you, with the time.</p>
+            )}
             <form onSubmit={handleCreateTask} className="space-y-3">
               <div>
-                <label className="text-sm font-medium text-gray-700">Title *</label>
-                <input
+                <label htmlFor="task-title" className="text-sm font-medium text-gray-700">Title *</label>
+                <input id="task-title"
                   required
                   value={newTask.title}
                   onChange={e => setNewTask(p => ({ ...p, title: e.target.value }))}
@@ -943,8 +1087,8 @@ export default function TeamDashboard() {
                 />
               </div>
               <div>
-                <label className="text-sm font-medium text-gray-700">Description *</label>
-                <textarea
+                <label htmlFor="task-description" className="text-sm font-medium text-gray-700">Description *</label>
+                <textarea id="task-description"
                   required
                   rows={3}
                   value={newTask.description}
@@ -953,8 +1097,8 @@ export default function TeamDashboard() {
                 />
               </div>
               <div>
-                <label className="text-sm font-medium text-gray-700">Assign To (select members) *</label>
-                <select
+                <label htmlFor="task-assignees" className="text-sm font-medium text-gray-700">Assign To (select members) *</label>
+                <select id="task-assignees"
                   multiple
                   value={newTask.assignedTo}
                   onChange={e => {
@@ -971,8 +1115,8 @@ export default function TeamDashboard() {
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-sm font-medium text-gray-700">Priority</label>
-                  <select
+                  <label htmlFor="task-priority" className="text-sm font-medium text-gray-700">Priority</label>
+                  <select id="task-priority"
                     value={newTask.priority}
                     onChange={e => setNewTask(p => ({ ...p, priority: e.target.value }))}
                     className="mt-1 w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -985,8 +1129,8 @@ export default function TeamDashboard() {
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-sm font-medium text-gray-700">Start Date *</label>
-                  <input
+                  <label htmlFor="task-start" className="text-sm font-medium text-gray-700">Start Date *</label>
+                  <input id="task-start"
                     required
                     type="date"
                     value={newTask.startDate}
@@ -995,8 +1139,8 @@ export default function TeamDashboard() {
                   />
                 </div>
                 <div>
-                  <label className="text-sm font-medium text-gray-700">Due Date *</label>
-                  <input
+                  <label htmlFor="task-due" className="text-sm font-medium text-gray-700">Due Date *</label>
+                  <input id="task-due"
                     required
                     type="date"
                     value={newTask.dueDate}
@@ -1008,7 +1152,7 @@ export default function TeamDashboard() {
               <div className="flex gap-3 justify-end pt-2">
                 <button
                   type="button"
-                  onClick={() => setShowCreateTask(false)}
+                  onClick={closeTaskModal}
                   className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200"
                 >
                   Cancel
@@ -1018,7 +1162,9 @@ export default function TeamDashboard() {
                   disabled={actionLoading['createTask']}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
                 >
-                  {actionLoading['createTask'] ? 'Creating...' : 'Create Task'}
+                  {actionLoading['createTask']
+                    ? (editingTaskId ? 'Saving...' : 'Creating...')
+                    : (editingTaskId ? 'Save Changes' : 'Create Task')}
                 </button>
               </div>
             </form>

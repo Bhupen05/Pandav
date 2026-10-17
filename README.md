@@ -5,14 +5,21 @@ A full-stack MERN application for managing employee tasks, attendance, and perfo
 ## 🚀 Features
 
 ### For Regular Users
+- **Teams**: Anyone can sign up, start a team and lead it, or join a team by invite
 - **Task Management**: View and manage assigned tasks with priority levels and status tracking
 - **Attendance System**: Check-in/check-out functionality with work hours calculation
 - **Profile Management**: Update personal information and upload profile pictures
 - **Activity Dashboard**: View task completion streaks and performance metrics
 
+### For Team Leaders
+- **Team Tasks**: Give tasks to the team, edit and delete them (an edited task shows who changed it and when), and approve finished work
+- **Team Attendance**: Review the team's check-ins and leave requests
+- **Social Hub**: Approve and publish the team's posts
+
 ### For Administrators
 - **Complete Task Oversight**: View, create, edit, and delete all tasks across the organization
 - **User Management**: Manage employee accounts and permissions
+- **Team Oversight**: Create teams with a chosen leader, and freeze a team (it can be read but not changed; its waiting approvals come to admins)
 - **Attendance Monitoring**: Track all employee attendance records and work hours
 - **Analytics Dashboard**: View comprehensive statistics including:
   - Task completion rates
@@ -49,61 +56,35 @@ A full-stack MERN application for managing employee tasks, attendance, and perfo
 
 ```
 Pandav/
-├── Frontend/
+├── .github/workflows/ci.yml   # Lint, tests, browser tests and audits on every push
+├── Frontend/                  # React 19 + Vite + Tailwind
 │   ├── src/
-│   │   ├── api/              # API service layer
-│   │   │   ├── axios.ts      # Axios instance with interceptors
-│   │   │   ├── authAPI.ts    # Authentication endpoints
-│   │   │   ├── taskAPI.ts    # Task management endpoints
-│   │   │   ├── userAPI.ts    # User management endpoints
-│   │   │   └── attendanceAPI.ts
-│   │   ├── components/       # Reusable components
-│   │   │   ├── Navbar.tsx    # Navigation with profile dropdown
-│   │   │   ├── Tasksadd.tsx  # Task creation form
-│   │   │   ├── Taskscard.tsx # Task display card
-│   │   │   ├── Attendance.tsx # Attendance management
-│   │   │   └── Contactus.tsx
-│   │   ├── context/          # React Context
-│   │   │   └── AuthContext.tsx # Authentication state
-│   │   ├── pages/            # Page components
-│   │   │   ├── Landing.tsx   # Home page
-│   │   │   ├── Login.tsx     # Login/Register
-│   │   │   ├── Profile.tsx   # User profile with heatmap
-│   │   │   ├── Tasks.tsx     # User task view
-│   │   │   ├── AdminDashboard.tsx # Admin panel
-│   │   │   ├── About.tsx
-│   │   │   └── Service.tsx
-│   │   ├── App.tsx           # Main app component
-│   │   └── main.tsx          # Entry point
-│   ├── package.json
-│   └── vite.config.ts
+│   │   ├── api/               # One module per API area; axios.ts holds the shared client
+│   │   ├── components/        # Navbar, route guard, task form and card, chat window, attendance, ...
+│   │   ├── context/           # Auth, chat (Socket.io) and feedback (toasts, dialogs) providers
+│   │   ├── pages/             # One component per route; loaded on demand (App.tsx)
+│   │   ├── utils/             # Dates, role routing, task progress, image resizing, paging
+│   │   ├── App.tsx            # Routes
+│   │   └── main.tsx           # Entry point
+│   ├── e2e/                   # Playwright browser tests
+│   ├── playwright.config.ts
+│   ├── vercel.json            # Production: /api proxy to the backend, SPA rewrites
+│   └── vite.config.ts         # Development: /api proxy to the backend
 │
-└── Backend/
+└── Backend/                   # Express + MongoDB (Mongoose) + Socket.io
     ├── src/
-    │   ├── config/
-    │   │   └── database.js   # MongoDB connection
-    │   ├── controllers/      # Request handlers
-    │   │   ├── authController.js
-    │   │   ├── taskController.js
-    │   │   ├── userController.js
-    │   │   ├── attendanceController.js
-    │   │   └── contactController.js
-    │   ├── models/           # Mongoose schemas
-    │   │   ├── User.js       # User model with profileImage
-    │   │   ├── Task.js       # Task model
-    │   │   ├── Attendance.js # Attendance model
-    │   │   └── Contact.js
-    │   ├── routes/           # API routes
-    │   │   ├── authRoutes.js
-    │   │   ├── taskRoutes.js
-    │   │   ├── userRoutes.js
-    │   │   ├── attendanceRoutes.js
-    │   │   └── contactRoutes.js
-    │   ├── middleware/
-    │   │   └── auth.js       # JWT verification & authorization
-    │   └── server.js         # Express app setup
-    ├── package.json
-    └── .env
+    │   ├── config/            # Database connection
+    │   ├── controllers/       # Request handlers: auth, users, tasks, attendance, teams,
+    │   │                      #   chat, contact, Social Hub (socialV2Controller.js)
+    │   ├── middleware/        # Sessions and roles, rate limits, input sanitising, V2 validation
+    │   ├── models/            # Mongoose schemas (Social Hub models end in V2)
+    │   ├── routes/            # Routers; v2Routes.js mounts them all under /api/v2
+    │   ├── utils/             # Sessions, HTTP helpers, team rules, dates, token encryption
+    │   └── server.js          # Express app, Socket.io, route mounting
+    ├── scripts/migrate-data.js  # npm run migrate: brings an existing database up to date
+    ├── test/                  # End-to-end API test suites (npm test) and the browser tests' backend
+    ├── Doc/                   # API reference
+    └── create-users.js        # Seeds the first admin and demo user
 ```
 
 ## 🔧 Installation & Setup
@@ -197,7 +178,9 @@ npm run preview
 
 The backend has end-to-end tests in `Backend/test/`. Each suite starts the real server on its own
 throwaway database (`pandav_test_<suite>`, dropped before every run) and exercises the API the way
-the app uses it: security, everyday workflows, data integrity, and the migration script.
+the app uses it: security, everyday workflows, data integrity, teams, the Social Hub, the
+project owner's rules (`decisions.test.js`: who runs teams, frozen teams, task edits, messaging,
+sharing), and the migration script.
 
 They need Node.js 22 or newer and a running MongoDB server:
 
@@ -210,48 +193,34 @@ TEST_MONGODB_URL=mongodb://127.0.0.1:27999 npm test   # any other server
 On Windows PowerShell, set the variable with `$env:TEST_MONGODB_URL = "mongodb://..."` first.
 The tests never read `Backend/.env`, so they can't touch your development or production database.
 
+The frontend has browser tests in `Frontend/e2e/` (Playwright, Chromium): sign-in, sessions and
+"remember me", route guards, live chat (including after a backend restart), the admin flows
+for tasks, attendance and password resets, and a user starting a team and managing its tasks. They start their own backend (port 5055, on a fresh
+`pandav_test_e2e` database) and Vite dev server (port 5180), and need the same MongoDB server as
+the backend tests:
+
+```bash
+cd Frontend
+npx playwright install chromium   # once
+npm run test:e2e
+```
+
 GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push and pull request:
-- **Backend:** the test suites against a MongoDB 7 service, then `npm audit` of production dependencies
+- **Backend:** `npm run lint`, the test suites against a MongoDB 7 service, then `npm audit` of production dependencies
 - **Frontend:** `npm run lint`, then `npm run build` (type-check and bundle), then `npm audit` of production dependencies
+- **Browser tests:** the Playwright suite against a MongoDB 7 service; a failed run keeps its report and traces as an artifact
 
 The audit steps fail on high or critical advisories.
 
 ## 📡 API Endpoints
 
-### Authentication
-- `POST /api/auth/register` - Register new user
-- `POST /api/auth/login` - User login
-- `GET /api/auth/me` - Get current user
+The API lives under `/api/v2`. The full reference, one page per area, is in
+[`Backend/Doc/`](Backend/Doc/README.md): sessions, errors, paging and rate limits on its front
+page, then users, tasks, attendance, teams, chat (with the Socket.io events) and the Social Hub.
 
-### Tasks
-- `GET /api/tasks` - Get all tasks (filtered by role)
-- `GET /api/tasks/:id` - Get single task
-- `POST /api/tasks` - Create task
-- `PUT /api/tasks/:id` - Update task
-- `DELETE /api/tasks/:id` - Delete task (admin only)
-
-### Users
-- `GET /api/users` - Get all users (admin only)
-- `GET /api/users/:id` - Get user by ID
-- `PUT /api/users/:id` - Update user
-- `DELETE /api/users/:id` - Delete user (admin only)
-
-### Attendance
-- `GET /api/attendance` - Get attendance records
-- `POST /api/attendance` - Create attendance record
-- `POST /api/attendance/checkin` - Check-in
-- `POST /api/attendance/checkout` - Check-out
-- `PUT /api/attendance/:id` - Update attendance
-- `DELETE /api/attendance/:id` - Delete attendance (admin only)
-
-### Health
-- `GET /api/health` - `200` when the server and database are up, `503` while the database is unreachable
-
-### Contact
-- `GET /api/contact` - Get all messages (admin only)
-- `POST /api/contact` - Submit contact form
-- `PUT /api/contact/:id` - Update message status
-- `DELETE /api/contact/:id` - Delete message
+`GET /api/v2/health` answers `200` when the server and database are up and `503` while the
+database is unreachable. Point the host's health check (Render: Settings → Health Check Path)
+at it. The old unversioned `/api/*` and `/api/v1/*` copies of the routes were removed.
 
 ## 🔐 Authentication & Authorization
 
@@ -275,7 +244,7 @@ browser (Safari and iOS block cookies set by another site):
 
 Chat sockets can't go through Vercel's proxy, so they connect to the backend directly
 (`VITE_BACKEND_URL`, set for production in `Frontend/.env.production`). Each connection first
-gets a one-minute ticket from `POST /api/auth/socket-token`.
+gets a one-minute ticket from `POST /api/v2/auth/socket-token`.
 
 If the backend moves, update both `Frontend/vercel.json` and `Frontend/.env.production`.
 
@@ -288,15 +257,25 @@ If the backend moves, update both `Frontend/vercel.json` and `Frontend/.env.prod
 4. Everyone is signed out once: tokens saved by the old version are no longer accepted.
 
 ### Role-Based Access Control
-- **User Role**: Access to own tasks, attendance, and profile
-- **Admin Role**: Full access to all features and data
+- **User**: own tasks, attendance and profile. Can start a team (and becomes its leader) or join one by invite.
+- **Team member**: as a user, plus the team's chat and tasks.
+- **Team leader**: manages the team they lead: invites, team tasks (create, edit, delete, approve),
+  attendance reviews, and members' Social Hub posts. Never reviews their own work. None of this
+  while an admin has frozen the team.
+- **Admin**: full access to all features and data.
+
+Direct messages follow one rule in the chat and the Social Hub: admins can message anyone;
+otherwise people message their teammates, their Social Hub connections, or someone who messaged
+them first. 45 messages a minute per sender.
 
 ### Protected Routes
 Backend uses middleware to protect routes:
 ```javascript
 router.get('/tasks', protect, getTasks);  // Requires authentication
-router.delete('/tasks/:id', protect, authorize('admin'), deleteTask);  // Admin only
+router.get('/teams', protect, authorize('admin'), getTeams);  // Admin only
 ```
+Finer rules (a leader acting only on their own team, never on themselves) are checked in the
+controllers, with the helpers in `Backend/src/utils/teams.js` and `utils/messaging.js`.
 
 ## 👤 Default Users
 
@@ -305,8 +284,9 @@ admin (`admin@example.com`) and a regular user (`user@example.com`) and prints a
 password for each, once. Set `SEED_ADMIN_PASSWORD` / `SEED_USER_PASSWORD` in `Backend/.env`
 to choose them yourself.
 
-Self-registration (`POST /api/auth/register`) always creates a regular user; the `role`
-field is ignored. An admin can promote a user with `PUT /api/users/:id` and `{ "role": "admin" }`.
+Self-registration (`POST /api/v2/auth/register`) always creates a regular user; the `role`
+field is ignored. An admin can promote a user with `PUT /api/v2/users/:id` and `{ "role": "admin" }`.
+Team roles come from teams: creating a team makes you its leader, accepting an invite makes you a member.
 
 ## ⬆️ Upgrading an Existing Database
 
@@ -427,6 +407,9 @@ export const getFeatures = async (req, res) => {
 ```javascript
 // routes/featureRoutes.js
 router.get('/', protect, getFeatures);
+
+// routes/v2Routes.js: the API is served under /api/v2 only
+router.use('/features', featureRoutes);
 ```
 
 4. **Create API Service** (Frontend)

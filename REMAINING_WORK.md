@@ -1,21 +1,31 @@
 # Remaining Work
 
-What is still open after Phase 6 (security pass over the V2 social and teams code), as of
-2026-10-17. Phases 1–4 (security, broken features, data integrity, code health) and the V2 merge
-are on `main` through PR #2. Phase 5 (cookie sessions) and Phase 6 are on `v1` and not merged
-into `main` yet.
+What is still open after Phase 8 (the project owner's decisions), as of 2026-10-18. Phases 1–4 and
+the V2 merge are on `main` through PR #2. Phases 5 (cookie sessions), 6 (V2 social and teams
+security pass), 7 (remaining-work pass) and 8 are on `v1` and not merged into `main` yet.
+
+Phase 8 carried out the decisions listed in [section 2](#2-decisions-made-in-phase-8).
+
+Phase 7 closed the earlier list's developer items:
+- the smaller fixes from the V2 security pass
+- browser tests in CI
+- the documentation
+- bundle size
+- a backend linter
+- most small cleanups
+
+Writing the API reference turned up more problems. The clear-cut ones were fixed too, with tests,
+among them a crash any signed-in user could trigger through the chat socket. What it found but
+didn't fix is in sections 3 and 4.
 
 | # | Item | Who | Priority | Size |
 |---|------|-----|----------|------|
 | 1 | [Deployment steps](#1-deployment-steps) | Project owner | Before the next deploy | Small |
-| 2 | [Follow-ups from the V2 security pass](#2-follow-ups-from-the-v2-security-pass) | Owner decisions, then developer | Medium | Small–Medium |
-| 3 | [Frontend tests in CI](#3-frontend-tests-in-ci) | Developer | High | Medium |
-| 4 | [Paging in the UI](#4-paging-in-the-ui) | Developer | Medium | Medium |
-| 5 | [Documentation](#5-documentation) | Developer | Medium | Medium |
-| 6 | [Bundle size](#6-bundle-size) | Developer | Low | Small |
-| 7 | [Backend linter](#7-backend-linter) | Developer | Low | Small |
-| 8 | [Known limitations](#8-known-limitations) | — | Accepted for now | — |
-| 9 | [Small cleanups](#9-small-cleanups) | Developer | Low | Small |
+| 2 | [Decisions made in Phase 8](#2-decisions-made-in-phase-8) | Project owner | One left to confirm | Small |
+| 3 | [Workflow gaps](#3-workflow-gaps) | Developer | Medium | Small–Medium |
+| 4 | [Consistency and robustness](#4-consistency-and-robustness) | Developer | Low | Small each |
+| 5 | [Paging in the UI](#5-paging-in-the-ui) | Developer | Low while data is small | Medium |
+| 6 | [Known limitations](#6-known-limitations) | — | Accepted for now | — |
 
 ---
 
@@ -32,7 +42,7 @@ These happen on GitHub, Render and Vercel, outside the code.
   - Neither has it → the app works, but rate limits treat every visitor as one, so ten failed
     logins from anyone lock everyone out of signing in for 15 minutes.
   - If you use Vercel preview deployments, set it for the Preview environment too.
-- [ ] Open and merge the Phase 5 pull request: <https://github.com/Bhupen05/Pandav/compare/main...v1>.
+- [ ] Open and merge the pull request: <https://github.com/Bhupen05/Pandav/compare/main...v1>.
       Expect a few minutes of sign-in errors until both Render and Vercel have finished deploying.
       Everyone has to sign in again once.
 - [ ] After the deploy:
@@ -48,6 +58,29 @@ These happen on GitHub, Render and Vercel, outside the code.
 - [ ] From now on, changing `JWT_SECRET` also means everyone has to link LinkedIn/GitHub again:
       the stored tokens are encrypted with a key derived from it.
 
+**Phase 7**
+- [ ] No new settings. Deploy the backend and frontend together: team-chat read receipts changed
+      shape (one `team_messages_read` event instead of one event per message), so until both are
+      live, read receipts in team chat update only on reload.
+- [ ] The GitHub Actions run for `v1` now has a third job, **e2e** (browser tests). Check it passes
+      on GitHub; if it fails, the run keeps a `playwright-report` artifact with traces.
+
+**Phase 8 (owner decisions)**
+- [ ] **Before deploying:** on Render, open the backend service → Settings → **Health Check
+      Path**. If it is `/api/health` or `/api/v1/health`, change it to `/api/v2/health`. Those
+      old paths no longer exist, so Render would treat the new version as broken and keep
+      restarting it. Do the same for any uptime monitor.
+- [ ] Deploy the backend and frontend together. No new settings and no migration.
+- [ ] What users will notice:
+  - Messages: people who could message anyone before now need to be teammates, connected in the
+    Social Hub, or answering someone who wrote to them first. Admins can still message anyone.
+    The Chat page lists only people the user may message.
+  - Personal tasks created before this version keep their auto-share setting. With it on,
+    completing the task now shows a preview to confirm instead of posting at once.
+  - Any user can create a team from the new **Team** link (or the dashboard card).
+- [ ] Admins freeze and unfreeze a team with the new **Freeze** button on Teams. A team made
+      inactive before this version shows as **Frozen**.
+
 **Earlier phases (skip any you have already done)**
 - [ ] Run `npm run migrate` in `Backend/` against the production database (Phase 3) and act on its
       "Needs attention" list.
@@ -59,187 +92,191 @@ These happen on GitHub, Render and Vercel, outside the code.
       `Asia/Kolkata`.
 - [ ] Optional: `VITE_CONTACT_EMAIL`, `VITE_CONTACT_PHONE`, `VITE_CONTACT_WHATSAPP` on Vercel to
       show contact details on the Contact page.
-- [ ] Check the GitHub Actions runs for `v1` and `main` (Actions tab). CI ran for the first time
-      when these branches were pushed, and nobody has looked at the results yet.
 
 ---
 
-## 2. Follow-ups from the V2 security pass
+## 2. Decisions made in Phase 8
 
-Phase 6 fixed the Social Hub and team issues listed in this file before, plus the ones the audit
-found. They are covered by `Backend/test/social.test.js` and the "team membership rules" checks in
-`Backend/test/teams.test.js`. What's left:
+Decided by the project owner and built in Phase 8, with tests (`Backend/test/decisions.test.js`,
+`Frontend/e2e/teams.spec.ts`):
 
-**Decisions for the project owner**
-- **Anyone can sign up and reach every employee.** Self-registration is open. A new account can
-  list colleagues' names and emails (`GET /users/search`, Social Hub discovery) and message any
-  active user through the main chat. For an internal tool, consider admin approval for new
-  accounts, or only allowing your company's email domain.
-- **"Connect before messaging" isn't a real rule.** The Social Hub requires an accepted
-  connection, but the main chat (`POST /chat/send`) lets anyone message any active user. Either
-  drop the Social Hub rule or apply one rule to both.
-- **Completing a personal task posts to LinkedIn by default.** `autoGenerateLinkedInPost`
-  defaults to on (`socialV2Controller.js:875`). For team leaders and admins with LinkedIn linked,
-  the post goes out at once with no review. Consider defaulting it to off.
-- **Team leaders can publish their members' posts.** Publishing now requires the author, an
-  admin, or a leader of the author's team. Publishing still uses the *author's* LinkedIn or GitHub
-  account. Decide whether only authors should publish to their own accounts.
+- **Open sign-up, and anyone can run a team.** Anyone can register. A user who isn't in a team can
+  create one (`POST /teams` without `leaderId`) and becomes its leader. One team per person
+  still holds. Admins still create teams with a chosen leader.
+- **Team leaders publish their members' posts**, with the author's linked account (unchanged).
+- **Team leaders create, edit and delete their team's tasks.** Not tasks they are on themselves,
+  which go to an admin, as approvals do. Any change to a task's details records `editedBy` and
+  `editedAt`, shown on the task as "Edited by <name> · <date and time>".
+- **One messaging rule** for the Chat page, the Social Hub and typing indicators
+  (`directMessageProblem` in `Backend/src/utils/messaging.js`): admins message anyone; others
+  message teammates (team not frozen), Social Hub connections, or someone who messaged them
+  first. Team leaders have no exception, since anyone can now become one. Both places share one
+  limit of 45 messages a minute.
+- **Deactivating a team freezes it.** Its tasks, attendance and chat stay readable. Nobody can
+  add tasks, invites, leaders or chat messages. Leaders can't edit, approve or remove anything.
+  Waiting approvals go to admins. An admin can unfreeze it.
+- **Auto-share asks first.** It is off by default. When it is on, completing a personal task shows
+  the post (editable) and posts only after the owner confirms. Optionally it also goes to
+  LinkedIn; members' LinkedIn posts still need a leader's approval.
+- **Old routes removed.** Only `/api/v2` is served; the health check is `/api/v2/health`.
+- **Contact page.** The form takes inquiries 24/7; the hours box is now "Call Us: Office Hours".
 
-**Smaller fixes (not done)**
-- **Team chat read receipts are slow.**
-  - `markTeamMessagesAsRead` (`chatController.js:292`) saves unread messages one at a time and
-    sends one event per message to every member.
-  - `getTeamMessages` (`:268`) returns the whole history.
-  - An admin who isn't in a team can mark its messages read.
-- **Typing indicators reach anyone.** The `typing` socket event (`server.js:95`) is relayed to
-  any user id, so anyone can show "X is typing" to anyone.
-- **A team can be left without a leader.** This happens when an admin removes the last leader or
-  deletes that user.
-- **Older handlers expose raw error messages.** Some answer 400 with the raw error message:
-  - `taskController.js:44`
-  - `attendanceController.js:149`, `:221`, `:293`, `:334`
-  - `userController.js:191`
-
-  Use `sendServerError`, which now turns schema validation errors into a 400 naming the fields.
-- **The feed misses posts and runs extra queries.** It loads the newest 100 posts, then filters
-  them per user (`socialV2Controller.js:526`). Posts visible to a user but older than those 100
-  never show, and each connections-only post costs one query.
-- **Fast likes can be lost.** Liking saves the whole post, so two quick likes can lose one.
-  `$addToSet`/`$pull` would fix it.
-- **An unused API call is broken.** `chatAPI.sendSocialMessage` (`Frontend/src/api/chatAPI.ts:66`)
-  sends `userId` where the API expects `receiverId`. Nothing calls it; delete it or fix it.
+**To confirm:** the call hours shown on the Contact page are still the sample ones (Mon–Fri 9:00 AM
+– 6:00 PM, Sat 10:00 AM – 4:00 PM, Sun closed, in `Frontend/src/components/Contactus.tsx`).
 
 ---
 
-## 3. Frontend tests in CI
+## 3. Workflow gaps
 
-**Now:** CI (`.github/workflows/ci.yml`) only lints and builds the frontend. The browser checks
-run in Phases 4 and 5 (sign-in with and without "remember me", reload, logout, expired session,
-live chat, reconnect after a backend restart, route guards) were one-off scripts and are not in
-the repo. Nothing catches a regression in the login or chat flows.
+Found while writing the API reference (`Backend/Doc/`); each page describes the current behaviour.
 
-**To do:**
-- Add Playwright (`@playwright/test`) to `Frontend/` with an `e2e/` folder.
-- In CI, start MongoDB (already a service in the backend job), seed it with `create-users.js`,
-  start the backend, and start Vite (its `/api` proxy already mirrors production).
-- First scenarios to cover:
-  - Sign in, reload, and sign out. The session cookie is HttpOnly and nothing is written to
-    browser storage.
-  - "Remember me" survives a browser restart; a plain session doesn't.
-  - Protected and admin-only routes redirect correctly.
-  - An expired session lands on `/login` without a redirect loop.
-  - A chat message arrives live, and the socket reconnects after a backend restart.
-  - The admin flows from Phase 2: create, edit and delete a task, review attendance, and reset a
-    password.
+**Tasks** (`taskController.js`, `teamController.js`)
+- **The approval queue and the approve rule disagree.**
+  - `GET /tasks/pending-approval` lists only tasks where *every* assignee has asked for
+    completion, but approve and reject already work once *one* has.
+  - For a leader, the queue includes a task if *any* assignee is in their (active) teams.
+    Approving needs *all* of them, so a listed task can answer 403.
+  - That 403 says "You cannot approve a task assigned to you" even when the real reason is an
+    assignee outside the leader's teams.
+- **An admin's status override leaves progress behind.** Reopening a completed task leaves every
+  assignee's progress `completed`, so nobody but an admin can move it again. Setting `completed`
+  directly doesn't record `approvedBy`/`approvedAt`. Setting `pending` keeps `completedDate`.
+- **Removing a team member can leave a team task with no assignees.** Only an admin can then
+  review it.
+- **The leaderboard is global and heavy.** Any signed-in user gets the top 20 across every team,
+  with each person's profile image (up to ~200 KB each).
+
+**Attendance** (`attendanceController.js`)
+- Check-in answers "Already checked in today" when today's record is, say, a leave request with
+  no check-in time.
+- Check-out only looks at today's record, so a shift that crosses midnight (in `APP_TIMEZONE`)
+  can't be checked out.
+- Team attendance approve/disapprove don't check the record's current state, so a reviewed record
+  can be flipped.
+
+**Teams and chat**
+- Inviting by `username` matches `name`, which isn't unique, and takes the first match. This
+  matters more now that anyone can lead a team and invite people.
+- There is still no way to leave a team; an admin has to remove the member. Members of a frozen
+  team can't join another one until an admin removes them.
+
+**Social Hub** (`socialV2Controller.js`)
+- **Publishing twice publishes twice.**
+  - A direct publish doesn't look at earlier results, so repeating it creates a second LinkedIn
+    post or GitHub issue.
+  - A new job can be queued after a completed one.
+- **Jobs can get stuck.**
+  - A job left in `processing` (for example after a crash) is never recovered, and it blocks new
+    jobs for that post and provider.
+  - `process` also runs failed jobs and ignores their backoff.
+  - `retry` doesn't reset `attempts`.
+- **Hidden things show, and others can't be seen.**
+  - Posts with `targets.pandav: false`, and pending or rejected posts, still show in the feed.
+  - No endpoint lists posts waiting for approval (the UI picks them out of the feed).
+  - Leaders can't see the jobs they queued for a member's post.
+- **Linked accounts.**
+  - After `JWT_SECRET` changes, `GET /integrations` still says `isConnected: true` although the
+    token can no longer be read.
+  - There is no unlink endpoint.
+  - `refreshToken` and `tokenExpiresAt` are stored but never used.
+- **Approval.**
+  - `autoPostStatus` stays `pending_approval` after approval.
+- **Moderation and connections.**
+  - Any moderation action works from any state (`unflag` restores a removed post).
+  - A rejected connection can't be withdrawn or asked again.
 
 ---
 
-## 4. Paging in the UI
+## 4. Consistency and robustness
+
+- **Response shapes differ.**
+  - `POST /chat/send` and `PATCH /chat/messages/:id/read` return the bare message (no
+    `success`/`data`).
+  - The Social Hub's `409 This task has already been shared` puts `postId` at the top level.
+  - Some lists lack `count`.
+  - Register returns fewer fields than login.
+  - `approvedBy` is sometimes an id, sometimes `{ name, email }`.
+  - `assigneeProgress[].user` is never populated.
+- **Provider errors are 500s in some places.** The Social Hub's profile, activity and OAuth
+  endpoints answer 500 for errors from LinkedIn/GitHub or missing OAuth settings. Linking answers
+  400 for the same kind of error.
+- **Missing input checks.**
+  - `POST /social/posts/from-task/:taskId` doesn't check `intro`.
+  - Queuing a GitHub job doesn't require a repository; the job fails later.
+  - Contact form fields have no length limits.
+  - Ids an admin sends (attendance `user`, task `assignedTo`) aren't checked against existing
+    users.
+- **Bookkeeping.**
+  - `approvedBy` on attendance is set by any reviewer edit, even remarks only.
+  - Moving a contact message away from `resolved` keeps `resolvedBy`.
+  - Re-sending a personal task's `completed` status resets `completedAt`.
+  - `assigneeProgress[].notes` is never written.
+- **Rate limits count refused requests.** The Social Hub limiters, and the shared direct-message
+  limit on `POST /chat/send`, run before validation and the messaging rule.
+- **Paging by date can skip an item.** The `?before=` cursors (chat, team chat, feed) compare
+  timestamps strictly, so two items created in the same millisecond can straddle a page boundary
+  and one is skipped.
+- **Deleting a user leaves "who did it" references.** These keep pointing at the deleted account:
+  - task `createdBy`/`approvedBy`/…
+  - attendance and post `approvedBy`
+  - contact `resolvedBy`
+  - team `createdBy`
+  - audit events
+
+  The cleanup also isn't a transaction, so a failure part-way leaves a partial delete.
+
+---
+
+## 5. Paging in the UI
 
 **Now:** the API pages these lists with `?page=&limit=` (via `listResponse` in
 `Backend/src/utils/http.js`):
 - `GET /tasks`
+- `GET /tasks/pending-approval`
 - `GET /attendance`
 - `GET /users`
 - `GET /contact`
 
-The frontend never sends those parameters, so it downloads every record each time. The Tasks page
-shows pages (`usePagination` in `Frontend/src/utils/usePagination.ts`), but it only splits a list
-that has already been fully downloaded. It also re-downloads the whole list on a timer
-(`Tasks.tsx:32`).
+The frontend never sends those parameters, so it downloads every record. The Tasks page also
+re-downloads its whole list every 30 seconds (`Tasks.tsx`). Chat, team chat and the Social Hub
+feed already load 50 at a time.
 
-**To do:** send `page` and `limit` from the Tasks page, admin attendance, the users list and the
-contact inbox, and read `pagination.total` for the page count. Filters and search need to move to
-the server at the same time, or they will only search the current page. This is fine to postpone
-while the data is small. Chat already loads messages 50 at a time.
+**To do:** paging these pages means moving more than the list to the server.
+- **Tasks page.** It works out its status counts, overdue and urgent badges, progress ring and
+  text search from the full list. It needs a summary from the server (counts by status, overdue,
+  urgent) and a `q` search parameter on `GET /tasks`.
+- **Admin attendance.** Its stats (pending requests, present days per person, checked in today)
+  also come from the full list.
+- **Users list.** It also feeds dropdowns that need everyone.
 
----
-
-## 5. Documentation
-
-- **`Backend/Doc/*.md`** (User, Task, Attendance): authentication was updated in Phase 5, but the
-  rest predates Phase 3. Out of date:
-  - Attendance `day` and `approvalStatus`, and the approve/reject endpoints.
-  - Per-assignee task progress, `GET /tasks/leaderboard`, and paging parameters.
-  - The removed `GET /chat/chats` and `GET /attendance/pending`.
-  - The `/api/v1` and `/api/v2` prefixes.
-  - There is no doc at all for teams, chat or the Social Hub.
-- **`README.md`**: the project-structure tree lists only the original pages and controllers. It
-  is missing teams, chat, social, the V2 routes, `utils/` and `test/`.
-- **`Frontend/TEST_BACKEND_CONNECTION.md`**: says to start the backend with `node server.js`. It
-  should be `npm run dev` (or `node src/server.js`) in `Backend/`.
-- **V2 doc pile**: `Frontend/` has ten overlapping documents from the V2 branch:
-  - `BUILD_SUMMARY.md`
-  - `COMPLETION_CHECKLIST.md`
-  - `DOCUMENTATION_SUMMARY.md`
-  - `FRONTEND_V2_COMPREHENSIVE_GUIDE.md`
-  - `FRONTEND_V2_IMPLEMENTATION_GUIDE.md`
-  - `FRONTEND_V2_QUICK_REFERENCE.md`
-  - `FRONTEND_V2_STEP_BY_STEP_GUIDE.md`
-  - `INDEX.md`
-  - `PROJECT_SUMMARY.md`
-  - `guide.md`
-
-  `Backend/` also has `README_V2_SYSTEM.md` plus a 307 KB PDF copy of it, and
-  `FRONTEND_V2_PAGES_API.md`. Keep one current guide and delete the rest, so readers don't
-  follow outdated instructions (several still described tokens in `localStorage` until Phase 5).
+Fine to postpone while the data is small.
 
 ---
 
-## 6. Bundle size
-
-**Now:** the frontend ships one 805 KB JavaScript file (218 KB gzipped), and every build warns
-about chunks over 500 KB. It grew from just over 500 KB when V2 added its pages, `lucide-react`
-and `motion`.
-
-**To do:** load pages on demand. In `Frontend/src/App.tsx`, replace the 20 page imports with
-`React.lazy(() => import('./pages/...'))` and wrap `<Routes>` in `<Suspense>`. The landing page
-then no longer downloads the admin dashboard, the Social Hub and the chat. Also remove the
-`lucide` dependency from `Frontend/package.json`: nothing imports it (the icons come from
-`lucide-react`).
-
----
-
-## 7. Backend linter
-
-**Now:** the frontend has ESLint (zero problems); the backend has none.
-
-**To do:** add ESLint 9 with a flat config for Node ESM (`@eslint/js` recommended plus
-`globals.node`) and a `lint` script in `Backend/package.json`. Fix what it finds, then add
-`npm run lint` to the backend CI job.
-
----
-
-## 8. Known limitations
+## 6. Known limitations
 
 Accepted for now; listed so nobody mistakes them for bugs.
 
 - **Logout signs out one browser only.** It clears that browser's cookie, but the token itself
-  stays valid until it expires (at most a day, or `JWT_EXPIRE` with "remember me"). A copied cookie
-  would keep working until then. Changing or resetting a password does sign out every other session. A
-  "sign out everywhere" button would need a per-user token version checked in `getUserFromToken`.
+  stays valid until it expires (at most a day, or `JWT_EXPIRE` with "remember me"). A copied
+  cookie would keep working until then. Changing or resetting a password does sign out every other
+  session. A "sign out everywhere" button would need a per-user token version checked in
+  `getUserFromToken`.
+- **Open chat connections outlive some sign-outs.** Logging out and changing your own password
+  don't close sockets that are already open. A password reset, deactivation or deletion by an
+  admin does.
+- **Reactivating an account revives its sessions** that haven't expired yet.
 - **The backend address is in two places.** `Frontend/vercel.json` (API proxy) and
   `Frontend/.env.production` (chat socket). Update both if the backend moves.
 - **Vercel preview deployments can't save data.** Their addresses aren't in `CLIENT_URL`, so the
   API refuses their POST/PUT/PATCH/DELETE requests.
 - **A sleeping Render server can time out requests.** Most requests give up after 30 seconds
-  (`Frontend/src/api/axios.ts:39`); only the session check on page load waits 90 seconds.
+  (`Frontend/src/api/axios.ts`); only the session check on page load waits 90 seconds.
+- **Users can't message an admin first** unless they are teammates or connected. The Contact page,
+  or a Social Hub connection request, is the way in.
+- **A frozen team's leaders keep the `team_leader` role.** They see the leader pages, read-only.
 - **The backend runs as one instance only.** Rate limits, the online-users list and the V2 rate
   limiter live in memory. Running more than one backend instance would need a shared store (e.g.
   Redis) and the Socket.io Redis adapter.
-
----
-
-## 9. Small cleanups
-
-- `Frontend/src/pages/Signup.tsx` (17 KB) and the empty `Signin.tsx` came from V2 and no page
-  uses them. Delete them, or wire `Signup.tsx` in place of `Register.tsx`.
-- The Contact page's "Office Hours" (9:00 AM – 6:00 PM, `Frontend/src/components/Contactus.tsx:204`)
-  is sample content: confirm or replace it.
-- The end of `Backend/README.md` contains a line with literal `\n` characters (the "API
-  Versioning" note); split it into real lines.
-- The old `/api/*` and `/api/v1/*` route aliases are still mounted (`Backend/src/server.js:170`,
-  "can be removed later"). The frontend uses only `/api/v2`; remove them once nothing else
-  calls them.
-- Local setup: a `Frontend/.env` that still sets `VITE_API_URL` can drop it; the app now uses
+- **Local setup:** a `Frontend/.env` that still sets `VITE_API_URL` can drop it; the app uses
   `VITE_BACKEND_URL` (default `http://localhost:5000`).

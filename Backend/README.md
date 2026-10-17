@@ -1,183 +1,71 @@
-# MERN Stack Backend
+# Pandav backend
 
-A robust backend API built with Express.js, MongoDB, and Node.js for the Pandav application.
+The API and real-time server for Pandav: Express, MongoDB (Mongoose) and Socket.io. It serves
+accounts and sessions, tasks, attendance, teams, direct and team chat, and the Social Hub
+(posts, publishing to LinkedIn/GitHub, connections, personal tasks).
 
-## Features
+The API reference is in [`Doc/`](Doc/README.md). Setup for the whole project, deployment and
+the sign-in design are in the [main README](../README.md).
 
-- **Authentication & Authorization**: JWT-based authentication with role-based access control (admin/user)
-- **User Management**: Complete CRUD operations for user profiles
-- **Task Management**: Create, assign, and track tasks with priorities and status
-- **Attendance System**: Check-in/check-out functionality with work hours calculation
-- **Contact Management**: Handle contact form submissions
-- **Secure**: Password hashing with bcrypt, protected routes, input validation
+## Setup
 
-## Tech Stack
+Needs Node.js 22 or newer and a MongoDB server.
 
-- **Node.js** - Runtime environment
-- **Express.js** - Web framework
-- **MongoDB** - Database
-- **Mongoose** - ODM for MongoDB
-- **JWT** - Authentication tokens
-- **bcryptjs** - Password hashing
-- **CORS** - Cross-origin resource sharing
-
-## Installation
-
-1. Navigate to the Backend directory:
 ```bash
 cd Backend
-```
-
-2. Install dependencies:
-```bash
 npm install
-```
-
-3. Create a `.env` file based on `.env.example`:
-```bash
-cp .env.example .env
-```
-
-4. Update the `.env` file with your configurations:
-   - Set your MongoDB connection string
-   - Set a secure JWT secret
-   - Configure other environment variables as needed
-
-## Running the Application
-
-### Development Mode (with auto-restart):
-```bash
+cp .env.example .env      # then set MONGODB_URI and JWT_SECRET at least
+node create-users.js      # first admin and demo user; prints their passwords once
 npm run dev
 ```
 
-### Production Mode:
-```bash
-npm start
+The server listens on `http://localhost:5000` (`PORT`).
+
+## Scripts
+
+| Command | Does |
+|---------|------|
+| `npm run dev` | Runs the server and restarts it when a file changes |
+| `npm start` | Runs the server |
+| `npm test` | End-to-end API suites in `test/`, each on its own throwaway database (`TEST_MONGODB_URL`, default `mongodb://127.0.0.1:27017`) |
+| `npm run lint` | ESLint |
+| `npm run migrate` | Brings an existing database up to date and reports data that needs attention; see the main README |
+| `node create-users.js` | Creates the seed admin and demo user if they don't exist |
+
+## Environment variables
+
+All of them are described in [`.env.example`](.env.example).
+
+| Variable | Needed | Purpose |
+|----------|--------|---------|
+| `MONGODB_URI` | Always | MongoDB connection string |
+| `JWT_SECRET` | Always | Signs sessions and socket tickets, and derives the key that encrypts stored LinkedIn/GitHub tokens. Changing it signs everyone out and means linked accounts must be linked again |
+| `JWT_EXPIRE` | No | How long a "remember me" session lasts (default `30d`) |
+| `PORT` | No | Default `5000` |
+| `NODE_ENV` | No | `production` hides error details from responses |
+| `APP_TIMEZONE` | No | Which calendar day an attendance record belongs to (default `Asia/Kolkata`) |
+| `CLIENT_URL` | Production | The deployed frontend's origin (comma-separated for several); browsers elsewhere can't save data |
+| `ORIGIN_SECRET` | Production | Shared with the frontend's `/api` proxy; requests that skip the proxy are refused and rate limits count each visitor |
+| `API_V2_PREFIX` | No | Where the API is served (default `/api/v2`); the frontend proxy and tests assume the default |
+| `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `SEED_USER_EMAIL`, `SEED_USER_PASSWORD` | No | Accounts `create-users.js` creates (random passwords if unset) |
+| `GITHUB_*`, `LINKEDIN_*` | For the Social Hub's linked accounts | OAuth client ids, secrets, redirect URIs and scopes |
+| `GITHUB_DEFAULT_REPO` | No | Repository (`owner/repo`) to publish to when a request names none |
+
+## Layout
+
 ```
-
-The server will start on `http://localhost:5000` (or your configured PORT).
-
-## API Endpoints
-
-### Authentication Routes (`/api/auth`)
-- `POST /register` - Register a new user
-- `POST /login` - Login user
-- `GET /me` - Get current user (Protected)
-- `PUT /updatepassword` - Update password (Protected)
-
-### User Routes (`/api/users`)
-- `GET /` - Get all users (Admin only)
-- `GET /:id` - Get single user (Protected)
-- `PUT /:id` - Update user (Protected)
-- `DELETE /:id` - Delete user (Admin only)
-- `PUT /:id/toggle-active` - Activate/Deactivate user (Admin only)
-
-### Task Routes (`/api/tasks`)
-- `GET /` - Get all tasks (Protected)
-- `POST /` - Create task (Admin only)
-- `GET /:id` - Get single task (Protected)
-- `PUT /:id` - Update task (Protected)
-- `DELETE /:id` - Delete task (Admin only)
-
-### Attendance Routes (`/api/attendance`)
-- `GET /` - Get attendance records (Protected)
-- `POST /` - Create attendance record (Protected)
-- `GET /:id` - Get single attendance record (Protected)
-- `PUT /:id` - Update attendance record (Protected)
-- `DELETE /:id` - Delete attendance record (Admin only)
-- `POST /checkin` - Check-in (Protected)
-- `POST /checkout` - Check-out (Protected)
-
-### Contact Routes (`/api/contact`)
-- `GET /` - Get all contact messages (Admin only)
-- `POST /` - Submit contact form (Public)
-- `GET /:id` - Get single contact message (Admin only)
-- `PUT /:id` - Update contact message status (Admin only)
-- `DELETE /:id` - Delete contact message (Admin only)
-
-## Models
-
-### User Model
-- name, email, password (hashed)
-- role (user/admin)
-- phone, department
-- profileImage, isActive
-- timestamps
-
-### Task Model
-- title, description
-- assignedTo, createdBy (User references)
-- status (pending/in-progress/completed/cancelled)
-- priority (low/medium/high/urgent)
-- dueDate, completedDate
-- tags, notes
-- timestamps
-
-### Attendance Model
-- user (User reference)
-- date, status (present/absent/late/half-day/leave)
-- checkInTime, checkOutTime
-- workHours (auto-calculated)
-- remarks, approvedBy
-- timestamps
-
-### Contact Model
-- name, email, phone
-- subject, message
-- status (new/in-progress/resolved/closed)
-- resolvedBy, resolvedAt
-- timestamps
-
-## Security Features
-
-- Password hashing with bcryptjs
-- JWT token authentication
-- Protected routes with middleware
-- Role-based authorization
-- Input validation
-- Unique constraints on sensitive fields
-
-## Error Handling
-
-The API returns JSON responses with the following structure:
-```json
-{
-  "success": true/false,
-  "data": {},
-  "message": "Description"
-}
+src/
+  server.js        Express app, Socket.io, route mounting
+  routes/          Routers; v2Routes.js mounts every module under /api/v2
+  controllers/     Request handlers, one per module
+  models/          Mongoose schemas (Social Hub models end in V2)
+  middleware/      Sessions and roles, rate limits, input sanitising, V2 validation
+  utils/           Sessions, HTTP helpers, team rules, dates, token encryption, audit log
+scripts/           migrate-data.js
+test/              API test suites, shared helpers, the browser tests' backend (e2e-server.js)
+Doc/               API reference
 ```
-
-## Development
-
-`npm run dev` restarts the server when a file changes (Node's built-in `--watch`):
-```bash
-npm run dev
-```
-
-## Tests
-
-`npm test` runs the end-to-end suites in `test/` against a MongoDB server
-(`TEST_MONGODB_URL`, default `mongodb://127.0.0.1:27017`). See the main README for details.
-
-## Environment Variables
-
-Required environment variables (see `.env.example`):
-- `PORT` - Server port (default: 5000)
-- `NODE_ENV` - Environment (development/production)
-- `MONGODB_URI` - MongoDB connection string
-- `JWT_SECRET` - Secret key for JWT tokens
-- `JWT_EXPIRE` - How long a "remember me" session lasts (default 30d)
-- `CLIENT_URL` - The deployed frontend's origin (production)
-- `ORIGIN_SECRET` - Shared with the frontend's `/api` proxy on Vercel (production; see the main README)
-
-Sessions live in the HttpOnly `pandav_session` cookie set by `POST /api/auth/login`; the API does
-not accept `Authorization` headers.
 
 ## License
 
 ISC
-\n## API Versioning\n- Current APIs are mounted under /api/v1 (configurable via API_V1_PREFIX).\n- Legacy /api/* aliases kept temporarily for backward compatibility.\n- New v2 scaffold mounted under /api/v2 (API_V2_PREFIX); starts with health/status endpoints and placeholders for future modules.
-
-## V2 System Design
-- Detailed v2 architecture and social/network module plan: `README_V2_SYSTEM.md`

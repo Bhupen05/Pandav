@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import Chat from '../components/Chat'
 import { useAuth } from '../context/useAuth'
 import { useChat } from '../context/useChat'
+import { authAPI } from '../api/authAPI'
 import { teamAPI } from '../api/teamAPI'
 import { userAPI } from '../api/userAPI'
 import { getErrorMessage } from '../api/axios'
@@ -35,7 +36,7 @@ const initials = (name: string) =>
     .toUpperCase()
 
 export default function ChatPage() {
-  const { isAuthenticated, user, isTeamLeader, isAdmin } = useAuth()
+  const { isAuthenticated, user, isAdmin, updateUser } = useAuth()
   const { unreadCounts, clearUnread, activeUsers } = useChat()
   const [listType, setListType] = useState<ListType>('direct')
   const [users, setUsers] = useState<UserItem[]>([])
@@ -53,24 +54,14 @@ export default function ChatPage() {
   const [groupForm, setGroupForm] = useState({ name: '', description: '' })
   const [searchQuery, setSearchQuery] = useState('')
 
+  // Leaders manage their team here unless an admin froze it
   const isTeamManager = useMemo(() => {
     if (!user || !selectedTeam) return false
-    return isAdmin || selectedTeam.leaders.some((leader) => leader._id === user._id)
+    return isAdmin || (selectedTeam.isActive !== false && selectedTeam.leaders.some((leader) => leader._id === user._id))
   }, [isAdmin, selectedTeam, user])
 
-  const canCreateTeam = Boolean(isTeamLeader && !myTeam)
-  const allowedDirectUserIds = useMemo(() => {
-    if (isAdmin || !myTeam || !user?._id) return null
-
-    const ids = new Set<string>()
-    myTeam.leaders.forEach((member) => {
-      if (member._id !== user._id) ids.add(member._id)
-    })
-    myTeam.members.forEach((member) => {
-      if (member._id !== user._id) ids.add(member._id)
-    })
-    return ids
-  }, [isAdmin, myTeam, user?._id])
+  // Anyone outside a team can start one (and leads it)
+  const canCreateTeam = Boolean(user?.role === 'user' && !myTeam)
 
   const filteredUsers = useMemo(() => {
     const query = searchQuery.trim().toLowerCase()
@@ -118,18 +109,14 @@ export default function ChatPage() {
     if (!isAuthenticated || listType !== 'direct') return
 
     setLoadingUsers(true)
+    // The server lists only people this user may message
     userAPI.getChatUsers()
       .then((response) => {
-        const list: UserItem[] = Array.isArray(response.data) ? response.data : []
-        const scopedList =
-          allowedDirectUserIds === null
-            ? list
-            : list.filter((item) => allowedDirectUserIds.has(item._id))
-        setUsers(scopedList)
+        setUsers(Array.isArray(response.data) ? response.data : [])
       })
       .catch(console.error)
       .finally(() => setLoadingUsers(false))
-  }, [isAuthenticated, listType, allowedDirectUserIds])
+  }, [isAuthenticated, listType])
 
   useEffect(() => {
     if (!isAuthenticated || listType !== 'team') return
@@ -151,7 +138,13 @@ export default function ChatPage() {
       setMyTeam(createdTeam)
       setSelectedTeam(createdTeam)
       setGroupForm({ name: '', description: '' })
-      setManageNotice('Team chat group created successfully.')
+      setManageNotice('Team created. You lead it now.')
+      // Creating a team made this user its leader
+      try {
+        updateUser(await authAPI.getMe())
+      } catch {
+        // The next page load picks the new role up
+      }
     } catch (error) {
       setManageError(getErrorMessage(error, 'Unable to create the team group'))
     } finally {
@@ -308,7 +301,10 @@ export default function ChatPage() {
           {listType === 'direct' ? (
             <div>
               <h2 className="text-sm font-semibold text-slate-900">Direct conversations</h2>
-              <p className="mt-1 text-xs text-slate-500">Choose any user for one-to-one chat.</p>
+              <p className="mt-1 text-xs text-slate-500">
+                Your teammates, your Social Hub connections, and anyone who has messaged you. To message someone
+                else, connect with them in the Social Hub first.
+              </p>
             </div>
           ) : (
             <div className="flex items-start justify-between gap-3">
@@ -354,7 +350,7 @@ export default function ChatPage() {
                   <p className="mt-2 text-sm text-neutral-400">
                     {searchQuery
                       ? 'Try another name, email, role, or department.'
-                      : 'People available to you will appear here.'}
+                      : 'Connect with people in the Social Hub, or join a team, to message them here.'}
                   </p>
                 </div>
               ) : (
@@ -380,7 +376,9 @@ export default function ChatPage() {
                         className={`absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-white ${
                           activeUsers.includes(chatUser._id) ? 'bg-emerald-500' : 'bg-slate-300'
                         }`}
-                      />
+                      >
+                        <span className="sr-only">{activeUsers.includes(chatUser._id) ? 'online' : 'offline'}</span>
+                      </span>
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2">
@@ -433,7 +431,7 @@ export default function ChatPage() {
                       onClick={() => setShowManagePanel(true)}
                       className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
                     >
-                      Create your team group
+                      Create your team
                     </button>
                   ) : null}
                 </div>
@@ -469,7 +467,16 @@ export default function ChatPage() {
           {selectedUser ? (
             <Chat receiverId={selectedUser._id} receiverName={selectedUser.name} />
           ) : selectedTeam ? (
-            <Chat receiverId="" receiverName={selectedTeam.name} teamId={selectedTeam._id} />
+            <Chat
+              receiverId=""
+              receiverName={selectedTeam.name}
+              teamId={selectedTeam._id}
+              readOnlyNote={
+                selectedTeam.isActive === false
+                  ? 'This team is frozen. You can read its chat, but no new messages can be sent until an admin unfreezes it.'
+                  : undefined
+              }
+            />
           ) : (
             <div className="flex h-full items-center justify-center rounded-[28px] border border-white/70 bg-white/80 p-8 text-center shadow-[0_18px_45px_rgba(15,23,42,0.08)] backdrop-blur">
               <div className="max-w-md">
@@ -496,7 +503,7 @@ export default function ChatPage() {
             <div className="flex items-center justify-between border-b px-6 py-4">
               <div>
                 <h2 className="text-lg font-bold text-slate-900">
-                  {selectedTeam ? 'Manage Team Chat Group' : 'Create Team Chat Group'}
+                  {selectedTeam ? 'Manage Team Chat Group' : 'Create Your Team'}
                 </h2>
                 <p className="mt-1 text-sm text-slate-500">
                   Leaders can update the group info, invite members, and remove members.
@@ -541,7 +548,7 @@ export default function ChatPage() {
                     disabled={manageBusy}
                     className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
                   >
-                    {selectedTeam ? 'Save group changes' : 'Create group'}
+                    {selectedTeam ? 'Save group changes' : 'Create team'}
                   </button>
                 </form>
 
@@ -634,7 +641,7 @@ export default function ChatPage() {
                   </>
                 ) : (
                   <div className="rounded-2xl border border-dashed p-6 text-sm text-slate-500">
-                    Create your team group first, then you can invite people and manage the chat membership here.
+                    Create your team first: you will lead it, and can invite people and manage the chat here.
                   </div>
                 )}
               </div>

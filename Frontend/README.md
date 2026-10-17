@@ -1,253 +1,95 @@
-# Pandav Frontend - V2
+# Pandav frontend
 
-Frontend application for the Pandav workforce platform. This app provides role-based dashboards, task workflows, attendance management, team collaboration, social networking, chat, and public marketing pages.
+The web app for Pandav: React 19, TypeScript, Vite, Tailwind CSS 4 and React Router 7. It talks
+to the backend in `../Backend` (API reference: [`../Backend/Doc/`](../Backend/Doc/README.md)).
 
-**API Base**: `/api/v2` (configurable via `VITE_API_URL` environment variable)
+## Setup
 
-## 📚 Documentation
+Start the backend first (see [`../Backend/README.md`](../Backend/README.md)), then:
 
-> **Start here**: Read one of these guides depending on your needs:
-
-1. **[FRONTEND_V2_COMPREHENSIVE_GUIDE.md](FRONTEND_V2_COMPREHENSIVE_GUIDE.md)** ⭐
-   - Complete architecture overview
-   - Project structure explanation
-   - Setup & environment configuration
-   - Authentication flow
-   - State management patterns
-   - Page-by-page implementation guide
-   - Best practices and troubleshooting
-
-2. **[FRONTEND_V2_QUICK_REFERENCE.md](FRONTEND_V2_QUICK_REFERENCE.md)** ⚡ 
-   - Quick overview of current implementation status
-   - API modules quick reference
-   - Code snippets for common patterns
-   - Debugging tips
-   - File structure reference
-
-3. **[FRONTEND_V2_IMPLEMENTATION_GUIDE.md](FRONTEND_V2_IMPLEMENTATION_GUIDE.md)** 🛠️
-   - Step-by-step feature development
-   - How to add new API endpoints
-   - How to add new pages
-   - Common features implementation (lists, forms, filters, real-time)
-   - Error handling patterns
-   - Testing checklist
-
-4. **[FRONTEND_V2_STEP_BY_STEP_GUIDE.md](FRONTEND_V2_STEP_BY_STEP_GUIDE.md)** 📖
-   - Detailed page-by-page walkthrough
-   - Backend API integration for each page
-   - Current implementation status per page
-
-## Tech Stack
-
-- **React 19** + TypeScript
-- **Vite** - Build tool
-- **Tailwind CSS** - Styling
-- **React Router** - Client-side routing
-- **Axios** - HTTP client
-- **Socket.IO** - Real-time updates
-
-## Quick Start
-
-### Prerequisites
-- Node.js 16+
-- npm or yarn
-
-### Installation
-
-1. Install dependencies:
 ```bash
+cd Frontend
 npm install
+cp .env.example .env      # defaults suit a backend on localhost:5000
+npm run dev               # http://localhost:5173
 ```
 
-2. Create `.env` file:
-```bash
-cp .env.example .env
+| Command | Does |
+|---------|------|
+| `npm run dev` | Development server with hot reload |
+| `npm run build` | Type-check and build into `dist/` |
+| `npm run lint` | ESLint |
+| `npm run test:e2e` | Browser tests (see below) |
+| `npm run preview` | Serve the built `dist/` |
+
+### Environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `VITE_BACKEND_URL` | The backend's address without `/api` (default `http://localhost:5000`). Production uses the value in `.env.production` |
+| `VITE_CONTACT_EMAIL`, `VITE_CONTACT_PHONE`, `VITE_CONTACT_WHATSAPP` | Contact details on the Contact page; each is hidden when unset |
+
+## How it reaches the backend
+
+- **API calls** go to `/api/v2` on the app's own origin (`src/api/axios.ts`). In development
+  Vite forwards `/api` to `VITE_BACKEND_URL` (`vite.config.ts`); in production Vercel forwards it
+  to the backend and adds the `ORIGIN_SECRET` header (`vercel.json`). The backend's address is
+  therefore in two places: `vercel.json` and `.env.production`.
+- **Sessions** are an HttpOnly cookie the backend sets on sign-in. Scripts never see the token
+  and nothing about the session is kept in browser storage. On load, `AuthContext` asks
+  `GET /auth/me` who is signed in. A `401` from any other call reloads the app on `/login`.
+- **Chat** uses Socket.io, which can't go through the proxy: `ChatContext` connects to
+  `VITE_BACKEND_URL` directly with a one-minute ticket from `POST /auth/socket-token`, fetched
+  again on every reconnect.
+
+## Pages
+
+Routes are defined in `src/App.tsx`. Each page is loaded the first time it is opened.
+
+| Route | Page | Who |
+|-------|------|-----|
+| `/`, `/about`, `/service`, `/pricing`, `/contact` | `Landing`, `About`, `Service`, `Pricing`, `components/Contactus` | Everyone |
+| `/login`, `/register` | `Login`, `Register` | Everyone |
+| `/dashboard` | `DashboardRedirect`: sends each role to its home page | Signed in |
+| `/user` | `UserDashboard` | Signed in (home for the `user` role) |
+| `/teams`, `/team` | `TeamDashboard` | Signed in (home for team leaders) |
+| `/team-member` | `TeamMemberDashboard` | Signed in (home for team members) |
+| `/tasks` | `Tasks` | Signed in |
+| `/attendance` | `components/Attendance` | Signed in |
+| `/chat` | `ChatPage` | Signed in |
+| `/profile` | `Profile` | Signed in |
+| `/social`, `/todo`, `/network`, `/integrations`, `/publish-jobs` | `SocialHub` | Signed in |
+| `/admin` | `AdminDashboard` (also user management and password resets) | Admins (home for admins) |
+| `/admin/attendance` | `Attendance-Admin` | Admins |
+| `/admin/users`, `/admin/userview` | `Userview` | Admins |
+| `/admin/messages` | `ContactMessages` | Admins |
+| `/admin/teams` | `TeamManagement` | Admins |
+| `/admin/moderation` | `SocialHub` | Admins |
+
+`components/RequireAuth.tsx` guards the signed-in and admin routes: it waits for the session
+check, sends visitors who aren't signed in to `/login` (and back afterwards), and sends
+non-admins away from admin pages.
+
+## Layout
+
+```
+src/
+  api/          One module per backend area; axios.ts is the shared client
+  components/   Navbar, route guard, task form and card, chat window, attendance, pagination
+  context/      AuthContext (session), ChatContext (socket, messages, unread counts),
+                FeedbackContext (toasts, confirm and prompt dialogs)
+  pages/        One component per route
+  utils/        Dates, role routing, task progress, image resizing, paging
+e2e/            Playwright browser tests
 ```
 
-3. Configure environment variables:
-```env
-VITE_API_URL=http://localhost:5000/api/v2
-VITE_SOCKET_URL=http://localhost:5000
-```
+`guide.md` is the visual design brief (palette, type, components).
 
-### Running the Application
+## Browser tests
 
-```bash
-# Development mode with hot reload
-npm run dev
-
-# Build for production
-npm run build
-
-# Preview production build locally
-npm run preview
-
-# Lint code
-npm run lint
-```
-
-The application will be available at `http://localhost:5173`
-
-## Project Structure
-
-```
-Frontend/
-├── public/                    # Static files
-├── src/
-│   ├── api/                  # API client functions (organized by module)
-│   │   ├── axios.ts          # Axios configuration & interceptors
-│   │   ├── authAPI.ts        # Authentication endpoints
-│   │   ├── socialV2API.ts    # Social/V2 endpoints (posts, tasks, connections, etc)
-│   │   ├── taskAPI.ts        # Task management
-│   │   ├── teamAPI.ts        # Team operations
-│   │   ├── chatAPI.ts        # Chat & messaging
-│   │   ├── userAPI.ts        # User management
-│   │   ├── attendanceAPI.ts  # Attendance tracking
-│   │   └── contactAPI.ts     # Contact form
-│   ├── components/           # Reusable components
-│   │   ├── Navbar.tsx        # Navigation bar
-│   │   ├── Footer.tsx        # Footer
-│   │   ├── Chat.tsx          # Chat component
-│   │   ├── Attendance.tsx    # Attendance check-in/out
-│   │   └── ...
-│   ├── context/              # Global state providers
-│   │   ├── AuthContext.tsx   # Authentication state & user info
-│   │   └── ChatContext.tsx   # Chat & real-time state
-│   ├── pages/                # Page components (route destinations)
-│   │   ├── Login.tsx         # Login page
-│   │   ├── Register.tsx      # Registration
-│   │   ├── UserDashboard.tsx # User dashboard
-│   │   ├── AdminDashboard.tsx # Admin dashboard
-│   │   ├── SocialHub.tsx     # V2 social features hub
-│   │   └── ...
-│   ├── App.tsx               # Main router and navigation
-│   ├── App.css               # Global styles
-│   └── main.tsx              # React DOM entry point
-├── index.html                # HTML entry point
-├── package.json              # Dependencies
-├── tsconfig.json             # TypeScript config
-└── vite.config.ts            # Vite config
-```
-
-## Route And Page Map
-
-All routes are defined in src/App.tsx.
-
-### Public Pages
-
-- / -> Landing page
-  - File: src/pages/Landing.tsx
-  - Work: Product showcase with hero, feature sections, personas, CTA, and shared footer.
-
-- /about -> About page
-  - File: src/pages/About.tsx
-  - Work: Company overview, mission/vision, values, and offering summary.
-
-- /service -> Services page
-  - File: src/pages/Service.tsx
-  - Work: Service catalog for tasking, attendance, user management, and admin support.
-
-- /pricing -> Pricing page
-  - File: src/pages/Pricing.tsx
-  - Work: Plan comparison, FAQ, and conversion CTAs.
-
-- /login -> Login page
-  - File: src/pages/Login.tsx
-  - Work: User authentication, remember-me flow, and role-based redirect after sign-in.
-
-- /register -> Registration page
-  - File: src/pages/Register.tsx
-  - Work: New account creation with validations and optional profile image upload.
-
-- /contact -> Contact page
-  - File: src/components/Contactus.tsx
-  - Work: Public contact form submission to backend contact endpoint.
-
-### Authenticated User Experience
-
-- /user -> User dashboard
-  - File: src/pages/UserDashboard.tsx
-  - Work: Personal task/attendance summary, productivity stats, and quick actions.
-
-- /tasks -> Tasks workspace
-  - File: src/pages/Tasks.tsx
-  - Work: Task listing, filtering, status updates, completion request flow, and admin approvals.
-
-- /attendance -> Attendance workspace
-  - File: src/components/Attendance.tsx
-  - Work: Check-in/check-out, attendance submission, filters, and history view.
-
-- /profile -> Profile page
-  - File: src/pages/Profile.tsx
-  - Work: Profile editing, activity heatmap, task stats, and attendance insights.
-
-- /chat -> Chat page
-  - File: src/pages/ChatPage.tsx
-  - Work: Conversation list, unread indicators, and real-time one-to-one messaging UI.
-
-- /social -> Social Hub
-  - File: src/pages/SocialHub.tsx
-  - Work: V2 social feed, personal todo, connections, integrations, publish jobs, approvals, and admin moderation.
-
-### Team And Admin Pages
-
-- /team -> Team leader dashboard
-  - File: src/pages/TeamDashboard.tsx
-  - Work: Team overview, team tasks, approvals, attendance review, invites, and team actions.
-
-- /team-member -> Team member dashboard
-  - File: src/pages/TeamMemberDashboard.tsx
-  - Work: Invite management (accept/decline), team membership status, and team info.
-
-- /admin -> Admin dashboard
-  - File: src/pages/AdminDashboard.tsx
-  - Work: Global operations overview with task approvals, attendance requests, and user data.
-
-- /admin/attendance -> Admin attendance management
-  - File: src/pages/Attendance-Admin.tsx
-  - Work: Attendance moderation with approve/reject and record edits.
-
-- /admin/userview -> User activity deep view
-  - File: src/pages/Userview.tsx
-  - Work: Per-user task and attendance analytics for admins.
-
-- /admin/teams -> Team management
-  - File: src/pages/TeamManagement.tsx
-  - Work: Create/delete teams, invite members, assign leaders, and manage membership.
-
-## Shared Components
-
-- src/components/Navbar.tsx: Global navigation and authenticated app shell behavior
-- src/components/Footer.tsx: Shared public footer
-- src/components/Taskscard.tsx: Task card UI
-- src/components/Tasksadd.tsx: Task creation form/modal
-- src/components/Chat.tsx: Reusable chat panel
-- src/components/Attendance.tsx: Attendance feature module (used as route view)
-- src/components/Contactus.tsx: Contact form module (used as route view)
-
-## State Management
-
-- src/context/AuthContext.tsx
-  - Stores user/session state and role flags
-  - Handles login, register, logout, and profile updates
-
-- src/context/ChatContext.tsx
-  - Tracks unread counts and chat-side reactive state
-
-## API Layer
-
-API wrappers in src/api:
-
-- authAPI.ts
-- userAPI.ts
-- taskAPI.ts
-- attendanceAPI.ts
-- teamAPI.ts
-- contactAPI.ts
-- socialV2API.ts
-- axios.ts (shared HTTP client config)
-
-## Notes
-
-- Route protection and role redirects are handled in page-level logic and auth context checks.
-- Public pages and authenticated pages share common layout elements through reusable components.
+`e2e/` holds Playwright tests that run the real app: sign-in, sessions and "remember me", route
+guards, an expired session, live chat (also after a backend restart), and the admin flows for
+tasks, attendance approval and password resets. `npm run test:e2e` starts its own backend (port
+5055, on a fresh `pandav_test_e2e` database seeded by `Backend/test/e2e-server.js`) and Vite
+(port 5180). It needs MongoDB, like the backend tests (`TEST_MONGODB_URL`, default
+`mongodb://127.0.0.1:27017`), and Chromium: `npx playwright install chromium` once.

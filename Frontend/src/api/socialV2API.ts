@@ -24,7 +24,8 @@ type PersonalTaskPayload = {
 }
 
 export const socialV2API = {
-  getFeed: async () => (await api.get('/social/feed')).data,
+  // Newest posts first; `before` (the oldest post's createdAt) loads the page before
+  getFeed: async (before?: string) => (await api.get('/social/feed', { params: { before } })).data,
   getMyPosts: async () => (await api.get('/social/posts/me')).data,
   createPost: async (payload: PostPayload) => (await api.post('/social/posts', payload)).data,
   likePost: async (postId: string) => (await api.post(`/social/posts/${postId}/like`)).data,
@@ -42,6 +43,9 @@ export const socialV2API = {
     (await api.patch(`/social/personal-tasks/${taskId}`, payload)).data,
   togglePersonalTask: async (taskId: string) =>
     (await api.patch(`/social/personal-tasks/${taskId}/toggle-complete`)).data,
+  // Posts a completed task after its owner reviewed the draft
+  sharePersonalTask: async (taskId: string, payload: { content?: string; linkedin?: boolean }) =>
+    (await api.post(`/social/personal-tasks/${taskId}/share`, payload)).data,
   deletePersonalTask: async (taskId: string) =>
     (await api.delete(`/social/personal-tasks/${taskId}`)).data,
 

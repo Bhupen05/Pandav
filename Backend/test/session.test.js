@@ -117,7 +117,7 @@ test('proxy secret', async (t) => {
   await check('a direct visitor cannot claim another IP', (await call('POST', '/auth/login', { body: USER, headers: { 'x-real-ip': '198.51.100.1' } })).status === 403);
   const signIn = await call('POST', '/auth/login', { body: USER, headers: viaProxy() });
   await check('requests through the proxy work', signIn.status === 200 && !!signIn.session);
-  await check('health checks stay open', (await call('GET', '/health')).status === 200 && (await call('GET', '/v2/health')).status === 200);
+  await check('health checks stay open', (await call('GET', '/health')).status === 200 && (await call('GET', '/health')).status === 200);
 
   // The socket server is reached directly; its ticket comes through the proxy
   const ticket = (await call('POST', '/auth/socket-token', { token: signIn.session, headers: viaProxy() })).data?.data?.token;

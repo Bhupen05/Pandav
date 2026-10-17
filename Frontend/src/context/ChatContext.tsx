@@ -13,6 +13,24 @@ interface MessagesPage {
 const teamIdOf = (message: Message) =>
   typeof message.team === 'string' ? message.team : message.team?._id;
 
+// Sent once when someone in the team reads it: every message up to readAt
+// that someone else sent now lists them as a reader
+interface TeamReadReceipt {
+  teamId: string;
+  reader: { _id: string; name: string };
+  readAt: string;
+}
+
+const applyTeamReadReceipt = (messages: Message[], { reader, readAt }: TeamReadReceipt) =>
+  messages.map((message) => {
+    const sentAt = message.createdAt ? new Date(message.createdAt).getTime() : NaN;
+    const alreadyRead = message.readBy?.some((entry) => participantId(entry.user) === reader._id);
+    if (participantId(message.sender) === reader._id || alreadyRead || !(sentAt <= new Date(readAt).getTime())) {
+      return message;
+    }
+    return { ...message, readBy: [...(message.readBy || []), { user: reader, readAt }] };
+  });
+
 // Adds messages, replacing any already shown (the sender's own copy, a read
 // receipt) instead of showing them twice
 const mergeMessages = (current: Message[], incoming: Message | Message[]) => {
@@ -48,12 +66,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const openChatUserIdRef = useRef<string | null>(null);
   const openTeamIdRef = useRef<string | null>(null);
 
+  // The team, this user included, hears about it over the socket
   const markTeamMessagesAsRead = useCallback(async (teamId: string) => {
     try {
-      const { data } = await api.patch<{ data: Message[] }>(`/chat/teams/${teamId}/read`);
-      if (openTeamIdRef.current === teamId && Array.isArray(data.data) && data.data.length > 0) {
-        setMessages((prev) => mergeMessages(prev, data.data));
-      }
+      await api.patch(`/chat/teams/${teamId}/read`);
     } catch (error) {
       console.error('Error marking team messages as read:', error);
     }
@@ -78,6 +94,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     newSocket.on('connect_error', (error) => {
       console.error('Chat connection failed:', error.message);
     });
+    // Who is online is unknown until the socket reconnects and the server
+    // sends the list again
+    newSocket.on('disconnect', () => setActiveUsers([]));
 
     // Unread counts are stored on the server, so they survive a page reload
     api.get<{ data: Record<string, number> }>('/chat/unread')
@@ -116,10 +135,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     });
 
-    newSocket.on('team_message_read', (message: Message) => {
-      const teamId = teamIdOf(message);
-      if (!teamId || openTeamIdRef.current !== teamId) return;
-      setMessages((prev) => mergeMessages(prev, message));
+    newSocket.on('team_messages_read', (receipt: TeamReadReceipt) => {
+      if (openTeamIdRef.current !== receipt.teamId) return;
+      setMessages((prev) => applyTeamReadReceipt(prev, receipt));
     });
 
     newSocket.on('user_typing', (data: TypingStatus) => {
@@ -197,9 +215,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setMessages([]);
     setHasMoreMessages(false);
     try {
-      const { data } = await api.get<{ data: Message[] }>(`/chat/teams/${teamId}/messages`);
+      const { data } = await api.get<MessagesPage>(`/chat/teams/${teamId}/messages`);
       if (openTeamIdRef.current === teamId) {
         setMessages(Array.isArray(data.data) ? data.data : []);
+        setHasMoreMessages(!!data.hasMore);
         await markTeamMessagesAsRead(teamId);
       }
     } catch (error) {
@@ -211,15 +230,19 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const loadOlderMessages = useCallback(async () => {
     const chatUserId = openChatUserIdRef.current;
+    const teamId = openTeamIdRef.current;
     const oldest = messages[0];
-    if (!chatUserId || !oldest) return;
+    if ((!chatUserId && !teamId) || !oldest) return;
+
+    // Direct messages are dated by timestamp, team messages by createdAt
+    const url = teamId ? `/chat/teams/${teamId}/messages` : `/chat/messages/${chatUserId}`;
+    const before = teamId ? oldest.createdAt : oldest.timestamp;
+    const stillOpen = () => (teamId ? openTeamIdRef.current === teamId : openChatUserIdRef.current === chatUserId);
 
     try {
-      const { data } = await api.get<MessagesPage>(`/chat/messages/${chatUserId}`, {
-        params: { before: oldest.timestamp },
-      });
-      if (openChatUserIdRef.current === chatUserId) {
-        setMessages((prev) => [...data.data, ...prev]);
+      const { data } = await api.get<MessagesPage>(url, { params: { before } });
+      if (stillOpen()) {
+        setMessages((prev) => mergeMessages(data.data, prev));
         setHasMoreMessages(!!data.hasMore);
       }
     } catch (error) {

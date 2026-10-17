@@ -25,6 +25,8 @@ type Team = {
   description?: string
   leaders: TeamUser[]
   members: TeamUser[]
+  // false: an admin froze the team
+  isActive?: boolean
 }
 
 const initials = (name: string) =>
@@ -250,6 +252,13 @@ export default function TeamMemberDashboard() {
               {team ? `${teamSize} people` : 'Waiting'}
             </span>
           </div>
+
+          {team?.isActive === false && (
+            <p role="status" className="mt-4 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900">
+              An admin has frozen this team. You can still see its tasks and chat, and finish your own work, but
+              nothing new can be added and approvals go to an admin until it is unfrozen.
+            </p>
+          )}
 
           {!team ? (
             <div className="mt-5 rounded-2xl border border-dashed border-neutral-300 p-10 text-center text-sm text-neutral-500">

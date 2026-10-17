@@ -9,7 +9,8 @@
     "dev": "node --watch src/server.js",
     "test": "node --test --test-concurrency=1 --test-reporter=spec \"test/*.test.js\"",
     "test:integration": "node --test test/integration/*.test.mjs",
-    "migrate": "node scripts/migrate-data.js"
+    "migrate": "node scripts/migrate-data.js",
+    "lint": "eslint ."
   },
   "keywords": [
     "express",
@@ -32,6 +33,9 @@
     "validator": "^13.11.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "globals": "^16.5.0",
     "socket.io-client": "^4.8.4"
   }
 }

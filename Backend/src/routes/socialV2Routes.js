@@ -17,7 +17,7 @@ import {
 } from '../middleware/validateV2.js';
 import {
   socialWriteRateLimiter,
-  socialMessageRateLimiter,
+  directMessageRateLimiter,
   socialIntegrationRateLimiter,
 } from '../middleware/rateLimitV2.js';
 import {
@@ -38,6 +38,7 @@ import {
   getPersonalTasks,
   updatePersonalTask,
   togglePersonalTaskComplete,
+  sharePersonalTask,
   deletePersonalTask,
   linkProviderAccount,
   getSocialIntegrations,
@@ -83,13 +84,14 @@ router.post('/connections/request', socialWriteRateLimiter, validateConnectionRe
 router.patch('/connections/:connectionId/respond', socialWriteRateLimiter, validateConnectionResponse, respondConnection);
 router.get('/connections', getConnections);
 
-router.post('/messages', socialMessageRateLimiter, validateNetworkMessage, sendNetworkMessage);
+router.post('/messages', directMessageRateLimiter, validateNetworkMessage, sendNetworkMessage);
 router.get('/messages/:userId', getNetworkMessages);
 
 router.post('/personal-tasks', socialWriteRateLimiter, validatePersonalTaskCreate, createPersonalTask);
 router.get('/personal-tasks', getPersonalTasks);
 router.patch('/personal-tasks/:taskId', socialWriteRateLimiter, validatePersonalTaskUpdate, updatePersonalTask);
 router.patch('/personal-tasks/:taskId/toggle-complete', socialWriteRateLimiter, togglePersonalTaskComplete);
+router.post('/personal-tasks/:taskId/share', socialWriteRateLimiter, sharePersonalTask);
 router.delete('/personal-tasks/:taskId', socialWriteRateLimiter, deletePersonalTask);
 
 router.post('/integrations/:provider/link', socialIntegrationRateLimiter, validateProviderParam, validateIntegrationsLink, linkProviderAccount);

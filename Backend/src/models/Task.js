@@ -73,9 +73,19 @@ const taskSchema = new mongoose.Schema({
     ref: 'User',
   },
   approvedAt: {
-    type: Date, 
+    type: Date,
   },
-  
+
+  // Last change to the task's details by an admin or team leader (not
+  // progress or approval, which have their own fields)
+  editedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+  },
+  editedAt: {
+    type: Date,
+  },
+
   //  Individual assignee progress tracking
   assigneeProgress: [{
     user: {

@@ -1,7 +1,7 @@
 import Task from '../models/Task.js'
 import Team from '../models/Team.js'
 import { listResponse, pick, sendServerError } from '../utils/http.js'
-import { canReviewFor, ledUserIds, teamUserIds } from '../utils/teams.js'
+import { FROZEN_TEAM_MESSAGE, canReviewFor, ledUserIds, teamUserIds } from '../utils/teams.js'
 
 // Fields an admin may set when creating or editing a task
 const TASK_FIELDS = [
@@ -16,6 +16,13 @@ const TASK_FIELDS = [
   'tags',
   'notes',
 ]
+
+// Fields a team leader may change on a task they manage. Status goes through
+// the workflow (start, request completion, approve), so only admins set it.
+const LEADER_TASK_FIELDS = TASK_FIELDS.filter((field) => field !== 'status')
+
+// The task's details as JSON, to tell whether an edit changed anything
+const detailsOf = (task) => JSON.stringify(TASK_FIELDS.map((field) => task.get(field)))
 
 // Assignee progress values that mean "my part is done"
 const DONE_PROGRESS = ['completion-requested', 'completed']
@@ -32,17 +39,12 @@ const populateTask = (query) =>
     .populate('completionRequestedBy', 'name email')
     .populate('approvedBy', 'name email')
     .populate('rejectedBy', 'name email')
+    .populate('editedBy', 'name')
 
 const sendTask = async (res, taskId, message, status = 200) => {
   const task = await populateTask(Task.findById(taskId))
   res.status(status).json({ success: true, ...(message && { message }), data: task })
 }
-
-const sendValidationError = (res, error) =>
-  res.status(400).json({
-    success: false,
-    message: error.message,
-  })
 
 // Whose tasks a list may include: admins see everyone's, team leaders their
 // teams', everyone else their own
@@ -65,6 +67,11 @@ const canViewTask = async (task, user) => {
 
 // Only someone else can sign off a task: an admin, or a leader of every assignee
 const canReviewTask = (task, user) => canReviewFor(user, task.assignedTo)
+
+// The same people can edit and delete it: admins, and a leader of every
+// assignee whose team isn't frozen. A leader never manages a task they are
+// on themselves.
+const canManageTask = canReviewTask
 
 // @desc    Get all tasks
 // @route   GET /api/tasks
@@ -131,10 +138,16 @@ export const createTask = async (req, res) => {
   try {
     const data = { ...pick(req.body, TASK_FIELDS), createdBy: req.user.id }
 
-    // Team leaders can only assign work within one of their teams
+    const assignees = [].concat(data.assignedTo || []).map(String)
+    if (assignees.length === 0) {
+      return res.status(400).json({ success: false, message: 'Task must be assigned to at least one user' })
+    }
+
+    // Team leaders can only assign work within one of their teams, and their
+    // tasks start as pending: a status like "completed" would skip approval
     if (req.user.role === 'team_leader') {
-      const assignees = [].concat(data.assignedTo || []).map(String)
-      const teams = await Team.find({ leaders: req.user.id }).select('leaders members')
+      delete data.status
+      const teams = await Team.find({ leaders: req.user.id }).select('leaders members isActive')
       const team = teams.find((t) => {
         const members = teamUserIds(t)
         return assignees.every((id) => members.includes(id))
@@ -145,17 +158,21 @@ export const createTask = async (req, res) => {
           message: 'You can only assign tasks to members of your team',
         })
       }
+      if (!team.isActive) {
+        return res.status(400).json({ success: false, message: FROZEN_TEAM_MESSAGE })
+      }
       data.team = team._id
     }
 
     const task = await Task.create(data)
     await sendTask(res, task._id, undefined, 201)
   } catch (error) {
-    sendValidationError(res, error)
+    sendServerError(res, error)
   }
 }
 
-// @desc    Update task
+// @desc    Update task: admins and the task's team leaders edit its details;
+//          an assignee can only start their part
 // @route   PUT /api/tasks/:id
 // @access  Private
 export const updateTask = async (req, res) => {
@@ -169,8 +186,22 @@ export const updateTask = async (req, res) => {
       })
     }
 
-    if (req.user.role === 'admin') {
-      const updates = pick(req.body, TASK_FIELDS)
+    if (await canManageTask(task, req.user)) {
+      const isAdmin = req.user.role === 'admin'
+      const updates = pick(req.body, isAdmin ? TASK_FIELDS : LEADER_TASK_FIELDS)
+
+      if (updates.assignedTo !== undefined) {
+        updates.assignedTo = [].concat(updates.assignedTo).map(String)
+        if (updates.assignedTo.length === 0) {
+          return res.status(400).json({ success: false, message: 'Task must be assigned to at least one user' })
+        }
+        // A leader can only hand the task to other people in their team
+        if (!isAdmin && !(await canReviewFor(req.user, updates.assignedTo))) {
+          return res.status(403).json({ success: false, message: 'You can only assign tasks to members of your team' })
+        }
+      }
+
+      const before = detailsOf(task)
       task.set(updates)
       // Keep each assignee's progress consistent with an admin's direct status change
       if (updates.status === 'completed') {
@@ -178,6 +209,11 @@ export const updateTask = async (req, res) => {
         task.completedDate = task.completedDate || new Date()
       } else if (updates.status === 'pending') {
         task.assigneeProgress.forEach((p) => { p.status = 'not-started' })
+      }
+      // Shown on the task as "Edited by <name> · <time>"
+      if (detailsOf(task) !== before) {
+        task.editedBy = req.user._id
+        task.editedAt = new Date()
       }
     } else {
       // Assignees can only start their part of the task. Completion goes
@@ -203,13 +239,13 @@ export const updateTask = async (req, res) => {
     await task.save()
     await sendTask(res, task._id)
   } catch (error) {
-    sendValidationError(res, error)
+    sendServerError(res, error)
   }
 }
 
 // @desc    Delete task
 // @route   DELETE /api/tasks/:id
-// @access  Private (Admin)
+// @access  Private (Admin, or a leader of every assignee)
 export const deleteTask = async (req, res) => {
   try {
     const task = await Task.findById(req.params.id)
@@ -221,7 +257,14 @@ export const deleteTask = async (req, res) => {
       })
     }
 
-    await Task.findByIdAndDelete(req.params.id)
+    if (!(await canManageTask(task, req.user))) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to delete this task',
+      })
+    }
+
+    await task.deleteOne()
 
     res.status(200).json({
       success: true,
@@ -367,9 +410,10 @@ export const getPendingApprovalTasks = async (req, res) => {
   try {
     const filter = { status: 'completion-requested' }
 
-    // Leaders only see their teams' tasks, and not ones they're assigned to themselves
+    // Leaders only see their teams' tasks, and not ones they're assigned to
+    // themselves. A frozen team's reviews wait for an admin.
     if (req.user.role !== 'admin') {
-      const led = (await ledUserIds(req.user.id)).filter((id) => id !== req.user.id)
+      const led = (await ledUserIds(req.user.id, { activeOnly: true })).filter((id) => id !== req.user.id)
       filter.assignedTo = { $in: led, $ne: req.user._id }
     }
 

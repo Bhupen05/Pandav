@@ -5,18 +5,12 @@ import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
-import mongoose from 'mongoose';
 import connectDB from './config/database.js';
 import { getUserFromToken } from './middleware/auth.js';
+import User from './models/User.js';
 import { sanitizeInput } from './middleware/sanitize.js';
+import { directMessageProblem } from './utils/messaging.js';
 import { SOCKET_AUDIENCE, rejectForeignOrigin, requireProxy } from './utils/session.js';
-import authRoutes from './routes/authRoutes.js';
-import taskRoutes from './routes/taskRoutes.js';
-import attendanceRoutes from './routes/attendanceRoutes.js';
-import contactRoutes from './routes/contactRoutes.js';
-import userRoutes from './routes/userRoutes.js';
-import chatRoutes from './routes/chatRoutes.js';
-import teamRoutes from './routes/teamRoutes.js';
 import v2Routes from './routes/v2Routes.js';
 
 dotenv.config();
@@ -60,7 +54,6 @@ const io = new SocketIO(server, {
 });
 
 const PORT = process.env.PORT || 5000;
-const API_V1_PREFIX = process.env.API_V1_PREFIX || '/api/v1';
 const API_V2_PREFIX = process.env.API_V2_PREFIX || '/api/v2';
 
 // Socket.io: only authenticated users can connect, and the room each socket
@@ -73,7 +66,7 @@ io.use(async (socket, next) => {
     socket.data.userId = user._id.toString();
     socket.data.userName = user.name;
     next();
-  } catch (error) {
+  } catch {
     next(new Error('Not authorized'));
   }
 });
@@ -91,14 +84,25 @@ io.on('connection', (socket) => {
   broadcastOnlineUsers();
 
   // Typing indicators for direct chats. Who is typing comes from the verified
-  // token; the client only says to whom.
-  socket.on('typing', ({ recipientId } = {}) => {
-    if (typeof recipientId !== 'string') return;
-    socket.to(recipientId).emit('user_typing', { userId, userName: socket.data.userName });
+  // token; the client only says to whom, and only someone this user may
+  // message (checked once per recipient) is told.
+  const recipients = new Set();
+  const relayTyping = async (recipientId, event, payload) => {
+    if (typeof recipientId !== 'string' || recipientId === userId) return;
+    if (!recipients.has(recipientId)) {
+      const sender = await User.findById(userId).select('role');
+      if (!sender || (await directMessageProblem(sender, recipientId))) return;
+      recipients.add(recipientId);
+    }
+    socket.to(recipientId).emit(event, payload);
+  };
+  // The payload is whatever the client sent (null, a number, ...): read it
+  // defensively, because an exception in a socket handler stops the server
+  socket.on('typing', (data) => {
+    relayTyping(data?.recipientId, 'user_typing', { userId, userName: socket.data.userName }).catch(() => {});
   });
-  socket.on('stopped_typing', ({ recipientId } = {}) => {
-    if (typeof recipientId !== 'string') return;
-    socket.to(recipientId).emit('user_stopped_typing', { userId });
+  socket.on('stopped_typing', (data) => {
+    relayTyping(data?.recipientId, 'user_stopped_typing', { userId }).catch(() => {});
   });
 
   socket.on('disconnect', () => {
@@ -146,42 +150,12 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use(cookieParser());
 app.use(sanitizeInput);
 
-// Health check: 503 while the database is unreachable, so the host and
-// uptime monitors see an instance that can't serve requests as down
-const healthCheck = (req, res) => {
-  const databaseUp = mongoose.connection.readyState === 1;
-  res.status(databaseUp ? 200 : 503).json({
-    status: databaseUp ? 'OK' : 'UNAVAILABLE',
-    version: 'v1',
-    database: databaseUp ? 'connected' : 'disconnected',
-  });
-};
-
-// V1 Routes (current production APIs)
-app.use(`${API_V1_PREFIX}/auth`, authRoutes);
-app.use(`${API_V1_PREFIX}/tasks`, taskRoutes);
-app.use(`${API_V1_PREFIX}/attendance`, attendanceRoutes);
-app.use(`${API_V1_PREFIX}/contact`, contactRoutes);
-app.use(`${API_V1_PREFIX}/users`, userRoutes);
-app.use(`${API_V1_PREFIX}/chat`, chatRoutes);
-app.use(`${API_V1_PREFIX}/teams`, teamRoutes);
-app.get(`${API_V1_PREFIX}/health`, healthCheck);
-
-// Legacy alias to reduce breakage (can be removed later)
-app.use('/api/auth', authRoutes);
-app.use('/api/tasks', taskRoutes);
-app.use('/api/attendance', attendanceRoutes);
-app.use('/api/contact', contactRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/chat', chatRoutes);
-app.use('/api/teams', teamRoutes);
-app.get('/api/health', healthCheck);
-
-// V2 Routes
+// The whole API, health check included (${API_V2_PREFIX}/health). The old
+// copies under /api and /api/v1 are gone.
 app.use(API_V2_PREFIX, v2Routes);
 
-// Error handling middleware
-app.use((err, req, res, next) => {
+// Error handling middleware (Express recognises it by its four parameters)
+app.use((err, req, res, _next) => {
   // Body parsing errors (too large, malformed JSON) are the client's, with their own 4xx status
   if (err.status >= 400 && err.status < 500) {
     return res.status(err.status).json({
@@ -200,8 +174,7 @@ app.use((err, req, res, next) => {
 
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
-  console.log(`Local v1: http://localhost:${PORT}${API_V1_PREFIX}`);
-  console.log(`Local v2: http://localhost:${PORT}${API_V2_PREFIX}`);
+  console.log(`API: http://localhost:${PORT}${API_V2_PREFIX}`);
 });
 
 

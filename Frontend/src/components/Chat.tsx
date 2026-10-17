@@ -7,6 +7,8 @@ interface ChatProps {
   receiverId: string;
   receiverName: string;
   teamId?: string;
+  // Shown instead of the message box when nothing can be sent (a frozen team)
+  readOnlyNote?: string;
 }
 
 type ChatMessage = Message;
@@ -86,7 +88,7 @@ const getReadByLabel = (
   return message.isRead ? `Read by ${receiverName}` : `Not read by ${receiverName} yet`;
 };
 
-export default function Chat({ receiverId, receiverName, teamId }: ChatProps) {
+export default function Chat({ receiverId, receiverName, teamId, readOnlyNote }: ChatProps) {
   const {
     messages,
     sendMessage,
@@ -298,6 +300,9 @@ export default function Chat({ receiverId, receiverName, teamId }: ChatProps) {
         {sendError && (
           <p className="border-t bg-red-50 px-4 py-2 text-sm text-red-700">{sendError}</p>
         )}
+        {readOnlyNote ? (
+          <p role="status" className="border-t bg-sky-50 px-4 py-3 text-sm text-sky-900">{readOnlyNote}</p>
+        ) : (
         <div className="border-t bg-white p-4">
           <div className="flex gap-2">
             <input
@@ -323,6 +328,7 @@ export default function Chat({ receiverId, receiverName, teamId }: ChatProps) {
             </button>
           </div>
         </div>
+        )}
       </div>
 
       {selectedMessage ? (
