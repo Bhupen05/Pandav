@@ -82,6 +82,23 @@ const outbox = (file = OUTBOX) => (fs.existsSync(file)
   : []);
 const mailsTo = (to, subject = '') => outbox().filter((mail) => mail.to === to && mail.subject.includes(subject));
 const linkToken = (mail) => mail?.text.match(/token=([A-Za-z0-9_-]+)/)?.[1];
+// Forgot password and asking for a new link while signed out answer without
+// waiting for the email: waits until `count` emails have arrived
+const waitForMails = async (to, subject, count = 1) => {
+  for (let i = 0; i < 100 && mailsTo(to, subject).length < count; i++) await sleep(50);
+  return mailsTo(to, subject);
+};
+// Stores `count` stale email links of `purpose` for the user, made a minute
+// ago, so saving the next link (which deletes the earlier ones) takes a while
+const pileUpLinks = (userId, purpose, email, count = 20000) => {
+  const minuteAgo = Math.floor(Date.now() / 1000 - 60).toString(16).padStart(8, '0');
+  const now = new Date();
+  return db.collection('authtokens').insertMany(Array.from({ length: count }, () => ({
+    _id: oid(minuteAgo + crypto.randomBytes(8).toString('hex')),
+    user: oid(userId), purpose, email, tokenHash: crypto.randomBytes(32).toString('hex'),
+    expiresAt: new Date(Date.now() + 3600000), createdAt: now, updatedAt: now,
+  })));
+};
 
 // The account payload of register, login, the two-step sign-in and /auth/me
 const PAYLOAD_KEYS = ['_id', 'name', 'email', 'role', 'createdAt', 'teamId', 'emailVerified', 'mustChangePassword', 'twoFactorEnabled', 'emailNotifications'];
@@ -202,11 +219,17 @@ test('sign-up, email verification and the account payload', async (t) => {
     refused.status === 403 && refused.data.code === 'EMAIL_NOT_VERIFIED' && !refused.cookie, JSON.stringify(refused.data));
 
   const visitor = from('198.51.100.5');
+  await pileUpLinks(payload?._id, 'email_verify', 'vic@acct.test');
   const again = await call('POST', '/auth/resend-verification', { body: { email: 'vic@acct.test' }, headers: visitor });
+  await check('the answer does not wait for the link to be saved and sent, so it takes no longer for a real account',
+    again.status === 200 && mailsTo('vic@acct.test', 'Confirm').length === 1);
   const unknown = await call('POST', '/auth/resend-verification', { body: { email: 'nobody@acct.test' }, headers: visitor });
   await check('asking for a new link answers the same for unknown addresses',
     again.status === 200 && unknown.status === 200 && again.data.message === unknown.data.message);
-  await check('only the real account is emailed', mailsTo('vic@acct.test', 'Confirm').length === 2 && mailsTo('nobody@acct.test').length === 0);
+  await check('only the real account is emailed',
+    (await waitForMails('vic@acct.test', 'Confirm', 2)).length === 2 && mailsTo('nobody@acct.test').length === 0);
+  await check('and the earlier links are deleted',
+    (await db.collection('authtokens').countDocuments({ user: oid(payload?._id), purpose: 'email_verify' })) === 1);
   await check('a new link needs an address', (await call('POST', '/auth/resend-verification', { body: {}, headers: visitor })).status === 400);
   const stale = await call('POST', '/auth/verify-email', { body: { token: linkToken(firstLink[0]) } });
   await check('the earlier link stops working',
@@ -302,7 +325,24 @@ test('changing your password', async (t) => {
   await check('the change is audited', await audited('account_password_changed', pat._id));
   hereSocket.socket.close();
   elsewhereSocket.socket.close();
-  Object.assign(people.pat, { password: 'patpass2', token: changed.session });
+
+  // ---------- A session from before session ids (no sid) ----------
+  await sleep(1100);
+  const { tokenVersion } = await db.collection('users').findOne({ _id: oid(pat._id) });
+  const old = jwt.sign({ id: pat._id, tv: tokenVersion, remember: false }, TEST_SECRET, { audience: 'session', expiresIn: '1h' });
+  const other = await login({ ...pat, password: 'patpass2' });
+  const [oldSocket, otherSocket] = [await connectSocket(server.base, old), await connectSocket(server.base, other)];
+  await sleep(1100);
+  const fromOld = await call('PUT', '/auth/updatepassword', { token: old, body: { currentPassword: 'patpass2', newPassword: 'patpass2' } });
+  await sleep(300);
+  await check('a session without an id changes the password too',
+    oldSocket.ok && otherSocket.ok && fromOld.status === 200 && !!fromOld.session, JSON.stringify(fromOld.data));
+  await check("its own socket stays open", oldSocket.socket.connected);
+  await check("other sessions' sockets close", !otherSocket.socket.connected);
+  await check('and its new cookie has a session id', typeof jwt.decode(fromOld.session)?.sid === 'string');
+  oldSocket.socket.close();
+  otherSocket.socket.close();
+  Object.assign(people.pat, { password: 'patpass2', token: fromOld.session });
 });
 
 test('after an admin reset, a new password comes first', async (t) => {
@@ -356,17 +396,22 @@ test('forgot password', async (t) => {
   const { pat } = people;
   const visitor = from('198.51.100.10');
 
+  await pileUpLinks(pat._id, 'password_reset', pat.email);
   const unknown = await call('POST', '/auth/forgot-password', { body: { email: 'ghost@acct.test' }, headers: visitor });
   const real = await call('POST', '/auth/forgot-password', { body: { email: ' PAT@acct.test ' }, headers: visitor });
   await check('the answer is the same whether or not an account exists',
     unknown.status === 200 && real.status === 200 && unknown.data.message === real.data.message, JSON.stringify([unknown.data, real.data]));
-  const first = mailsTo(pat.email, 'Reset your Pandav password');
+  await check('and it does not wait for the link to be saved and sent, so it takes no longer for a real account',
+    mailsTo(pat.email, 'Reset your Pandav password').length === 0);
+  const first = await waitForMails(pat.email, 'Reset your Pandav password');
   await check('only the real account gets a link',
     mailsTo('ghost@acct.test').length === 0 && first.length === 1 && first[0].text.includes(`${APP}/reset-password?token=`));
   await check('an address is needed', (await call('POST', '/auth/forgot-password', { body: {}, headers: visitor })).status === 400);
+  await check('the earlier links are deleted',
+    (await db.collection('authtokens').countDocuments({ user: oid(pat._id), purpose: 'password_reset' })) === 1);
 
   await call('POST', '/auth/forgot-password', { body: { email: pat.email }, headers: visitor });
-  const link = linkToken(mailsTo(pat.email, 'Reset your Pandav password').at(-1));
+  const link = linkToken((await waitForMails(pat.email, 'Reset your Pandav password', 2)).at(-1));
   const stale = await call('POST', '/auth/reset-password', { body: { token: linkToken(first[0]), password: 'patpass3' } });
   await check('a new request replaces the earlier link',
     stale.status === 400 && stale.data.message === 'This reset link has expired or was already used', JSON.stringify(stale.data));
@@ -521,7 +566,7 @@ test('email changes and profile settings', async (t) => {
     JSON.stringify(audit?.details?.fields?.sort()) === JSON.stringify(['department', 'email']), JSON.stringify(audit?.details));
   await check('an unconfirmed address cannot sign in here', !(await login({ email: 'eli3@acct.test', password: PASS })));
   await call('POST', '/auth/forgot-password', { body: { email: 'eli3@acct.test' }, headers: from('198.51.100.30') });
-  const resetLink = linkToken(mailsTo('eli3@acct.test', 'Reset your Pandav password').at(-1));
+  const resetLink = linkToken((await waitForMails('eli3@acct.test', 'Reset your Pandav password')).at(-1));
   await call('POST', '/auth/reset-password', { body: { token: resetLink, password: 'elipass2' } });
   const afterReset = await call('POST', '/auth/login', { body: { email: 'eli3@acct.test', password: 'elipass2' } });
   await check('a reset by email confirms the address', afterReset.status === 200 && afterReset.data.data.emailVerified === true, JSON.stringify(afterReset.data));
@@ -550,8 +595,9 @@ test('the people directory', async (t) => {
   await check('without email addresses', byName.every((u) => !('email' in u)));
   await check('part of an address finds nobody',
     (await call('GET', '/users/search?q=sue@acct', { token: pat.token })).data.data.length === 0);
-  await check('the whole address does',
-    (await call('GET', '/users/search?q=SUE@acct.test', { token: pat.token })).data.data.some((u) => u._id === sue._id));
+  const whole = await call('GET', '/users/search?q=SUE@acct.test', { token: pat.token });
+  await check('nor does the whole address, so nobody can look up whose address it is',
+    whole.status === 200 && whole.data.data.length === 0, JSON.stringify(whole.data));
   const asAdmin = (await call('GET', '/users/search?q=sue@acct', { token: adminToken })).data.data;
   await check('admins see and search addresses', asAdmin.some((u) => u._id === sue._id && u.email === sue.email));
 
@@ -571,8 +617,11 @@ test('the people directory', async (t) => {
   const sorted = (await call('GET', '/users?q=acct.test&sort=-name', { token: adminToken })).data.data.map((u) => u.name);
   await check('and sort it', sorted.length >= 8 && sorted.every((name, i) => i === 0 || sorted[i - 1].localeCompare(name, 'en', { sensitivity: 'base' }) >= 0), sorted.join());
   await check('an unknown sort is refused', (await call('GET', '/users?sort=password', { token: adminToken })).status === 400);
+  const nameOrder = (await call('GET', '/users?q=acct.test&sort=name', { token: adminToken })).data.data.map((u) => u._id);
   const page = (await call('GET', '/users?q=acct.test&sort=name&page=2&limit=3', { token: adminToken })).data;
-  await check('pages follow the sort', page.pagination.total === listed.count && page.data.length === 3);
+  await check('pages follow the sort',
+    page.pagination.total === listed.count && nameOrder.length >= 6 &&
+    JSON.stringify(page.data.map((u) => u._id)) === JSON.stringify(nameOrder.slice(3, 6)), JSON.stringify(page.data.map((u) => u.name)));
 });
 
 test('deactivation and role changes', async (t) => {
@@ -594,6 +643,7 @@ test('deactivation and role changes', async (t) => {
   await check('deactivating', off.status === 200 && off.data.data.isActive === false);
   await check('closes their sockets and sessions', !socket.socket.connected && (await call('GET', '/auth/me', { token: ola.token })).status === 401);
   await call('POST', '/auth/forgot-password', { body: { email: ola.email }, headers: visitor });
+  await sleep(300); // a link would be sent after the answer
   await check('a deactivated account gets no reset link', mailsTo(ola.email, 'Reset').length === 0);
   const on = await call('PUT', `/users/${ola._id}/toggle-active`, { token: adminToken });
   await check('reactivating', on.status === 200 && on.data.data.isActive === true);
@@ -732,9 +782,9 @@ test('without email set up', async (t) => {
   await check('and nothing is emailed', outbox(PLAIN_OUTBOX).length === 0, JSON.stringify(outbox(PLAIN_OUTBOX)));
 });
 
-test('rate limits on the email links and the second step', async (t) => {
+test('rate limits on the email links, the second step and password checks', async (t) => {
   const check = checker(t);
-  const { call } = server.api;
+  const { call, me } = server.api;
   const { pat } = people;
 
   let status = 0;
@@ -754,4 +804,71 @@ test('rate limits on the email links and the second step', async (t) => {
   }
   const blocked = await call('POST', '/auth/login', { body: { email: pat.email, password: pat.password }, headers: from('198.51.100.79') });
   await check('failed sign-in codes count toward the sign-in limit', blocked.status === 429, String(blocked.status));
+
+  // ---------- Wrong codes for one account, from many addresses ----------
+  const { tom } = people;
+  const secret = (await call('POST', '/auth/2fa/setup', { token: tom.token, body: { password: PASS } })).data?.data?.secret;
+  const on = await call('POST', '/auth/2fa/enable', { token: tom.token, body: { code: codeForStep(secret, timeStep()) } });
+  await check('setup: Tom has two-step sign-in on again', on.status === 200, JSON.stringify(on.data));
+  const ticketFrom = async (ip) =>
+    (await call('POST', '/auth/login', { body: { email: tom.email, password: PASS }, headers: from(ip) })).data?.data?.ticket;
+  const codes = [];
+  status = 0;
+  // Three addresses, each far below its own limit of 10
+  for (let i = 0; i < 12 && status !== 429; i++) {
+    const ip = `198.51.100.${81 + (i % 3)}`;
+    status = (await call('POST', '/auth/2fa/verify', { body: { ticket: await ticketFrom(ip), code: wrongCode(secret) }, headers: from(ip) })).status;
+    codes.push(status);
+  }
+  await check('wrong codes for one account are limited wherever they come from', status === 429, codes.join());
+  const rightCode = await call('POST', '/auth/2fa/verify', {
+    body: { ticket: await ticketFrom('198.51.100.84'), code: await freshCode(tom, secret) }, headers: from('198.51.100.84'),
+  });
+  await check('even the right code, with a new ticket from a new address', rightCode.status === 429 && !rightCode.cookie, String(rightCode.status));
+
+  // ---------- The password check of an email change ----------
+  const { eli } = people;
+  const guesses = [];
+  status = 0;
+  for (let i = 0; i < 25 && status !== 429; i++) {
+    status = (await call('PUT', `/users/${eli._id}`, { token: eli.token, body: { email: 'eli.thief@evil.test', currentPassword: `guess-${i}` } })).status;
+    guesses.push(status);
+  }
+  await check('guessing the password through an email change is limited',
+    status === 429 && guesses.slice(0, -1).every((code) => code === 400), guesses.join());
+  const takeover = await call('PUT', `/users/${eli._id}`, { token: eli.token, body: { email: 'eli.thief@evil.test', currentPassword: eli.password } });
+  await check('then even the right password is refused', takeover.status === 429 && (await me(eli.token))?.email === eli.email);
+  await check('with the same limit as the other password checks',
+    (await call('PUT', '/auth/updatepassword', { token: eli.token, body: { currentPassword: eli.password, newPassword: 'elipass3' } })).status === 429);
+  await check('other profile changes still work',
+    (await call('PUT', `/users/${eli._id}`, { token: eli.token, body: { department: 'Sales' } })).status === 200);
+});
+
+test('the last two admins deleting their accounts at the same moment', async (t) => {
+  const check = checker(t);
+  const { call } = server.api;
+  const { ray, sue } = people;
+  const users = db.collection('users');
+  const pair = [oid(ray._id), oid(sue._id)];
+
+  // Ray and Sue become the only admins
+  await users.updateMany({ _id: { $in: pair } }, { $set: { role: 'admin' } });
+  await users.updateOne({ _id: oid(admin._id) }, { $set: { role: 'user' } });
+  try {
+    const results = await Promise.all([
+      call('DELETE', '/users/me', { token: ray.token, body: { password: ray.password } }),
+      call('DELETE', '/users/me', { token: sue.token, body: { password: PASS } }),
+    ]);
+    const statuses = results.map((res) => `${res.status} ${res.data?.message}`).join(' | ');
+    await check('at most one of them is deleted', results.filter((res) => res.status === 200).length <= 1, statuses);
+    await check('the other is told they are the only admin',
+      results.some((res) => res.status === 400 && /only admin/.test(res.data.message)), statuses);
+    await check('so an active admin is left',
+      (await users.countDocuments({ role: 'admin', isActive: true, deletedAt: null })) >= 1);
+    const refused = pair.filter((_, i) => results[i].status === 400);
+    await check('and whoever was refused keeps an active account',
+      (await users.countDocuments({ _id: { $in: refused }, isActive: true, deletedAt: null })) === refused.length);
+  } finally {
+    await users.updateOne({ _id: oid(admin._id) }, { $set: { role: 'admin' } });
+  }
 });

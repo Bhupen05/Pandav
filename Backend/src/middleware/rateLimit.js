@@ -1,5 +1,6 @@
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { createRateLimiterV2 } from './rateLimitV2.js';
+import { readTwoFactorTicket } from '../utils/session.js';
 
 const limiter = (windowMinutes, limit, message, options = {}) =>
   rateLimit({
@@ -19,6 +20,23 @@ export const loginLimiter = limiter(
   10,
   'Too many failed login attempts. Please try again in 15 minutes.',
   { skipSuccessfulRequests: true }
+);
+
+// Wrong codes at the second step of signing in, per account (the ticket's
+// user) wherever they come from. The per-address limit above isn't enough:
+// anyone who has the password can get new tickets from many addresses. A
+// made-up or expired ticket names no account, so it counts per address.
+export const twoFactorAccountLimiter = limiter(
+  15,
+  10,
+  'Too many wrong sign-in codes for this account. Please try again in 15 minutes.',
+  {
+    skipSuccessfulRequests: true,
+    keyGenerator: (req) => {
+      const account = readTwoFactorTicket(req.body?.ticket)?.id;
+      return account ? `account:${account}` : `address:${ipKeyGenerator(req.clientIp || req.ip)}`;
+    },
+  }
 );
 
 export const registerLimiter = limiter(
@@ -57,10 +75,17 @@ export const userSearchLimiter = createRateLimiterV2({
 });
 
 // Actions confirmed with the password or a sign-in code (change password,
-// two-step sign-in settings, deleting the account), per signed-in user, so a
-// stolen session can't be used to guess the password
+// two-step sign-in settings, deleting the account, changing your own email),
+// per signed-in user and all together, so a stolen session can't be used to
+// guess the password
 export const accountSecurityLimiter = createRateLimiterV2({
   keyPrefix: 'account-security',
   windowMs: 15 * 60 * 1000,
   max: 20,
 });
+
+// For routes that check the password only sometimes (PUT /users/:id checks
+// currentPassword when you change your own email): requests that send one
+// count toward accountSecurityLimiter, the others don't
+export const passwordCheckLimiter = (req, res, next) =>
+  (req.body?.currentPassword === undefined ? next() : accountSecurityLimiter(req, res, next));

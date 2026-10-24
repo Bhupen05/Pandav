@@ -1,17 +1,16 @@
-import User, { PASSWORD_MIN_LENGTH, accountPayload } from '../models/User.js';
+import User, {
+  PASSWORD_MIN_LENGTH,
+  SECOND_FACTOR_FIELDS,
+  TWO_FACTOR_OFF,
+  acceptSecondFactor,
+  accountPayload,
+} from '../models/User.js';
 import AuthToken from '../models/AuthToken.js';
 import { claimsStillValid, getUserFromToken } from '../middleware/auth.js';
-import {
-  RESET_LINK_HOURS,
-  VERIFY_LINK_HOURS,
-  sendPasswordChangedNotice,
-  sendPasswordResetEmail,
-  sendVerificationEmail,
-} from '../utils/accountMail.js';
 import { logAuditEventV2 } from '../utils/auditLoggerV2.js';
 import { sendServerError } from '../utils/http.js';
-import { mailEnabled } from '../utils/mailer.js';
-import { disconnectUserSockets } from '../utils/realtime.js';
+import { appUrl, mailEnabled, sendMail } from '../utils/mailer.js';
+import { disconnectUserSockets, getIo } from '../utils/realtime.js';
 import { decryptSecret, encryptSecret } from '../utils/secrets.js';
 import {
   SESSION_AUDIENCE,
@@ -24,7 +23,6 @@ import {
   signTwoFactorTicket,
 } from '../utils/session.js';
 import { generateBackupCodes, generateSecret, hashBackupCode, otpauthUrl, verifyTotp } from '../utils/totp.js';
-import { SECOND_FACTOR_FIELDS, TWO_FACTOR_OFF, acceptSecondFactor } from '../utils/twoFactor.js';
 
 const normalizeEmail = (email) => email.trim().toLowerCase();
 
@@ -40,6 +38,122 @@ const WRONG_CODE = 'That code is not right. Check that the time on your phone is
 // could ever confirm theirs.
 export const emailVerificationRequired = () =>
   process.env.EMAIL_VERIFICATION_REQUIRED === 'true' && mailEnabled();
+
+// ---------- Emails about the account ----------
+// Links to reset the password or confirm the address, and security notices
+// (also used by userController). Unlike notifications they go out even with
+// email notifications turned off. Each does nothing when email isn't set up
+// (mailEnabled) and never throws.
+//
+// None waits for the mail server, so a slow one doesn't slow the request.
+// The two link emails do wait for their token to be saved; where the answer
+// must not show whether an account exists (forgot password, a new
+// verification link while signed out), the caller doesn't wait for them at all.
+
+export const RESET_LINK_HOURS = 1;
+export const VERIFY_LINK_HOURS = 48;
+
+const signInUrl = () => appUrl('/login');
+
+const deliver = (message) => {
+  sendMail(message).catch((error) => console.error('Email failed:', error.message));
+};
+
+const hello = (name) => `Hello ${name || 'there'},`;
+
+// A link to confirm the account's current address, valid for 48 hours.
+// Earlier links stop working. Returns whether it was sent.
+export const sendVerificationEmail = async (user) => {
+  if (!mailEnabled()) return false;
+  try {
+    const token = await AuthToken.issue(user, 'email_verify', VERIFY_LINK_HOURS);
+    deliver({
+      to: user.email,
+      name: user.name,
+      subject: 'Confirm your email address for Pandav',
+      text: [
+        hello(user.name),
+        `Please confirm that ${user.email} is your email address by opening this link:`,
+        appUrl(`/verify-email?token=${token}`),
+        `The link works for ${VERIFY_LINK_HOURS} hours. If you didn't create a Pandav account or change your email address, you can ignore this message.`,
+      ].join('\n\n'),
+    });
+    return true;
+  } catch (error) {
+    console.error('Verification email failed:', error.message);
+    return false;
+  }
+};
+
+// A link to choose a new password, valid for an hour and once only.
+// Earlier links stop working. Returns whether it was sent.
+export const sendPasswordResetEmail = async (user) => {
+  if (!mailEnabled()) return false;
+  try {
+    const token = await AuthToken.issue(user, 'password_reset', RESET_LINK_HOURS);
+    deliver({
+      to: user.email,
+      name: user.name,
+      subject: 'Reset your Pandav password',
+      text: [
+        hello(user.name),
+        'Someone asked to reset the password of your Pandav account. To choose a new password, open this link:',
+        appUrl(`/reset-password?token=${token}`),
+        "The link works for 1 hour, once. If you didn't ask for this, you can ignore this message: your password stays as it is.",
+      ].join('\n\n'),
+    });
+    return true;
+  } catch (error) {
+    console.error('Password reset email failed:', error.message);
+    return false;
+  }
+};
+
+const notice = (user, subject, lines) => {
+  if (!mailEnabled()) return;
+  deliver({ to: user.email, name: user.name, subject, text: [hello(user.name), ...lines].join('\n\n') });
+};
+
+export const sendPasswordChangedNotice = (user) => notice(user, 'Your Pandav password was changed', [
+  'The password of your Pandav account was just changed, and your other signed-in browsers were signed out.',
+  `If you didn't do this, use "Forgot password" on the sign-in page straight away, or ask your admin for help: ${signInUrl()}`,
+]);
+
+export const sendAdminResetNotice = (user) => notice(user, 'An admin reset your Pandav password', [
+  'An admin set a new password for your Pandav account and signed you out everywhere.',
+  "Ask them for the new password. When you sign in with it, you'll be asked to choose your own.",
+  `Sign in: ${signInUrl()}`,
+]);
+
+export const sendTwoFactorResetNotice = (user) => notice(user, 'Two-step sign-in was turned off', [
+  'An admin turned off two-step sign-in for your Pandav account, for example because you lost your phone. You can now sign in with your password alone.',
+  `To turn it back on, go to ${appUrl('/profile?tab=security')}. If you didn't ask for this, tell your admin.`,
+]);
+
+// To the address the account had before, after it changed
+export const sendEmailChangedNotice = (previous) => notice(previous, 'Your Pandav email address was changed', [
+  `The email address of your Pandav account was changed from ${previous.email} to another address. Emails from Pandav will go there from now on.`,
+  "If you didn't make this change, contact your admin straight away.",
+]);
+
+// Closes the sockets of the user's sessions other than `sid` (this browser's).
+// A session from before session ids has none, and neither have the sockets it
+// opened, so they can't be told apart from other such sessions' sockets:
+// then only sockets that name a session are closed, and this browser's stay
+// connected. (The other old sessions have ended anyway; their sockets can't
+// reconnect.)
+const closeOtherSessionsSockets = async (userId, sid) => {
+  if (typeof sid === 'string') {
+    await disconnectUserSockets(userId, { exceptSid: sid });
+    return;
+  }
+  const io = getIo();
+  if (!io) return;
+  const sockets = await io.in(String(userId)).fetchSockets();
+  for (const socket of sockets) {
+    if (typeof socket.data?.sid === 'string') socket.disconnect(true);
+  }
+};
 
 // Signs the user in on this response (after the password, and the second
 // step if it is on) and answers with their account
@@ -286,14 +400,17 @@ export const updatePassword = async (req, res) => {
 
     // Saving a new password also invalidates every token issued before now,
     // so this browser gets a fresh session, kept as long as the old one was
-    // and under the same session id, so its open sockets stay connected
+    // and under the same session id, so its open sockets stay connected. A
+    // session from before session ids gets one now.
     user.password = newPassword;
     user.mustChangePassword = false;
     // Only the password is checked: an older profile image the schema now
     // refuses must not block it
     await user.save({ validateModifiedOnly: true });
-    setSessionCookie(req, res, user, req.session.remember === true, { sid: req.session.sid });
-    await disconnectUserSockets(user._id, { exceptSid: req.session.sid });
+    const { sid } = req.session;
+    const sessionId = typeof sid === 'string' ? { sid } : {};
+    setSessionCookie(req, res, user, req.session.remember === true, sessionId);
+    await closeOtherSessionsSockets(user._id, sid);
     sendPasswordChangedNotice(user);
 
     await logAuditEventV2(req, { action: 'account_password_changed', targetType: 'User', targetId: user._id });
@@ -358,7 +475,10 @@ export const forgotPassword = async (req, res) => {
 
     if (mailEnabled()) {
       const user = await User.findOne({ email: normalizeEmail(email), isActive: true, deletedAt: null });
-      if (user) await sendPasswordResetEmail(user);
+      // Not awaited: saving the link takes extra database writes, and waiting
+      // for them would make the answer slower for addresses with an account.
+      // It never throws.
+      if (user) sendPasswordResetEmail(user);
     }
 
     res.json({
@@ -472,7 +592,8 @@ export const resendVerification = async (req, res) => {
     }
     if (mailEnabled()) {
       const user = await User.findOne({ email: normalizeEmail(email), isActive: true, deletedAt: null, emailVerified: false });
-      if (user) await sendVerificationEmail(user);
+      // Not awaited, as in forgotPassword, so the answer takes as long either way
+      if (user) sendVerificationEmail(user);
     }
     res.json({
       success: true,

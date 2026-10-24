@@ -12,7 +12,7 @@ import {
   getChatUsers,
 } from '../controllers/userController.js';
 import { protect, authorize } from '../middleware/auth.js';
-import { accountSecurityLimiter, userSearchLimiter } from '../middleware/rateLimit.js';
+import { accountSecurityLimiter, passwordCheckLimiter, userSearchLimiter } from '../middleware/rateLimit.js';
 
 const router = express.Router();
 
@@ -28,7 +28,8 @@ router
 router
   .route('/:id')
   .get(protect, getUser)
-  .put(protect, updateUser)
+  // Changing your own email is confirmed with currentPassword
+  .put(protect, passwordCheckLimiter, updateUser)
   .delete(protect, authorize('admin'), deleteUser);
 
 router

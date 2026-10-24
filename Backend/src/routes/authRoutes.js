@@ -24,6 +24,7 @@ import {
   loginLimiter,
   passwordResetLimiter,
   registerLimiter,
+  twoFactorAccountLimiter,
   verificationLimiter,
 } from '../middleware/rateLimit.js';
 
@@ -37,8 +38,9 @@ router.get('/', (req, res) => {
 router.get('/config', getAuthConfig);
 router.post('/register', registerLimiter, register);
 router.post('/login', loginLimiter, login);
-// Failed codes count toward the same limit as failed passwords
-router.post('/2fa/verify', loginLimiter, verifyTwoFactor);
+// Failed codes count toward the same limit as failed passwords, and toward
+// a limit per account
+router.post('/2fa/verify', loginLimiter, twoFactorAccountLimiter, verifyTwoFactor);
 router.post('/logout', logout);
 
 // A user who has to replace an admin-set password can still use these

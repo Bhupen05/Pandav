@@ -119,7 +119,7 @@ socket) when:
 |---|---|---|
 | [Log out](#log-out) | None: the cookie is removed from this browser, but a copy of its value would keep working until it expires | This browser's are closed |
 | [Sign out everywhere](#sign-out-everywhere) | All (the token version goes up) | All closed |
-| [Change password](#change-password) | All but this browser's, which gets a new cookie (`passwordChangedAt`) | All but this browser's closed |
+| [Change password](#change-password) | All but this browser's, which gets a new cookie (`passwordChangedAt`) | All but this browser's closed (for a session from before session ids, see [Change password](#change-password)) |
 | [Admin password reset](#reset-a-password) | All (`passwordChangedAt`) | All closed |
 | [Password reset by email](#reset-a-forgotten-password) | All (the token version goes up too) | All closed |
 | [Deactivation](#activate-or-deactivate-a-user) | All (the token version goes up, so reactivating doesn't bring them back) | All closed |
@@ -272,11 +272,12 @@ owner):
 | What | Limit | Counted per | Over the limit |
 |---|---|---|---|
 | `POST /auth/login` and `POST /auth/2fa/verify`, together | 10 failed attempts per 15 minutes; successful ones don't count | Address | `429 Too many failed login attempts. Please try again in 15 minutes.` |
+| `POST /auth/2fa/verify`, also | 10 failed attempts per 15 minutes; successful ones don't count | Account (the ticket's user, whatever the address and however many tickets; a made-up or expired ticket counts per address) | `429 Too many wrong sign-in codes for this account. Please try again in 15 minutes.` |
 | `POST /auth/register` | 10 per hour, whatever the outcome | Address | `429 Too many accounts created from this network. Please try again later.` |
 | `POST /auth/forgot-password` | 5 per hour, whatever the outcome | Address | `429 Too many password reset requests. Please try again later.` |
 | `POST /auth/resend-verification` | 5 per hour, whatever the outcome | Address | `429 Too many verification emails requested. Please try again later.` |
 | `GET /users/search` | 60 per minute | User | `429 Too many requests. Try again in <n> seconds.` |
-| Actions confirmed with the password or a code: `PUT /auth/updatepassword`, the four `POST /auth/2fa/...` settings endpoints, `DELETE /users/me` | 20 per 15 minutes | User | `429 Too many requests. Try again in <n> seconds.` |
+| Actions confirmed with the password or a code: `PUT /auth/updatepassword`, the four `POST /auth/2fa/...` settings endpoints, `DELETE /users/me`, and `PUT /users/:id` when the body has `currentPassword` (changing your own email) | 20 per 15 minutes, all of them together | User | `429 Too many requests. Try again in <n> seconds.` |
 
 All of them send `Retry-After`. "Address" is the visitor's IP address (see
 [README.md](README.md#where-requests-may-come-from)).
@@ -442,7 +443,8 @@ Errors:
 - `400 Enter the 6-digit code from your authenticator app, or a backup code`: no code.
 - `400 That code is not right. Check that the time on your phone is correct, or use a backup
   code.`: a wrong code, one already used, or a used-up backup code.
-- `429`: rate limited, counted with failed logins.
+- `429`: rate limited: failed attempts count with failed logins (per address), and also per
+  account, so someone who has the password can't keep guessing codes from many addresses.
 
 ### Log out
 
@@ -488,6 +490,12 @@ and their socket connections close. This browser gets a new session cookie of th
 or without "remember me") and the same session id, with a fresh lifetime, so its open sockets
 stay connected. When email is set up, the account is emailed a notice.
 
+A session from before session ids (no `sid`, issued before Phase 9) gets a session id in its new
+cookie. Its sockets have no session id either, and can't be told apart from those of other such
+sessions, so then only the sockets that do name a session are closed: this browser's stay
+connected, and so do other old sessions' open sockets, although those sessions have ended and
+their sockets can't reconnect.
+
 `200 OK`: the [account payload](#the-account-payload).
 
 Errors:
@@ -526,7 +534,9 @@ or deleted. See [Chat.md](Chat.md).
 When email is set up and an active account has this address, emails it a link to choose a new
 password, valid for 1 hour and once only; an earlier reset link stops working. The answer is the
 same whether or not an account exists, and also when email isn't set up (check
-[`mailEnabled`](#sign-in-settings) before offering this):
+[`mailEnabled`](#sign-in-settings) before offering this). It comes as soon as the address is looked
+up, without waiting for the link to be saved or sent, so it doesn't take longer for an address
+that has an account:
 
 ```json
 { "success": true, "message": "If an account uses that address, we've emailed it a link to choose a new password. The link works for 1 hour." }
@@ -595,7 +605,8 @@ Errors:
   working. `200` with `We've sent a new link to <email>. It works for 48 hours.`
 - **Signed out** (for someone login refused with `EMAIL_NOT_VERIFIED`): `{ "email": "..." }`.
   When email is set up and an active, unconfirmed account has this address, emails it a new link.
-  The answer is the same either way: `200` with
+  The answer is the same either way, and as with [forgot password](#forgot-password) it doesn't
+  wait for the link to be saved or sent: `200` with
   `If an account with that address still needs confirming, we've emailed it a new link.`
 
 Errors:
@@ -706,9 +717,9 @@ The caller is left out. Returns at most 10, sorted by name, with `_id`, `name`, 
 `department` and `profileImage` (the last two when set).
 
 The directory doesn't hand out email addresses: for anyone but an admin, `q` is matched against
-names, or against a whole email address (typing all of `ann@example.com` finds Ann; `ann@ex`
-finds nobody), and results have no `email`. For admins, `q` is matched against names and emails,
-and results include `email`.
+names only, and results have no `email`. Not even a whole address finds anyone
+(`ann@example.com` finds nobody), so nobody can look up whose address it is. For admins, `q` is
+matched against names and emails, and results include `email`.
 
 If `q` is missing or shorter than 2 characters after trimming, the response is
 `{ "success": true, "data": [] }`, without `count`.
@@ -887,6 +898,9 @@ Errors:
 - `400 That email is already in use`: the email belongs to another account.
 - `404 User not found`
 - `409 This account has been deleted`
+- `429`: rate limited. Requests that send `currentPassword` count toward the limit of actions
+  confirmed with the password (see [Rate limits](#rate-limits)), so a stolen session can't be
+  used to guess the password here; others don't.
 
 ### Delete your account
 
@@ -909,7 +923,10 @@ this browser's cookie.
 Errors, in the order they are checked (so a refused attempt doesn't use up a backup code):
 
 - `400 You are the only admin. Make someone else an admin before deleting your account.`: the last
-  active admin.
+  active admin. It is checked again once the password (and code) are right: the admin is
+  deactivated first and the other active admins are counted after, so when the last two admins
+  delete their accounts at the same moment, at least one of them gets this answer (and keeps an
+  active account) instead of both going.
 - `400 You are the only leader of <team>. Make someone else its leader or delete the team
   first.`
 - `400 Please enter your password to delete your account`, `400 Password is incorrect`

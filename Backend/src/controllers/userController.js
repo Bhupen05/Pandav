@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import User from '../models/User.js';
+import User, { SECOND_FACTOR_FIELDS, TWO_FACTOR_OFF, acceptSecondFactor } from '../models/User.js';
 import Task from '../models/Task.js';
 import Attendance from '../models/Attendance.js';
 import AuthToken from '../models/AuthToken.js';
@@ -20,7 +20,7 @@ import {
   sendEmailChangedNotice,
   sendTwoFactorResetNotice,
   sendVerificationEmail,
-} from '../utils/accountMail.js';
+} from './authController.js';
 import { logAuditEventV2 } from '../utils/auditLoggerV2.js';
 import { escapeRegex, listResponse, pick, sendServerError } from '../utils/http.js';
 import { messageableUserIds } from '../utils/messaging.js';
@@ -28,7 +28,6 @@ import { notify } from '../utils/notify.js';
 import { disconnectUserSockets } from '../utils/realtime.js';
 import { clearSessionCookie } from '../utils/session.js';
 import { isInAnyTeam } from '../utils/teams.js';
-import { SECOND_FACTOR_FIELDS, TWO_FACTOR_OFF, acceptSecondFactor } from '../utils/twoFactor.js';
 
 const TEAM_ROLES = ['team_leader', 'team_member'];
 
@@ -123,7 +122,7 @@ const deleteAccount = async (user) => {
   ]);
 };
 
-// @desc    Search users by name (admins: name or email)
+// @desc    Search users by name (admins: name or email; only they see emails)
 // @route   GET /api/v2/users/search?q=...
 // @access  Private
 export const searchUsers = async (req, res) => {
@@ -135,16 +134,12 @@ export const searchUsers = async (req, res) => {
     }
 
     // Matched as plain text, not as a regular expression. Only admins see
-    // or search addresses; others find someone by an address only by typing
-    // all of it, so the directory doesn't hand out email addresses.
-    const text = q.trim();
-    const pattern = { $regex: escapeRegex(text), $options: 'i' };
+    // or search addresses. Others search names only: matching even a whole
+    // address would tell anyone who signs up whose address it is.
+    const pattern = { $regex: escapeRegex(q.trim()), $options: 'i' };
     const isAdmin = req.user.role === 'admin';
     const users = await User.find({
-      $or: [
-        { name: pattern },
-        { email: isAdmin ? pattern : text.toLowerCase() },
-      ],
+      ...(isAdmin ? { $or: [{ name: pattern }, { email: pattern }] } : { name: pattern }),
       _id: { $ne: req.user._id }, // Don't show current user
       isActive: true,
       deletedAt: null,
@@ -452,18 +447,39 @@ export const deleteUser = async (req, res) => {
   }
 };
 
+const ONLY_ADMIN = 'You are the only admin. Make someone else an admin before deleting your account.';
+
+// How many active admins there are besides `userId`
+const otherActiveAdmins = (userId) =>
+  User.countDocuments({ _id: { $ne: userId }, role: 'admin', isActive: true, deletedAt: null });
+
+// For an admin deleting their own account: whether another active admin
+// stays. Without transactions, "count the other admins, then delete" isn't one
+// step, so the admin is deactivated first and the others are counted after.
+// Of two admins doing this at the same moment, at least one sees the other
+// already deactivated and stops (and is reactivated), so the last admin can't
+// go.
+const anotherAdminStays = async (userId) => {
+  const claimed = await User.updateOne({ _id: userId, isActive: true, deletedAt: null }, { $set: { isActive: false } });
+  if ((await otherActiveAdmins(userId)) > 0) return true;
+  if (claimed.modifiedCount === 1) {
+    await User.updateOne({ _id: userId, deletedAt: null }, { $set: { isActive: true } });
+  }
+  return false;
+};
+
 // @desc    Delete your own account, confirmed with your password (and a code
 //          when two-step sign-in is on). Signs this browser out.
 // @route   DELETE /api/v2/users/me
 // @access  Private
 export const deleteOwnAccount = async (req, res) => {
   try {
-    // Checked before the password and code, so a refused attempt doesn't use up a backup code
-    if (req.user.role === 'admin') {
-      const otherAdmins = await User.countDocuments({ _id: { $ne: req.user._id }, role: 'admin', isActive: true, deletedAt: null });
-      if (otherAdmins === 0) {
-        return res.status(400).json({ success: false, message: 'You are the only admin. Make someone else an admin before deleting your account.' });
-      }
+    const isAdmin = req.user.role === 'admin';
+    // Checked before the password and code, so a refused attempt doesn't use
+    // up a backup code (and checked again just before deleting, see
+    // anotherAdminStays)
+    if (isAdmin && (await otherActiveAdmins(req.user._id)) === 0) {
+      return res.status(400).json({ success: false, message: ONLY_ADMIN });
     }
     const team = await soleLedTeam(req.user._id);
     if (team) {
@@ -488,6 +504,10 @@ export const deleteOwnAccount = async (req, res) => {
       if (!(await acceptSecondFactor(user, code))) {
         return res.status(400).json({ success: false, message: 'That code is not right. Check that the time on your phone is correct, or use a backup code.' });
       }
+    }
+
+    if (isAdmin && !(await anotherAdminStays(user._id))) {
+      return res.status(400).json({ success: false, message: ONLY_ADMIN });
     }
 
     await deleteAccount(user);

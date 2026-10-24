@@ -45,17 +45,19 @@ const hashToken = (token) => crypto.createHash('sha256').update(String(token)).d
 
 // Creates a token for the user's current email address, valid for `hours`,
 // and returns it (the only time it exists outside the email). Earlier tokens
-// for the same purpose stop working.
+// for the same purpose stop working. The new one is saved first and only
+// older ones are deleted (ids grow over time), so when two requests overlap
+// the later token is the one left, never both or neither.
 authTokenSchema.statics.issue = async function(user, purpose, hours) {
   const token = crypto.randomBytes(32).toString('base64url');
-  await this.deleteMany({ user: user._id, purpose });
-  await this.create({
+  const record = await this.create({
     user: user._id,
     purpose,
     tokenHash: hashToken(token),
     email: user.email,
     expiresAt: new Date(Date.now() + hours * 60 * 60 * 1000),
   });
+  await this.deleteMany({ user: user._id, purpose, _id: { $lt: record._id } });
   return token;
 };
 
