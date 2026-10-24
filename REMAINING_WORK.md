@@ -1,8 +1,8 @@
 # Remaining Work
 
-What is still open after Phase 8 (the project owner's decisions), as of 2026-10-18. Phases 1–4 and
-the V2 merge are on `main` through PR #2. Phases 5 (cookie sessions), 6 (V2 social and teams
-security pass), 7 (remaining-work pass) and 8 are on `v1` and not merged into `main` yet.
+What is still open after Phase 8 (the project owner's decisions), as of 2026-10-18. Everything is on
+`main`: Phases 1–4 and the V2 merge through PR #2, Phases 5 (cookie sessions) and 6 (V2 social and
+teams security pass) through PR #3, and Phases 7 (remaining-work pass) and 8 through PR #4.
 
 Phase 8 carried out the decisions listed in [section 2](#2-decisions-made-in-phase-8).
 
@@ -35,16 +35,15 @@ These happen on GitHub, Render and Vercel, outside the code.
 
 **Phase 5 (cookie sessions)**
 - [ ] Generate a secret: `openssl rand -hex 32`.
-- [ ] Set `ORIGIN_SECRET` to that value on **both** Render (backend) and Vercel (frontend). Do this
-      *before* merging if `main` deploys automatically; the code running now ignores it.
+- [ ] Set `ORIGIN_SECRET` to that value on **both** Render (backend) and Vercel (frontend). Set it
+      on Vercel first and redeploy the frontend, then on Render. A Vercel that sends the secret to a
+      Render that doesn't check it yet is harmless; the other way round breaks every call.
   - Render has it and Vercel doesn't, or the values differ → every API call fails with
     "Requests must come through the app".
   - Neither has it → the app works, but rate limits treat every visitor as one, so ten failed
     logins from anyone lock everyone out of signing in for 15 minutes.
   - If you use Vercel preview deployments, set it for the Preview environment too.
-- [ ] Open and merge the pull request: <https://github.com/Bhupen05/Pandav/compare/main...v1>.
-      Expect a few minutes of sign-in errors until both Render and Vercel have finished deploying.
-      Everyone has to sign in again once.
+- [x] Merged into `main` (PR #3, then PR #4 with Phases 7–8). Everyone has to sign in again once.
 - [ ] After the deploy:
   - [ ] Sign-in, reload and logout work.
   - [ ] DevTools → Application → Cookies: `pandav_session` (path `/api`) is ticked **HttpOnly**
@@ -62,11 +61,11 @@ These happen on GitHub, Render and Vercel, outside the code.
 - [ ] No new settings. Deploy the backend and frontend together: team-chat read receipts changed
       shape (one `team_messages_read` event instead of one event per message), so until both are
       live, read receipts in team chat update only on reload.
-- [ ] The GitHub Actions run for `v1` now has a third job, **e2e** (browser tests). Check it passes
-      on GitHub; if it fails, the run keeps a `playwright-report` artifact with traces.
+- [x] GitHub Actions has a third job, **e2e** (browser tests). It passed on `v1` and on `main` after
+      PR #4. When it fails, the run keeps a `playwright-report` artifact with traces.
 
 **Phase 8 (owner decisions)**
-- [ ] **Before deploying:** on Render, open the backend service → Settings → **Health Check
+- [ ] **Now (PR #4 is merged):** on Render, open the backend service → Settings → **Health Check
       Path**. If it is `/api/health` or `/api/v1/health`, change it to `/api/v2/health`. Those
       old paths no longer exist, so Render would treat the new version as broken and keep
       restarting it. Do the same for any uptime monitor.
@@ -84,8 +83,8 @@ These happen on GitHub, Render and Vercel, outside the code.
 **Earlier phases (skip any you have already done)**
 - [ ] Run `npm run migrate` in `Backend/` against the production database (Phase 3) and act on its
       "Needs attention" list.
-- [ ] `CLIENT_URL` on Render is the frontend's address. Without it the API refuses every save
-      (sign-in, tasks, chat messages) from the deployed frontend.
+- [ ] `CLIENT_URL` on Render is the frontend's address (`https://pandav-nine.vercel.app`). Without
+      it the API refuses every save (sign-in, tasks, chat messages) from the deployed frontend.
 - [ ] Check who has the `admin` role in the live database, and change the password of any
       `admin@example.com` / `user@example.com` account still using the old default password.
 - [ ] `APP_TIMEZONE` decides which day an attendance record belongs to. It defaults to

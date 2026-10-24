@@ -82,6 +82,7 @@ Pandav/
     │   ├── utils/             # Sessions, HTTP helpers, team rules, dates, token encryption
     │   └── server.js          # Express app, Socket.io, route mounting
     ├── scripts/migrate-data.js  # npm run migrate: brings an existing database up to date
+    ├── scripts/seed.js        # npm run seed: demo data for a local database
     ├── test/                  # End-to-end API test suites (npm test) and the browser tests' backend
     ├── Doc/                   # API reference
     └── create-users.js        # Seeds the first admin and demo user
@@ -125,6 +126,10 @@ npm start
 ```
 
 The backend will run on `http://localhost:5000`
+
+5. **Optional: demo data.** `npm run seed -- --uri mongodb://localhost:27017/pandav` fills a local
+   database with teams, tasks, attendance, chats and Social Hub posts, and prints the accounts
+   (every password is `PandavLocal#2026`). It deletes what was there first.
 
 ### Frontend Setup
 

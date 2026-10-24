@@ -21,6 +21,14 @@ npm run dev
 
 The server listens on `http://localhost:5000` (`PORT`).
 
+For a database full of demo data instead (an admin, three teams, tasks, attendance, chats and
+Social Hub posts; every password `PandavLocal#2026`):
+
+```bash
+npm run seed -- --uri mongodb://127.0.0.1:27017/pandav_dev
+MONGODB_URI=mongodb://127.0.0.1:27017/pandav_dev npm run dev
+```
+
 ## Scripts
 
 | Command | Does |
@@ -30,6 +38,7 @@ The server listens on `http://localhost:5000` (`PORT`).
 | `npm test` | End-to-end API suites in `test/`, each on its own throwaway database (`TEST_MONGODB_URL`, default `mongodb://127.0.0.1:27017`) |
 | `npm run lint` | ESLint |
 | `npm run migrate` | Brings an existing database up to date and reports data that needs attention; see the main README |
+| `npm run seed` | Replaces everything in a database on this machine with demo data and prints the accounts; refuses other hosts unless given `--allow-remote` |
 | `node create-users.js` | Creates the seed admin and demo user if they don't exist |
 
 ## Environment variables
