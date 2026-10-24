@@ -77,14 +77,16 @@ test('integrity', async (t) => {
   await check('task responses no longer embed profile images', shared.data.data.assignedTo.every((a) => !('profileImage' in a)));
 
   const aliceDone = await call('POST', `/tasks/${sharedId}/request-completion`, { token: alice.token });
-  const aliceEntry = aliceDone.data.data.assigneeProgress.find((p) => p.user === alice._id);
+  const aliceEntry = aliceDone.data.data.assigneeProgress.find((p) => p.user?._id === alice._id);
   await check('one assignee finishing does not complete the shared task', aliceDone.status === 200 && aliceDone.data.data.status === 'in-progress' && aliceEntry.status === 'completion-requested', JSON.stringify(aliceDone.data).slice(0, 200));
   await check('...and tells them it is waiting for others', /Waiting/.test(aliceDone.data.message));
   await check('cannot mark your part done twice', (await call('POST', `/tasks/${sharedId}/request-completion`, { token: alice.token })).status === 400);
-  await check('not in the approval queue until everyone is done', !(await call('GET', '/tasks/pending-approval', { token: adminToken })).data.data.some((t) => t._id === sharedId));
+  const queued = (await call('GET', '/tasks/pending-approval', { token: adminToken })).data.data.find((t) => t._id === sharedId);
+  await check('in the approval queue once anyone has asked, showing how many are done',
+    queued?.doneCount === 1 && queued?.assigneeCount === 2, JSON.stringify(queued)?.slice(0, 200));
 
   const bobStart = await call('PUT', `/tasks/${sharedId}`, { token: bob.token, body: { status: 'in-progress' } });
-  await check('second assignee can still start their part', bobStart.status === 200 && bobStart.data.data.assigneeProgress.find((p) => p.user === bob._id).status === 'in-progress');
+  await check('second assignee can still start their part', bobStart.status === 200 && bobStart.data.data.assigneeProgress.find((p) => p.user?._id === bob._id).status === 'in-progress');
   await check('cannot start your part twice', (await call('PUT', `/tasks/${sharedId}`, { token: bob.token, body: { status: 'in-progress' } })).status === 403);
   const bobDone = await call('POST', `/tasks/${sharedId}/request-completion`, { token: bob.token });
   await check('last assignee finishing sends the task for approval', bobDone.data.data.status === 'completion-requested');
@@ -95,8 +97,12 @@ test('integrity', async (t) => {
   const early = await call('PUT', `/tasks/${sharedId}/approve`, { token: adminToken });
   await check('admin can approve once anyone has requested (no one blocks forever)', early.status === 200 && early.data.data.status === 'completed' && early.data.data.assigneeProgress.every((p) => p.status === 'completed'));
 
-  const edited = await call('PUT', `/tasks/${sharedId}`, { token: adminToken, body: { assignedTo: [alice._id, carol._id] } });
-  const progressUsers = edited.data.data.assigneeProgress.map((p) => p.user).sort().join();
+  const closedEdit = await call('PUT', `/tasks/${sharedId}`, { token: adminToken, body: { assignedTo: [alice._id, carol._id] } });
+  await check('a completed task keeps its assignees until it is reopened',
+    closedEdit.status === 400 && /^Reopen this task/.test(closedEdit.data.message), JSON.stringify(closedEdit.data));
+  const swap = (await call('POST', '/tasks', { token: adminToken, body: { title: 'Swap', description: 'd', assignedTo: [alice._id, bob._id], startDate: '2026-10-01', dueDate: '2026-10-30' } })).data.data;
+  const edited = await call('PUT', `/tasks/${swap._id}`, { token: adminToken, body: { assignedTo: [alice._id, carol._id] } });
+  const progressUsers = edited.data.data.assigneeProgress.map((p) => p.user._id).sort().join();
   await check('changing assignees keeps progress in sync', progressUsers === [alice._id, carol._id].sort().join(), progressUsers);
 
   await check('due date before start date refused on create', (await call('POST', '/tasks', { token: adminToken, body: { title: 'x', description: 'd', assignedTo: [alice._id], startDate: '2026-10-10', dueDate: '2026-10-01' } })).status === 400);
@@ -112,9 +118,12 @@ test('integrity', async (t) => {
   const legacyDone = await call('POST', `/tasks/${legacyTask}/request-completion`, { token: carol.token });
   await check('task created before progress tracking can still be completed', legacyDone.status === 200 && legacyDone.data.data.status === 'completion-requested', JSON.stringify(legacyDone.data).slice(0, 160));
 
-  const board = await call('GET', '/tasks/leaderboard', { token: bob.token });
+  const board = await call('GET', '/tasks/leaderboard', { token: adminToken });
   const aliceRow = board.data.data.find((r) => r._id === alice._id);
-  await check('leaderboard visible to regular users and counts all team tasks', board.status === 200 && aliceRow && aliceRow.completedTasks >= 1 && !('email' in aliceRow), JSON.stringify(board.data).slice(0, 200));
+  await check("the admin's leaderboard counts everyone's tasks", board.status === 200 && aliceRow && aliceRow.completedTasks >= 1 && !('email' in aliceRow), JSON.stringify(board.data).slice(0, 200));
+  const bobBoard = await call('GET', '/tasks/leaderboard', { token: bob.token });
+  await check('someone without a team sees only themselves',
+    bobBoard.status === 200 && bobBoard.data.data.length === 1 && bobBoard.data.data[0]._id === bob._id, JSON.stringify(bobBoard.data).slice(0, 200));
 
   const page = await call('GET', '/tasks?page=1&limit=1', { token: adminToken });
   await check('opt-in pagination on lists', page.data.data.length === 1 && page.data.pagination.total >= 2 && page.data.pagination.pages >= 2, JSON.stringify(page.data.pagination));
