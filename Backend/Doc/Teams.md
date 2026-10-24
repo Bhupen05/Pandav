@@ -25,7 +25,7 @@ Every document also has `_id` and Mongoose's version key `__v`.
 |-------|------|-------|
 | `name` | String | Required, trimmed, at most 80 characters, unique (exact, case-sensitive match) |
 | `description` | String | Optional, trimmed, at most 500 characters |
-| `leaders` | [ObjectId → User] | Never empty: the endpoints refuse to remove a team's only leader, let them leave, or delete their account |
+| `leaders` | [ObjectId → User] | Never without a leader who can sign in: the endpoints refuse to remove a team's last active leader or let them leave (other leaders who are deactivated or deleted don't count), and refuse to delete the account of its only leader |
 | `members` | [ObjectId → User] | Members who aren't leaders. A member promoted to leader moves to `leaders` |
 | `createdBy` | ObjectId → User | Required. The admin who created the team, or the user who created it for themselves |
 | `isActive` | Boolean | Default `true`; `false` means the team is frozen. Only admins change it (see [Frozen teams](#frozen-teams)) |
@@ -93,17 +93,26 @@ Team responses from [List teams](#list-teams), [Get my team](#get-my-team) and
   invites, by user id, email or name; leaders find people with
   [Search for people to invite](#search-for-people-to-invite). Only an active user who is not an
   admin or team leader and is not in any team can be invited, and the same is checked again when
-  they accept. A team sends at most 30 invites an hour. Further leaders are appointed by an admin
-  with `POST /:teamId/leaders`; a member of the team can be promoted this way.
+  they accept. A team sends at most 30 invites an hour, and at most 3 to the same person in 24
+  hours (withdrawn and declined ones count, so withdrawing and inviting again can't flood
+  someone's inbox). Further leaders are appointed by an admin with `POST /:teamId/leaders`; a
+  member of the team can be promoted this way.
 - **No two teams at once.** Accepting an invite, creating a team and being made a leader each
-  claim the person only while their team is still what was checked, so two of them at the same
-  moment (two invites accepted at once, say) put the person in one team only; the other answers
-  as if they were already in a team, and its invite stays `pending`.
+  claim the person by setting their `teamId`, and only while it is `null` (or, for a new leader,
+  already this team). Accepting an invite and being made a leader claim first and update the
+  team's list after; creating a team makes the team first, then claims its leader, and deletes
+  the team again if someone else claimed them in between. Once one of them has claimed someone,
+  the others find the person taken, even before the team lists them. So two at the same moment
+  (two invites accepted at once, say) put the person in one team only; the other answers as if
+  they were already in a team, and its invite stays `pending`. A `teamId` that points at a team
+  that no longer exists (left over from old data) is cleared and doesn't count; one that points
+  at an existing team counts as being in it, even before that team lists them.
 - **Leaving.** A member can leave with `POST /:teamId/leave`, frozen team or not. A leader can
-  leave while another leader who is active stays. A leader can remove members of their own team;
-  only an admin can remove a leader. A team's only leader can't be removed
+  leave while another leader who is active (not deactivated or deleted) stays. A leader can remove
+  members of their own team; only an admin can remove a leader, and only on the same condition: a
+  team's last active leader can't be removed
   (`This is the team's only leader. Make someone else a leader first, or delete the team.`), and
-  `DELETE /api/v2/users/:id` refuses to delete them
+  `DELETE /api/v2/users/:id` refuses to delete a team's only leader
   (`<name> is the only leader of <team>. Make someone else its leader or delete the team first.`).
   Leaving and being removed have the same effects: back to `user` with no team, and taken off the
   team's open tasks (finished tasks keep them, as the record of who did the work). Deleting any
@@ -117,7 +126,9 @@ Team responses from [List teams](#list-teams), [Get my team](#get-my-team) and
 - **Deactivated and deleted users.** Deactivating a user doesn't take them out of their team. A
   deactivated user can't be made a leader or be invited; to an invite, a deactivated or deleted
   account looks like one that doesn't exist (`404`), so invites can't be used to find out whether
-  an account exists. Blocks (see [Chat.md](Chat.md)) also stop invites: a leader can't invite
+  an account exists. To a leader's invite, an admin's account looks missing too, so a leader
+  can't use invites to find out which addresses are admins'. Blocks (see [Chat.md](Chat.md)) also
+  stop invites: a leader can't invite
   someone who blocked them or whom they blocked, and the search leaves those people out. Admins'
   invites aren't affected by blocks.
 
@@ -254,11 +265,13 @@ else creates a team they lead themselves, and must not be in any team.
 The leader an admin names must exist, not be deleted, be active, not be an admin and not be in any
 team.
 
-Creates the team with the leader in `leaders` and no members, sets the leader's `role` to
-`team_leader` and their `teamId` to the new team, and returns `201` with the team and its people.
-`createdBy` is the caller. When an admin creates the team, the leader is notified
-(`team_leader_added`). If the team can't be created after all (a taken name), the leader keeps the
-role they had.
+Creates the team with the leader in `leaders` and no members, then sets the leader's `role` to
+`team_leader` and their `teamId` to the new team, only while their `teamId` is still `null` (see
+[Membership rules](#membership-rules)), and returns `201` with the team and its people. If they
+were claimed by another team in between, the new team is deleted again and the answer is `400`
+(`You already belong to a team`, or for admins `Selected leader already belongs to a team`). A
+taken name stops it before anything changes. `createdBy` is the caller. When an admin creates the
+team, the leader is notified (`team_leader_added`).
 
 ```json
 {
@@ -286,7 +299,7 @@ role they had.
 | `400` | `The team description must be text` |
 | `400` | `A team name can be at most 80 characters` |
 | `400` | `A team description can be at most 500 characters` |
-| `400` | `You already belong to a team` (a caller other than an admin who leads or belongs to a team) |
+| `400` | `You already belong to a team` (a caller other than an admin who leads or belongs to a team, or is joining one) |
 | `400` | `leaderId is required` (admins) |
 | `404` | `Leader user not found` (admins; also a deleted account) |
 | `400` | `This account is deactivated` (admins) |
@@ -409,10 +422,12 @@ Send one of these; if several are sent, `userId` wins, then `email`:
 | `username` | The user's `name`, matched exactly but ignoring case. Works only when exactly one active account has that name; otherwise invite by email |
 
 The team must not be frozen, whoever sends the invite, and must have sent fewer than 30 invites in
-the last hour. Deactivated and deleted accounts are never found, by any of the three. The invitee
-must not be an admin or team leader, must not be in any team, must not have blocked the leader or
-been blocked by them (leaders only), and must not already have an unexpired pending invite to this
-team.
+the last hour. Deactivated and deleted accounts are never found, by any of the three, and neither
+are admins' accounts when a leader sends the invite (they get the same `404` as an account that
+doesn't exist). The invitee must not be an admin or team leader, must not be in any team (or be
+joining one), must not have blocked the leader or been blocked by them (leaders only), must not
+already have an unexpired pending invite to this team, and must have had fewer than 3 invites from
+this team in the last 24 hours, whatever became of them. Both limits apply to admins too.
 
 Creates a `pending` invite that expires in 7 days and returns `201` with it. `team` is populated
 with `name` and `description`, `invitedBy` with `name` and `email`, and `invitedUser` with `name`,
@@ -445,17 +460,18 @@ notified (`team_invite`, also emailed).
 | `429` | `This team has sent 30 invites in the last hour. Please try again later.` `Retry-After` says how many seconds until the oldest of them is an hour old. Admins too |
 | `400` | `Please provide userId, email or username` |
 | `400` | `Invalid userId` |
-| `404` | `User not found` (no active account has that id) |
+| `404` | `User not found` (no active account has that id; for a leader, also an admin's) |
 | `400` | `The email must be text` |
-| `404` | `Nobody with the email <email> was found` |
+| `404` | `Nobody with the email <email> was found` (for a leader, also an admin's address) |
 | `400` | `The name must be text` |
-| `404` | `User "<name>" not found` |
+| `404` | `User "<name>" not found` (for a leader, admins don't count) |
 | `409` | `More than one person is called <name>. Invite them by email.` |
 | `400` | `User is already in this team` |
 | `400` | `Admins and team leaders cannot be invited to a team` |
 | `400` | `This user already belongs to a team` |
 | `403` | `You can't invite this person` (a block either way round; leaders only) |
 | `400` | `A pending invite already exists for this user` (an unexpired one) |
+| `429` | `This team has invited <name> 3 times in the last 24 hours. Please try again later.` `Retry-After` says how many seconds until the oldest of them is a day old. Admins too |
 
 ### Search for people to invite
 
@@ -497,16 +513,23 @@ whose email they typed in full.
 
 **Who:** admins, and the team's leaders, frozen or not.
 
+| Query | Notes |
+|-------|-------|
+| `page` | Page number, default 1 |
+| `limit` | Invites per page, default and at most 200 |
+
 Returns, newest first, the team's invites that are waiting for an answer, plus those declined,
 withdrawn or expired in the last 30 days. Accepted invites are left out (those people are in the
 team). Each invite has its `state` (see [TeamInvite](#teaminvite)); `invitedUser` is populated with
 `name`, `profileImage`, `department` and `isActive` (and `email` for admins), `invitedBy` and
-`withdrawnBy` with `name`. Not paged.
+`withdrawnBy` with `name`. Always paged: `count` is the number on this page and `pagination` has
+`page`, `limit`, `total` (all the matching invites) and `pages`.
 
 ```json
 {
   "success": true,
   "count": 2,
+  "pagination": { "page": 1, "limit": 200, "total": 2, "pages": 1 },
   "data": [
     {
       "_id": "6650a1f0c2b1a3d4e5f60201",
@@ -543,7 +566,8 @@ team). Each invite has its `state` (see [TeamInvite](#teaminvite)); `invitedUser
 
 Withdraws one of this team's pending, unexpired invites: sets `status` to `withdrawn`,
 `respondedAt` and `withdrawnBy`. The invitee can no longer accept it, and it drops out of their
-list. Returns the invite with `state`.
+list. They can be invited again, but a withdrawn invite still counts towards the limit of 3
+invites to the same person in 24 hours. Returns the invite with `state`.
 
 ```json
 {
@@ -597,10 +621,12 @@ with `name`, `email` and `profileImage`. Expired and withdrawn invites are left 
 
 Adds the caller to the team's `members`, sets their `role` to `team_member` and their `teamId` to
 the team, marks the invite `accepted` and notifies the team's leaders (`team_invite_accepted`).
-This happens in three steps (the invite, the user, the team), each only if nothing changed since
-the checks; if a later step can't go ahead, the earlier ones are undone and the invite is
-`pending` again. Other pending invites the caller holds stay pending; accepting one of them later
-fails with `You already belong to a team. Leave it before joining another one.`
+This happens in three steps, each only if nothing changed since the checks: the invite (while it
+is `pending`), the user (while their `teamId` is `null`, which claims them; see
+[Membership rules](#membership-rules)), then the team (while it exists and isn't frozen). If a
+later step can't go ahead, or fails, the earlier ones are undone and the invite is `pending`
+again. Other pending invites the caller holds stay pending; accepting one of them later fails with
+`You already belong to a team. Leave it before joining another one.`
 
 ```json
 { "success": true, "message": "Invite accepted. You are now part of the team." }
@@ -615,7 +641,7 @@ fails with `You already belong to a team. Leave it before joining another one.`
 | `400` | `This team no longer accepts members` (the team no longer exists) |
 | `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` |
 | `400` | `Admins and team leaders cannot join a team by invite` |
-| `400` | `You already belong to a team. Leave it before joining another one.` |
+| `400` | `You already belong to a team. Leave it before joining another one.` (also while another join of theirs is still going on) |
 
 ### Decline an invite
 
@@ -657,7 +683,7 @@ the same moment can't leave the team without one.
 |--------|---------|
 | `404` | `Team not found` |
 | `404` | `You are not in this team` |
-| `409` | `You are this team's only leader. Ask an admin to make someone else a leader before you leave, or to delete the team.` (also when every other leader is deactivated) |
+| `409` | `You are this team's only leader. Ask an admin to make someone else a leader before you leave, or to delete the team.` (also when every other leader is deactivated or deleted) |
 
 ### Add a leader
 
@@ -669,11 +695,13 @@ the same moment can't leave the team without one.
 |-------|----------|-------|
 | `userId` | Yes | The user to make a leader of this team |
 
-The user must exist and not be deleted, be active, not be an admin, and not be in another team. A
-member of this team moves from `members` to `leaders`; a user in no team joins directly as a
-leader, with no invite. Sets the user's `role` to `team_leader` and `teamId` to the team, and
-notifies them (`team_leader_added`). Adding someone who already leads this team changes nothing
-and notifies nobody. Refused while the team is frozen.
+The user must exist and not be deleted, be active, not be an admin, and not be in (or be joining)
+another team. A member of this team moves from `members` to `leaders`; a user in no team joins
+directly as a leader, with no invite. Sets the user's `role` to `team_leader` and `teamId` to the
+team, only while their `teamId` is still `null` or this team (see
+[Membership rules](#membership-rules)), then adds them to `leaders`; if that can't go ahead, the
+user is put back. Notifies them (`team_leader_added`). Adding someone who already leads this team
+changes nothing and notifies nobody. Refused while the team is frozen.
 
 Returns the team with its people.
 
@@ -707,9 +735,11 @@ Returns the team with its people.
 
 `DELETE /api/v2/teams/:teamId/members/:userId`
 
-**Who:** admins, who can remove anyone in the team except its only leader, frozen or not; the
-team's leaders, who can remove members but not leaders (themselves included), and not while the
-team is frozen. To step down, a leader [leaves](#leave-a-team) instead.
+**Who:** admins, who can remove anyone in the team, frozen or not, except its last active leader:
+a leader is removed only while another leader who is active (not deactivated or deleted) stays,
+as for [leaving](#leave-a-team), and the update itself checks that leader is still there. The
+team's leaders can remove members but not leaders (themselves included), and not while the team
+is frozen. To step down, a leader [leaves](#leave-a-team) instead.
 
 Removes the user from `members` or `leaders` and then:
 
@@ -730,7 +760,7 @@ its people, as in [Add a leader](#add-a-leader).
 | `400` | `This team is frozen. An admin has to unfreeze it before anything can change.` (a leader, while the team is frozen) |
 | `404` | `User is not in this team` (also for a malformed `userId`) |
 | `403` | `Only admin can remove a team leader` |
-| `400` | `This is the team's only leader. Make someone else a leader first, or delete the team.` |
+| `400` | `This is the team's only leader. Make someone else a leader first, or delete the team.` (also when every other leader is deactivated or deleted) |
 
 ## Team tasks and team attendance
 

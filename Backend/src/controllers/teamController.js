@@ -5,7 +5,7 @@ import User from '../models/User.js';
 import Task from '../models/Task.js';
 import Attendance from '../models/Attendance.js';
 import TeamChatMessage from '../models/TeamChatMessage.js';
-import { escapeRegex, pick, sendServerError } from '../utils/http.js';
+import { escapeRegex, listResponse, pick, sendServerError } from '../utils/http.js';
 import { notify } from '../utils/notify.js';
 import { logAuditEventV2 } from '../utils/auditLoggerV2.js';
 import { blockedUserIds, isBlockedBetween } from '../utils/blocks.js';
@@ -26,8 +26,13 @@ const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 // A team can send this many invites an hour, so nobody can be flooded with them
 const INVITES_PER_HOUR = 30;
+// ...and this many to the same person in a day, so withdrawing an invite and
+// sending it again can't fill someone's inbox either
+const INVITES_PER_PERSON_PER_DAY = 3;
 // How far back the sent-invites list shows declined, withdrawn and expired ones
 const INVITE_HISTORY_DAYS = 30;
+// The longest page of a team's sent invites (also the default page size)
+const MAX_INVITES_LISTED = 200;
 const MAX_CANDIDATES = 10;
 const MAX_SEARCH_LENGTH = 100;
 
@@ -62,6 +67,20 @@ const withCounts = (team, openInvites) => ({
   },
 });
 
+// The team this user's teamId points at, or null. Joining a team (accepting
+// an invite, creating a team, being made a leader) claims the user by
+// setting their teamId while it is null, before the team lists them, so a
+// teamId that a team doesn't list yet may be a join in progress: it counts.
+// Only a teamId left over for a team that no longer exists is cleared here.
+// (Creating a team makes the team before claiming its leader, so a missing
+// team is never a join in progress.)
+const currentTeamId = async (user) => {
+  if (!user.teamId) return null;
+  if (await Team.exists({ _id: user.teamId })) return user.teamId;
+  await User.updateOne({ _id: user._id, teamId: user.teamId }, { $set: { teamId: null } });
+  return null;
+};
+
 // Why this user can't be made a team's leader, or null if they can. A user
 // belongs to at most one team, and admins never take a team role (it would
 // replace their admin role).
@@ -69,6 +88,8 @@ const leaderProblem = async (user, teamId = null) => {
   if (!user.isActive) return 'This account is deactivated';
   if (user.role === 'admin') return 'An admin cannot lead a team';
   if (await isInAnyTeam(user._id, teamId)) return 'This user already belongs to another team';
+  const current = await currentTeamId(user);
+  if (current && !(teamId && current.equals(teamId))) return 'This user already belongs to another team';
   return null;
 };
 
@@ -76,15 +97,34 @@ const leaderProblem = async (user, teamId = null) => {
 const inviteeProblem = async (user) => {
   if (!user.isActive) return 'This account is deactivated';
   if (user.role === 'admin' || user.role === 'team_leader') return 'Admins and team leaders cannot be invited to a team';
-  if (await isInAnyTeam(user._id)) return 'This user already belongs to a team';
+  if (await isInAnyTeam(user._id) || await currentTeamId(user)) return 'This user already belongs to a team';
   return null;
 };
 
 // Why the signed-in user can't accept an invite right now, or null
 const joinProblem = async (user) => {
   if (user.role === 'admin' || user.role === 'team_leader') return 'Admins and team leaders cannot join a team by invite';
-  if (await isInAnyTeam(user._id)) return ALREADY_IN_A_TEAM_MESSAGE;
+  if (await isInAnyTeam(user._id) || await currentTeamId(user)) return ALREADY_IN_A_TEAM_MESSAGE;
   return null;
+};
+
+// The team's leaders other than this user who can still sign in (active and
+// not deleted). A leader may leave or be removed only while one of them stays.
+const otherActiveLeaders = (team, userId) => User.distinct('_id', {
+  _id: { $in: team.leaders.filter((leader) => idText(leader) !== idText(userId)) },
+  isActive: true,
+  deletedAt: null,
+});
+
+// Seconds until fewer than `max` of the team's invites matching `filter` fall
+// within the last `windowMs`, or 0 if fewer than `max` do already
+const inviteLimitRetryAfter = async (filter, windowMs, max, now) => {
+  const recent = await TeamInvite.find({ ...filter, createdAt: { $gt: new Date(now.getTime() - windowMs) } })
+    .select('createdAt')
+    .sort({ createdAt: 1 })
+    .limit(max);
+  if (recent.length < max) return 0;
+  return Math.max(1, Math.ceil((recent[0].createdAt.getTime() + windowMs - now.getTime()) / 1000));
 };
 
 const isTextOrUnset = (value) => value === undefined || typeof value === 'string';
@@ -155,36 +195,35 @@ export const createTeam = async (req, res) => {
 
     const alreadyInTeam = isAdmin ? 'Selected leader already belongs to a team' : 'You already belong to a team';
     const problem = await leaderProblem(leader);
-    if (problem || (isAdmin && leader.teamId)) {
-      return res.status(400).json({ success: false, message: isAdmin ? problem || alreadyInTeam : alreadyInTeam });
+    if (problem) {
+      return res.status(400).json({ success: false, message: isAdmin ? problem : alreadyInTeam });
     }
 
-    // Claim the leader before the team exists, and only while their team is
-    // still what was checked above, so a second team or an invite accepted
-    // at the same moment can't also take them
-    const teamId = new mongoose.Types.ObjectId();
-    const before = await User.findOneAndUpdate(
-      { _id: leader._id, teamId: leader.teamId ?? null, isActive: true, deletedAt: null, role: { $ne: 'admin' } },
-      { $set: { role: 'team_leader', teamId } }
-    );
-    if (!before) {
-      return res.status(400).json({ success: false, message: alreadyInTeam });
-    }
-
-    let team;
+    // The team first (so a taken name stops here, with nothing to undo),
+    // then the leader, only while they are in no team: an invite accepted or
+    // a second team created at the same moment has claimed them by then, or
+    // finds them claimed. If they were claimed first, the team goes again.
+    const team = await Team.create({
+      name,
+      description,
+      leaders: [leader._id],
+      members: [],
+      createdBy: req.user.id,
+    });
+    const dropTeam = () => Promise.all([Team.deleteOne({ _id: team._id }), TeamInvite.deleteMany({ team: team._id })]);
+    let claimed;
     try {
-      team = await Team.create({
-        _id: teamId,
-        name,
-        description,
-        leaders: [leader._id],
-        members: [],
-        createdBy: req.user.id,
-      });
+      claimed = await User.findOneAndUpdate(
+        { _id: leader._id, teamId: null, isActive: true, deletedAt: null, role: { $ne: 'admin' } },
+        { $set: { role: 'team_leader', teamId: team._id } }
+      );
     } catch (error) {
-      // No team after all (a taken name, say): the leader gets their role back
-      await User.updateOne({ _id: leader._id, teamId }, { $set: { role: before.role, teamId: before.teamId ?? null } });
+      await dropTeam();
       throw error;
+    }
+    if (!claimed) {
+      await dropTeam();
+      return res.status(400).json({ success: false, message: alreadyInTeam });
     }
 
     if (isAdmin) {
@@ -455,10 +494,11 @@ export const deleteTeam = async (req, res) => {
 
 // The person an invite is for, by id, email or name (in that order of
 // preference). Deactivated and deleted accounts are never found, so an invite
-// can't be used to learn whether one exists. Returns { user, byEmail } or
-// { status, message }.
-const findInvitee = async ({ userId, email, username }) => {
-  const visible = { isActive: true, deletedAt: null };
+// can't be used to learn whether one exists; with `hideAdmins` (anyone but an
+// admin inviting), neither are admins, so a leader can't use it to find out
+// which addresses are admins'. Returns { user, byEmail } or { status, message }.
+const findInvitee = async ({ userId, email, username }, { hideAdmins = false } = {}) => {
+  const visible = { isActive: true, deletedAt: null, ...(hideAdmins ? { role: { $ne: 'admin' } } : {}) };
   const given = (value) => value !== undefined && value !== null && value !== '';
 
   if (given(userId)) {
@@ -500,20 +540,17 @@ export const inviteMember = async (req, res) => {
 
     // At most INVITES_PER_HOUR invites per team in any hour
     const now = new Date();
-    const recent = await TeamInvite.find({ team: team._id, createdAt: { $gt: new Date(now.getTime() - HOUR_MS) } })
-      .select('createdAt')
-      .sort({ createdAt: 1 })
-      .limit(INVITES_PER_HOUR);
-    if (recent.length >= INVITES_PER_HOUR) {
-      const retryAfter = Math.max(1, Math.ceil((recent[0].createdAt.getTime() + HOUR_MS - now.getTime()) / 1000));
-      res.set('Retry-After', String(retryAfter));
+    const teamWait = await inviteLimitRetryAfter({ team: team._id }, HOUR_MS, INVITES_PER_HOUR, now);
+    if (teamWait) {
+      res.set('Retry-After', String(teamWait));
       return res.status(429).json({
         success: false,
         message: `This team has sent ${INVITES_PER_HOUR} invites in the last hour. Please try again later.`,
       });
     }
 
-    const found = await findInvitee(pick(req.body, ['userId', 'email', 'username']));
+    const isAdmin = req.user.role === 'admin';
+    const found = await findInvitee(pick(req.body, ['userId', 'email', 'username']), { hideAdmins: !isAdmin });
     if (!found.user) return res.status(found.status).json({ success: false, message: found.message });
     const invitedUser = found.user;
 
@@ -525,7 +562,7 @@ export const inviteMember = async (req, res) => {
     if (problem) return res.status(400).json({ success: false, message: problem });
 
     // Nobody gets invites from someone they blocked, or who blocked them
-    if (req.user.role !== 'admin' && await isBlockedBetween(req.user._id, invitedUser._id)) {
+    if (!isAdmin && await isBlockedBetween(req.user._id, invitedUser._id)) {
       return res.status(403).json({ success: false, message: "You can't invite this person" });
     }
 
@@ -537,6 +574,19 @@ export const inviteMember = async (req, res) => {
       return res.status(400).json({ success: false, message: 'A pending invite already exists for this user' });
     }
 
+    // Withdrawn or declined invites don't block a new one, but each invite
+    // is emailed, so a team can invite the same person only so often
+    const personWait = await inviteLimitRetryAfter(
+      { team: team._id, invitedUser: invitedUser._id }, DAY_MS, INVITES_PER_PERSON_PER_DAY, now
+    );
+    if (personWait) {
+      res.set('Retry-After', String(personWait));
+      return res.status(429).json({
+        success: false,
+        message: `This team has invited ${invitedUser.name} ${INVITES_PER_PERSON_PER_DAY} times in the last 24 hours. Please try again later.`,
+      });
+    }
+
     const invite = await TeamInvite.create({
       team: team._id,
       invitedUser: invitedUser._id,
@@ -544,7 +594,7 @@ export const inviteMember = async (req, res) => {
     });
 
     // A leader sees the invitee's email only if they typed it themselves
-    const showEmail = req.user.role === 'admin' || found.byEmail;
+    const showEmail = isAdmin || found.byEmail;
     const populated = await TeamInvite.findById(invite._id)
       .populate('team', 'name description')
       .populate('invitedUser', showEmail ? 'name email profileImage department' : 'name profileImage department')
@@ -631,7 +681,8 @@ export const getInviteCandidates = async (req, res) => {
 };
 
 // @desc    The invites a team has sent: open ones, and those declined,
-//          withdrawn or expired in the last 30 days
+//          withdrawn or expired in the last 30 days. Paged (?page=&limit=,
+//          at most 200 a page, which is also the default)
 // @route   GET /api/v2/teams/:teamId/invites
 // @access  Private (Admin or a leader of this team, frozen or not)
 export const getTeamInvites = async (req, res) => {
@@ -646,7 +697,7 @@ export const getTeamInvites = async (req, res) => {
 
     const now = new Date();
     const since = new Date(now.getTime() - INVITE_HISTORY_DAYS * DAY_MS);
-    const invites = await TeamInvite.find({
+    const filter = {
       team: team._id,
       $or: [
         // Waiting for an answer, or expired within the period
@@ -656,14 +707,20 @@ export const getTeamInvites = async (req, res) => {
           $or: [{ respondedAt: { $gte: since } }, { respondedAt: null, updatedAt: { $gte: since } }],
         },
       ],
-    })
+    };
+    const query = TeamInvite.find(filter)
       .populate('invitedUser', isAdmin ? 'name email profileImage department isActive' : 'name profileImage department isActive')
       .populate('invitedBy', 'name')
       .populate('withdrawnBy', 'name')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1, _id: -1 });
 
-    const data = invites.map((invite) => ({ ...invite.toObject(), state: inviteState(invite, now) }));
-    res.json({ success: true, count: data.length, data });
+    // Always paged: the newest MAX_INVITES_LISTED unless asked for less
+    const body = await listResponse(TeamInvite, filter, query, {
+      page: req.query.page ?? 1,
+      limit: req.query.limit ?? MAX_INVITES_LISTED,
+    });
+    body.data = body.data.map((invite) => ({ ...invite.toObject(), state: inviteState(invite, now) }));
+    res.json(body);
   } catch (error) {
     sendServerError(res, error);
   }
@@ -749,12 +806,13 @@ export const acceptInvite = async (req, res) => {
       return res.status(400).json({ success: false, message: current ? closedInviteMessage(current, now) : 'Invite not found' });
     }
 
-    // 2. The user, while their team is still what was checked above (none:
-    //    a teamId left over from old data that no team lists doesn't count)
+    // 2. The user, only while they are in no team. Their teamId is the lock:
+    //    from here until step 3 no team lists them yet, but their teamId
+    //    already says they are taken, so no other join can claim them.
     const before = await User.findOneAndUpdate(
       {
         _id: req.user._id,
-        teamId: req.user.teamId ?? null,
+        teamId: null,
         isActive: true,
         deletedAt: null,
         role: { $nin: ['admin', 'team_leader'] },
@@ -765,16 +823,26 @@ export const acceptInvite = async (req, res) => {
       await reopenInvite(invite._id);
       return res.status(400).json({ success: false, message: ALREADY_IN_A_TEAM_MESSAGE });
     }
+    // Puts the user and the invite back as they were
+    const undoJoin = () => Promise.all([
+      User.updateOne({ _id: req.user._id, teamId: team._id, role: 'team_member' }, { $set: { teamId: null, role: before.role } }),
+      reopenInvite(invite._id),
+    ]);
 
     // 3. The team, while it exists and isn't frozen
-    const joined = await Team.findOneAndUpdate(
-      { _id: team._id, isActive: true },
-      { $addToSet: { members: req.user._id } },
-      { new: true }
-    );
+    let joined;
+    try {
+      joined = await Team.findOneAndUpdate(
+        { _id: team._id, isActive: true },
+        { $addToSet: { members: req.user._id } },
+        { new: true }
+      );
+    } catch (error) {
+      await undoJoin();
+      throw error;
+    }
     if (!joined) {
-      await User.updateOne({ _id: req.user._id, teamId: team._id }, { $set: { teamId: before.teamId ?? null, role: before.role } });
-      await reopenInvite(invite._id);
+      await undoJoin();
       const stillThere = await Team.exists({ _id: team._id });
       return res.status(400).json({ success: false, message: stillThere ? FROZEN_TEAM_MESSAGE : TEAM_GONE_MESSAGE });
     }
@@ -877,11 +945,7 @@ export const leaveTeam = async (req, res) => {
       // Someone who can still sign in has to keep leading the team. The
       // update checks they are still there, so two leaders leaving at once
       // can't leave it with nobody.
-      const others = await User.distinct('_id', {
-        _id: { $in: team.leaders.filter((leader) => !leader.equals(userId)) },
-        isActive: true,
-        deletedAt: null,
-      });
+      const others = await otherActiveLeaders(team, userId);
       if (others.length > 0) {
         updated = await Team.findOneAndUpdate(
           { _id: team._id, $and: [{ leaders: userId }, { leaders: { $in: others } }] },
@@ -957,15 +1021,18 @@ export const removeMember = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only admin can remove a team leader' });
     }
 
-    // A leader only while another leader stays, and a leader's removal only
-    // while the team is still active, both checked by the update itself
-    const updated = await Team.findOneAndUpdate(
-      isLeaderTarget
-        ? { _id: team._id, leaders: userId, 'leaders.1': { $exists: true } }
-        : { _id: team._id, members: userId, ...(isAdmin ? {} : { isActive: true }) },
-      { $pull: { leaders: userId, members: userId } },
-      { new: true }
-    );
+    // A leader only while another leader who can still sign in stays (as
+    // when leaving), and a leader's removal of a member only while the team
+    // is still active, both checked by the update itself
+    let filter = { _id: team._id, members: userId, ...(isAdmin ? {} : { isActive: true }) };
+    if (isLeaderTarget) {
+      const others = await otherActiveLeaders(team, userId);
+      if (others.length === 0) {
+        return res.status(400).json({ success: false, message: LAST_LEADER_MESSAGE });
+      }
+      filter = { _id: team._id, $and: [{ leaders: userId }, { leaders: { $in: others } }] };
+    }
+    const updated = await Team.findOneAndUpdate(filter, { $pull: { leaders: userId, members: userId } }, { new: true });
     if (!updated) {
       return isLeaderTarget
         ? res.status(400).json({ success: false, message: LAST_LEADER_MESSAGE })
@@ -1012,36 +1079,46 @@ export const addLeader = async (req, res) => {
     const problem = await leaderProblem(user, team._id);
     if (problem) return res.status(400).json({ success: false, message: problem });
 
+    // Only someone in no team, or already in this one
+    const free = { $in: [null, team._id] };
+
     // Already a leader: nothing changes but their role, should it be out of step
     if (isTeamLeader(team, user._id)) {
       await User.updateOne(
-        { _id: user._id, role: { $ne: 'admin' }, teamId: user.teamId ?? null },
+        { _id: user._id, role: { $ne: 'admin' }, teamId: free },
         { $set: { role: 'team_leader', teamId: team._id } }
       );
       return res.json({ success: true, data: await loadTeam(team._id) });
     }
 
-    // As when accepting an invite: the user first, only while their team is
-    // still what was checked above (so they can't join another one at the
-    // same moment), then the team, only while it is active; the user is put
-    // back if the team step can't go ahead
+    // As when accepting an invite: the user first, only while they are in no
+    // team or in this one (their teamId is the lock, so they can't join
+    // another team at the same moment), then the team, only while it is
+    // active; the user is put back if the team step can't go ahead
     const before = await User.findOneAndUpdate(
-      { _id: user._id, isActive: true, deletedAt: null, role: { $ne: 'admin' }, teamId: user.teamId ?? null },
+      { _id: user._id, isActive: true, deletedAt: null, role: { $ne: 'admin' }, teamId: free },
       { $set: { role: 'team_leader', teamId: team._id } }
     );
     if (!before) {
       return res.status(400).json({ success: false, message: 'This user already belongs to another team' });
     }
-    const updated = await Team.findOneAndUpdate(
-      { _id: team._id, isActive: true },
-      { $addToSet: { leaders: user._id }, $pull: { members: user._id } },
-      { new: true }
+    const putBack = () => User.updateOne(
+      { _id: user._id, teamId: team._id, role: 'team_leader' },
+      { $set: { role: before.role, teamId: before.teamId ?? null } }
     );
-    if (!updated) {
-      await User.updateOne(
-        { _id: user._id, teamId: team._id, role: 'team_leader' },
-        { $set: { role: before.role, teamId: before.teamId } }
+    let updated;
+    try {
+      updated = await Team.findOneAndUpdate(
+        { _id: team._id, isActive: true },
+        { $addToSet: { leaders: user._id }, $pull: { members: user._id } },
+        { new: true }
       );
+    } catch (error) {
+      await putBack();
+      throw error;
+    }
+    if (!updated) {
+      await putBack();
       const stillThere = await Team.exists({ _id: team._id });
       return stillThere
         ? res.status(400).json({ success: false, message: FROZEN_TEAM_MESSAGE })

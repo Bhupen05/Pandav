@@ -1,9 +1,11 @@
 // End-to-end checks for Phase 9 of teams: inviting by id, email or an
-// unambiguous name, the people search for leaders, a team's sent invites and
-// withdrawing them, the hourly invite limit, accepting without races, leaving
-// a team (frozen or not), the notifications and audit entries membership
-// changes leave, deactivated and deleted people in team responses, length
-// limits, and the admin team list's search, filter and counts
+// unambiguous name (admins hidden from leaders), the people search for
+// leaders, a team's sent invites (paged) and withdrawing them, the hourly and
+// per-person invite limits, accepting without races (also against a join
+// still going on), leaving a team (frozen or not), the notifications and
+// audit entries membership changes leave, deactivated and deleted people in
+// team responses and as the last leader, length limits, and the admin team
+// list's search, filter and counts
 import { after, before, test } from 'node:test';
 import mongoose from 'mongoose';
 import { ADMIN, checker, connectDatabase, startServer } from './helpers.js';
@@ -61,6 +63,8 @@ before(async () => {
   people.ema = await addPerson('Ema Echo', 'ema@p9t.test');
   people.edd = await addPerson('Edd Echo', 'edd@p9t.test');
   people.max = await addPerson('Max Long', 'max@p9t.test');
+  people.ivy = await addPerson('Ivy Other', 'ivy@p9t.test');
+  people.pia = await addPerson('Pia Pager', 'pia@p9t.test');
   for (let i = 1; i <= 12; i += 1) {
     await addPerson(`Zed Crowd ${String(i).padStart(2, '0')}`, `zed${i}@p9t.test`);
   }
@@ -111,6 +115,20 @@ test('inviting by id, email or name', async (t) => {
   await check('nothing to go on is a 400', (await invite({})).status === 400);
   await check('a malformed id is a 400', (await invite({ userId: 'nope' })).status === 400);
   await check('a second pending invite is refused', (await invite({ userId: uma._id })).status === 400);
+
+  // To a leader, an admin's account looks like one that doesn't exist
+  const adminByEmail = await invite({ email: ADMIN.email.toUpperCase() });
+  const nobodyByEmail = await invite({ email: 'nobody.at.all@p9t.test' });
+  await check("a leader can't tell an admin's email from an unknown one",
+    adminByEmail.status === 404 && nobodyByEmail.status === 404 &&
+    adminByEmail.data.message === `Nobody with the email ${ADMIN.email} was found`, JSON.stringify([adminByEmail.data, nobodyByEmail.data]));
+  const adminById = await invite({ userId: admin._id });
+  await check('nor find an admin by id', adminById.status === 404 && adminById.data.message === 'User not found', JSON.stringify(adminById.data));
+  const adminByName = await invite({ username: admin.name });
+  await check('or by name', adminByName.status === 404 && adminByName.data.message === `User "${admin.name}" not found`, JSON.stringify(adminByName.data));
+  const adminAsAdmin = await invite({ email: ADMIN.email }, adminToken);
+  await check('an admin inviting an admin is told why not',
+    adminAsAdmin.status === 400 && adminAsAdmin.data.message === 'Admins and team leaders cannot be invited to a team', JSON.stringify(adminAsAdmin.data));
 
   // A block either way round stops a leader's invites, not an admin's
   await db.collection('blocks').insertOne({ blocker: oid(samTwo._id), blocked: oid(lena._id), createdAt: new Date(), updatedAt: new Date() });
@@ -268,9 +286,12 @@ test('accepting at the same moment', async (t) => {
       invites: `${(await inviteNow(winner._id)).status},${(await inviteNow(loser._id)).status}`,
       refusal: results.find((r) => r.status !== 200)?.data?.message,
     });
-    // Back out for the next round; the last round's team is kept
+    // Back out for the next round; the last round's team is kept. The
+    // round's invites are dated back a day, so the limit on inviting the
+    // same person (3 a day per team) doesn't come into it.
     await call('DELETE', `/teams/${loser.team._id}/invites/${loser._id}`, { token: adminToken });
     if (round < 3) await call('POST', `/teams/${winner.team._id}/leave`, { token: rex.token });
+    await db.collection('teaminvites').updateMany({ invitedUser: oid(rex._id) }, { $set: { createdAt: new Date(Date.now() - 2 * DAY) } });
   }
   await check('two invites accepted at once: one goes through', rounds.every((r) => r.statuses === '200,400'), JSON.stringify(rounds));
   await check('he is in exactly one team', rounds.every((r) => r.oneTeam), JSON.stringify(rounds));
@@ -349,7 +370,7 @@ test('leaving a team', async (t) => {
   await check('and its leader is told', (await notificationsFor(lexi, 'team_member_left')).some((n) => n.title === 'Fay Frozen left P9 Beta'));
 });
 
-test('invites per hour', async (t) => {
+test('invites per hour, and per person per day', async (t) => {
   const check = checker(t);
   const { call } = server.api;
   const { lim, uma } = people;
@@ -367,7 +388,31 @@ test('invites per hour', async (t) => {
   await check('and says when to try again', retryAfter > 0 && retryAfter <= 3600, String(retryAfter));
 
   await db.collection('teaminvites').updateMany({ team: oid(team._id) }, { $set: { createdAt: new Date(Date.now() - 2 * HOUR) } });
-  await check('an hour later it works again',
+  const later = await call('POST', `/teams/${team._id}/invite`, { token: adminToken, body: { userId: uma._id } });
+  await check('an hour later it works again', later.status === 201);
+
+  // Withdrawing and inviting again, over and over, to fill someone's inbox
+  const withdraw = (invite) => call('DELETE', `/teams/${team._id}/invites/${invite._id}`, { token: adminToken });
+  await withdraw(later.data.data);
+  for (let i = 0; i < 2; i += 1) {
+    const again = await call('POST', `/teams/${team._id}/invite`, { token: adminToken, body: { userId: uma._id } });
+    await withdraw(again.data.data);
+  }
+  await check('setup: three invites to the same person today, each emailed',
+    (await notificationsFor(uma, 'team_invite')).filter((n) => n.data?.teamId === team._id).length === 3);
+  const fourth = await call('POST', `/teams/${team._id}/invite`, { token: adminToken, body: { userId: uma._id } });
+  const wait = Number(fourth.headers.get('retry-after'));
+  await check('a fourth invite to the same person in a day is refused', fourth.status === 429 &&
+    fourth.data.message === 'This team has invited Uma Unique 3 times in the last 24 hours. Please try again later.', JSON.stringify(fourth.data));
+  await check('and says when to try again', wait > 0 && wait <= 24 * 3600, String(wait));
+  await check('so she got no fourth notification',
+    (await notificationsFor(uma, 'team_invite')).filter((n) => n.data?.teamId === team._id).length === 3);
+  await check('someone else can still be invited',
+    (await call('POST', `/teams/${team._id}/invite`, { token: adminToken, body: { userId: people.ivy._id } })).status === 201);
+
+  await db.collection('teaminvites').updateMany({ team: oid(team._id), invitedUser: oid(uma._id) },
+    { $set: { createdAt: new Date(Date.now() - 2 * DAY) } });
+  await check('a day later she can be invited again',
     (await call('POST', `/teams/${team._id}/invite`, { token: adminToken, body: { userId: uma._id } })).status === 201);
 });
 
@@ -453,6 +498,20 @@ test('who a team shows', async (t) => {
   await check('with their department', shown[eli._id]?.department === 'Ops');
   await check('deleted accounts are left out', !shown[edd._id] && team.counts.leaders === 2, JSON.stringify(team.counts));
 
+  // A team keeps a leader who can still sign in, whoever removes the others
+  const removeEli = () => call('DELETE', `/teams/${echo._id}/members/${eli._id}`, { token: adminToken });
+  const lastActive = await removeEli();
+  await check('an admin cannot remove the only active leader, when the others are deactivated or deleted',
+    lastActive.status === 400 && lastActive.data.message === "This is the team's only leader. Make someone else a leader first, or delete the team.",
+    JSON.stringify(lastActive.data));
+  const emaOut = await call('DELETE', `/teams/${echo._id}/members/${ema._id}`, { token: adminToken });
+  await check('but can remove a deactivated leader while an active one stays', emaOut.status === 200 &&
+    emaOut.data.data.leaders.length === 1 && emaOut.data.data.leaders[0]._id === eli._id, JSON.stringify(emaOut.data).slice(0, 300));
+  const onlyDeletedLeft = await removeEli();
+  await check('nor the last shown leader, when the only other one listed is a deleted account',
+    onlyDeletedLeft.status === 400 && (await db.collection('teams').findOne({ _id: oid(echo._id) })).leaders.map(String).includes(eli._id),
+    JSON.stringify(onlyDeletedLeft.data));
+
   const deactivated = await call('POST', `/teams/${echo._id}/leaders`, { token: adminToken, body: { userId: dee._id } });
   await check('a deactivated person cannot be made a leader', deactivated.status === 400 && deactivated.data.message === 'This account is deactivated');
   await check('a deleted one is not found',
@@ -499,4 +558,78 @@ test('limits and the admin list', async (t) => {
   await check('a frozen team still shows its leader the open invites', typeof lexiTeam.counts?.openInvites === 'number');
   const rexTeam = (await call('GET', `/teams/${(await userNow(rex)).teamId}`, { token: rex.token })).data.data;
   await check('a member opening their team sees no invite count', rexTeam.counts && rexTeam.counts.openInvites === undefined);
+});
+
+test("a team's sent invites come in pages", async (t) => {
+  const check = checker(t);
+  const { call } = server.api;
+  const team = (await call('POST', '/teams', { token: adminToken, body: { name: 'P9 Paged', leaderId: people.pia._id } })).data.data;
+  await check('setup: a team', !!team?._id);
+
+  // Years of inviting and withdrawing would otherwise all come back at once
+  const base = Date.now() - 2 * DAY;
+  await db.collection('teaminvites').insertMany(Array.from({ length: 205 }, (_, i) => ({
+    team: oid(team._id), invitedUser: new mongoose.Types.ObjectId(), invitedBy: oid(admin._id), status: 'declined',
+    expiresAt: new Date(base + 7 * DAY), respondedAt: new Date(base + DAY),
+    createdAt: new Date(base + i * 1000), updatedAt: new Date(base + DAY),
+  })));
+  const list = (query = '') => call('GET', `/teams/${team._id}/invites${query}`, { token: adminToken });
+
+  const first = await list();
+  await check('at most 200 come back at once', first.status === 200 && first.data.count === 200 && first.data.data.length === 200,
+    `${first.status} ${first.data?.count}`);
+  await check('with how many there are in all', first.data.pagination?.total === 205 && first.data.pagination.pages === 2 &&
+    first.data.pagination.page === 1 && first.data.pagination.limit === 200, JSON.stringify(first.data.pagination));
+  await check('newest first, each with its state',
+    first.data.data[0].createdAt > first.data.data[199].createdAt && first.data.data.every((invite) => invite.state === 'declined'));
+  const second = await list('?page=2');
+  const firstIds = new Set(first.data.data.map((invite) => invite._id));
+  await check('the rest on the next page', second.data.count === 5 && second.data.data.every((invite) => !firstIds.has(invite._id)),
+    JSON.stringify(second.data.pagination));
+  const small = await list('?limit=10');
+  await check('smaller pages on request', small.data.count === 10 && small.data.pagination.pages === 21, JSON.stringify(small.data.pagination));
+  await check('but never more than 200 a page', (await list('?limit=1000')).data.count === 200);
+});
+
+test('a join still going on counts as being in a team', async (t) => {
+  const check = checker(t);
+  const { call } = server.api;
+  const { dan, ari } = people;
+  const ariTeam = (await call('GET', '/teams/my', { token: ari.token })).data.data;
+  const limitTeam = (await call('GET', '/teams?q=P9 Limit', { token: adminToken })).data.data?.[0];
+  const invite = (await call('POST', `/teams/${limitTeam?._id}/invite`, { token: adminToken, body: { userId: dan._id } })).data.data;
+  await check('setup: two teams, and an invite for Dan', !!ariTeam?._id && !!limitTeam?._id && !!invite?._id, JSON.stringify(invite));
+
+  // Accepting an invite claims the person (their teamId) before the team
+  // lists them. This is Dan halfway through joining Ari's team: claimed, not
+  // listed yet. Nothing else may take him in the meantime.
+  await db.collection('users').updateOne({ _id: oid(dan._id) }, { $set: { teamId: oid(ariTeam._id), role: 'team_member' } });
+
+  const accept = await call('PUT', `/teams/invites/${invite._id}/accept`, { token: dan.token });
+  await check('a second invite accepted meanwhile is refused', accept.status === 400 &&
+    accept.data.message === 'You already belong to a team. Leave it before joining another one.', JSON.stringify(accept.data));
+  await check('and stays pending', (await inviteNow(invite._id)).status === 'pending');
+  const create = await call('POST', '/teams', { token: dan.token, body: { name: 'P9 Dan' } });
+  await check('so is creating a team', create.status === 400 && create.data.message === 'You already belong to a team' &&
+    !(await db.collection('teams').findOne({ name: 'P9 Dan' })), JSON.stringify(create.data));
+  const promote = await call('POST', `/teams/${teams.alpha._id}/leaders`, { token: adminToken, body: { userId: dan._id } });
+  await check("and being made another team's leader", promote.status === 400 &&
+    promote.data.message === 'This user already belongs to another team', JSON.stringify(promote.data));
+  const reinvite = await call('POST', `/teams/${teams.alpha._id}/invite`, { token: adminToken, body: { userId: dan._id } });
+  await check('nor can he be invited', reinvite.status === 400 && reinvite.data.message === 'This user already belongs to a team',
+    JSON.stringify(reinvite.data));
+
+  // The first join finishes
+  await db.collection('teams').updateOne({ _id: oid(ariTeam._id) }, { $addToSet: { members: oid(dan._id) } });
+  const danTeams = await db.collection('teams').find({ $or: [{ leaders: oid(dan._id) }, { members: oid(dan._id) }] }).toArray();
+  await check('so he is in one team', danTeams.length === 1 && String(danTeams[0]._id) === ariTeam._id &&
+    String((await userNow(dan)).teamId) === ariTeam._id, danTeams.map((team) => team.name).join(', '));
+
+  // A teamId left over for a team that no longer exists is no team at all
+  await call('POST', `/teams/${ariTeam._id}/leave`, { token: dan.token });
+  await db.collection('users').updateOne({ _id: oid(dan._id) }, { $set: { teamId: new mongoose.Types.ObjectId() } });
+  const late = await call('PUT', `/teams/invites/${invite._id}/accept`, { token: dan.token });
+  const danNow = await userNow(dan);
+  await check('a teamId for a team that is gone does not stop him joining', late.status === 200 &&
+    String(danNow.teamId) === limitTeam._id && danNow.role === 'team_member', `${JSON.stringify(late.data)} ${danNow.teamId}`);
 });
