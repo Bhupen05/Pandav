@@ -10,7 +10,10 @@ import { getUserFromToken } from './middleware/auth.js';
 import User from './models/User.js';
 import { sanitizeInput } from './middleware/sanitize.js';
 import { directMessageProblem } from './utils/messaging.js';
-import { SOCKET_AUDIENCE, rejectForeignOrigin, requireProxy } from './utils/session.js';
+import { SOCKET_AUDIENCE, originMatcher, rejectForeignOrigin, requireProxy } from './utils/session.js';
+import { setIo } from './utils/realtime.js';
+import { startScheduler } from './utils/scheduler.js';
+import './jobs/index.js';
 import v2Routes from './routes/v2Routes.js';
 
 dotenv.config();
@@ -24,7 +27,8 @@ for (const name of ['MONGODB_URI', 'JWT_SECRET']) {
 }
 
 // Browser origins allowed to call the API and open sockets. Set CLIENT_URL to
-// the deployed frontend's origin (comma-separated for more than one).
+// the deployed frontend's origin (comma-separated for more than one; * patterns
+// work for preview deployments, see originMatcher).
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
@@ -36,6 +40,7 @@ const allowedOrigins = [
     .map((origin) => origin.trim().replace(/\/$/, ''))
     .filter(Boolean),
 ];
+const isAllowedOrigin = originMatcher(allowedOrigins);
 
 if (process.env.NODE_ENV === 'production' && !process.env.CLIENT_URL && !process.env.FRONTEND_URL) {
   console.warn('CLIENT_URL is not set: browsers on the deployed frontend will be blocked by CORS');
@@ -48,10 +53,11 @@ const app = express();
 const server = http.createServer(app);
 const io = new SocketIO(server, {
   cors: {
-    origin: allowedOrigins,
+    origin: (origin, callback) => callback(null, !origin || isAllowedOrigin(origin)),
     methods: ['GET', 'POST']
   }
 });
+setIo(io);
 
 const PORT = process.env.PORT || 5000;
 const API_V2_PREFIX = process.env.API_V2_PREFIX || '/api/v2';
@@ -61,10 +67,12 @@ const API_V2_PREFIX = process.env.API_V2_PREFIX || '/api/v2';
 // from the client
 io.use(async (socket, next) => {
   try {
-    const { user } = (await getUserFromToken(socket.handshake.auth?.token, SOCKET_AUDIENCE)) || {};
+    const { user, claims } = (await getUserFromToken(socket.handshake.auth?.token, SOCKET_AUDIENCE)) || {};
     if (!user) return next(new Error('Not authorized'));
     socket.data.userId = user._id.toString();
     socket.data.userName = user.name;
+    // The session the ticket was issued to (see disconnectUserSockets)
+    socket.data.sid = claims.sid;
     next();
   } catch {
     next(new Error('Not authorized'));
@@ -131,7 +139,7 @@ app.use(helmet());
 app.use(cors({
   origin: function (origin, callback) {
     // Requests without an Origin header (Postman, curl, server-to-server) aren't subject to CORS
-    callback(null, !origin || allowedOrigins.includes(origin));
+    callback(null, !origin || isAllowedOrigin(origin));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -143,9 +151,13 @@ app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store');
   next();
 });
-app.use('/api', rejectForeignOrigin(allowedOrigins));
-// Largest legitimate body is a profile image, capped at ~200 KB by the User model
-app.use(express.json({ limit: '1mb' }));
+app.use('/api', rejectForeignOrigin(isAllowedOrigin));
+// Bodies are at most 1 MB (the largest is a profile image, ~200 KB), except
+// file uploads (POST .../attachments), which carry a file of up to 2 MB as base64
+const jsonBody = express.json({ limit: '1mb' });
+const uploadBody = express.json({ limit: '3mb' });
+app.use((req, res, next) =>
+  (req.method === 'POST' && /\/attachments\/?$/.test(req.path) ? uploadBody : jsonBody)(req, res, next));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use(cookieParser());
 app.use(sanitizeInput);
@@ -171,6 +183,8 @@ app.use((err, req, res, _next) => {
     error: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
 });
+
+startScheduler();
 
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);

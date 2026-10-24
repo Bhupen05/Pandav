@@ -2,8 +2,9 @@
 // and its own server process, seeded with two known accounts.
 //
 // Needs a MongoDB server: TEST_MONGODB_URL (default mongodb://127.0.0.1:27017).
-// Suites only ever touch databases named pandav_test_<suite>, which they drop
-// before running.
+// Suites only ever touch databases named <prefix>_<suite> (prefix
+// TEST_DB_PREFIX, default pandav_test), which they drop before running. Give
+// each checkout its own prefix to run the suites in two checkouts at once.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import net from 'node:net';
@@ -19,6 +20,8 @@ export const ADMIN = { email: 'admin@example.com', password: 'AdminPass123!' };
 export const USER = { email: 'user@example.com', password: 'UserPass123!' };
 
 const MONGO_URL = process.env.TEST_MONGODB_URL || 'mongodb://127.0.0.1:27017';
+const DB_PREFIX = process.env.TEST_DB_PREFIX || 'pandav_test';
+export const suiteDatabase = (suite) => `${DB_PREFIX}_${suite}`;
 
 // mongodb://host:port[/anything][?options] -> mongodb://host:port/<name>[?options]
 const databaseUri = (name) => {
@@ -40,6 +43,8 @@ const childEnv = (dbUri, extra = {}) => ({
   SEED_ADMIN_PASSWORD: ADMIN.password,
   SEED_USER_EMAIL: USER.email,
   SEED_USER_PASSWORD: USER.password,
+  // Background jobs run only when a test asks for them (POST /admin/jobs/:name/run)
+  DISABLE_SCHEDULER: 'true',
   ...extra,
 });
 
@@ -48,7 +53,7 @@ export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // A direct connection to a suite database, for fixtures and assertions
 // the API can't express
 export async function connectDatabase(suite) {
-  const uri = databaseUri(`pandav_test_${suite}`);
+  const uri = databaseUri(suiteDatabase(suite));
   try {
     return await mongoose.createConnection(uri, { serverSelectionTimeoutMS: 5000 }).asPromise();
   } catch (error) {
@@ -66,7 +71,7 @@ export async function resetDatabase(suite) {
 export const runScript = (suite, script, args = []) =>
   execFileSync(process.execPath, [path.join(BACKEND_DIR, script), ...args], {
     cwd: TEST_DIR,
-    env: childEnv(databaseUri(`pandav_test_${suite}`)),
+    env: childEnv(databaseUri(suiteDatabase(suite))),
     encoding: 'utf8',
   });
 
@@ -94,7 +99,7 @@ export async function launchServer(suite, port, env = {}) {
   const base = `http://127.0.0.1:${port}`;
   const server = spawn(process.execPath, [path.join(BACKEND_DIR, 'src/server.js')], {
     cwd: TEST_DIR,
-    env: childEnv(databaseUri(`pandav_test_${suite}`), { PORT: String(port), ...env }),
+    env: childEnv(databaseUri(suiteDatabase(suite)), { PORT: String(port), ...env }),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';

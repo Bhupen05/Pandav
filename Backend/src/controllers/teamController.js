@@ -5,9 +5,9 @@ import Task from '../models/Task.js';
 import Attendance from '../models/Attendance.js';
 import TeamChatMessage from '../models/TeamChatMessage.js';
 import mongoose from 'mongoose';
-import { escapeRegex, pick, sendServerError } from '../utils/http.js';
-import { dayRange } from '../utils/dates.js';
-import { FROZEN_TEAM_MESSAGE, canReviewFor, isInAnyTeam, isTeamLeader, teamUserIds } from '../utils/teams.js';
+import { escapeRegex, sendServerError } from '../utils/http.js';
+import { notify } from '../utils/notify.js';
+import { FROZEN_TEAM_MESSAGE, isInAnyTeam, teamUserIds } from '../utils/teams.js';
 
 const TEAM_ROLES = ['team_leader', 'team_member'];
 
@@ -32,43 +32,6 @@ const inviteeProblem = async (user) => {
 };
 
 const isTextOrUnset = (value) => value === undefined || typeof value === 'string';
-
-// Loads the team in req.params.teamId for a leader's action, or sends why the
-// caller can't take it and returns null. Admins act on any team, frozen or
-// not, so a frozen team's waiting reviews go to them; leaders act only on
-// their own team while it is active.
-const findTeamToManage = async (req, res, action) => {
-  const team = await Team.findById(req.params.teamId);
-  if (!team) {
-    res.status(404).json({ success: false, message: 'Team not found' });
-    return null;
-  }
-  if (req.user.role !== 'admin') {
-    if (!isTeamLeader(team, req.user.id)) {
-      res.status(403).json({ success: false, message: `Only team leaders can ${action}` });
-      return null;
-    }
-    if (!team.isActive) {
-      res.status(400).json({ success: false, message: FROZEN_TEAM_MESSAGE });
-      return null;
-    }
-  }
-  return team;
-};
-
-// Fields a leader may set when creating a team task; progress and approval
-// go through the task workflow
-const TEAM_TASK_FIELDS = [
-  'title',
-  'description',
-  'assignedTo',
-  'priority',
-  'startDate',
-  'dueDate',
-  'estimatedDays',
-  'tags',
-  'notes',
-];
 
 // ─── Team CRUD ────────────────────────────────────────────────────────────────
 
@@ -333,6 +296,15 @@ export const inviteMember = async (req, res) => {
       .populate('invitedUser', 'name email profileImage')
       .populate('invitedBy', 'name email');
 
+    await notify(req, invitedUser._id, {
+      type: 'team_invite',
+      title: `${req.user.name} invited you to join ${team.name}`,
+      body: 'Accept or decline the invite on the Team page. It expires in 7 days.',
+      link: '/teams',
+      data: { teamId: String(team._id), inviteId: String(invite._id) },
+      email: true,
+    });
+
     res.status(201).json({ success: true, data: populated });
   } catch (error) {
     sendServerError(res, error);
@@ -477,11 +449,9 @@ export const removeMember = async (req, res) => {
     await User.updateOne({ _id: userId, role: { $in: TEAM_ROLES } }, { $set: { role: 'user' } });
     await User.updateOne({ _id: userId, teamId: team._id }, { $set: { teamId: null } });
 
-    // Their team tasks would otherwise wait on someone no longer in the team
-    await Task.updateMany(
-      { team: team._id, assignedTo: userId },
-      { $pull: { assignedTo: userId, assigneeProgress: { user: userId } } }
-    );
+    // Their open team tasks would otherwise wait on someone no longer in the
+    // team; finished ones keep them as the record of who did the work
+    await Task.unassignUser(userId, { team: team._id });
 
     const populated = await Team.findById(team._id)
       .populate('leaders', 'name email profileImage role')
@@ -524,324 +494,6 @@ export const addLeader = async (req, res) => {
     const populated = await Team.findById(team._id)
       .populate('leaders', 'name email profileImage role')
       .populate('members', 'name email profileImage role');
-
-    res.json({ success: true, data: populated });
-  } catch (error) {
-    sendServerError(res, error);
-  }
-};
-
-// ─── Team Tasks ───────────────────────────────────────────────────────────────
-
-// @desc    Get all tasks for a team
-// @route   GET /api/teams/:teamId/tasks
-// @access  Private (Admin or team leader/member)
-export const getTeamTasks = async (req, res) => {
-  try {
-    const { teamId } = req.params;
-
-    const team = await Team.findById(teamId);
-    if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
-
-    const isMember =
-      team.leaders.some(l => l.toString() === req.user.id.toString()) ||
-      team.members.some(m => m.toString() === req.user.id.toString());
-
-    if (req.user.role !== 'admin' && !isMember) {
-      return res.status(403).json({ success: false, message: 'Not authorized to view team tasks' });
-    }
-
-    const tasks = await Task.find({ team: teamId })
-      .populate('assignedTo', 'name email profileImage')
-      .populate('createdBy', 'name email')
-      .populate('approvedBy', 'name email')
-      .populate('rejectedBy', 'name email')
-      .populate('completionRequestedBy', 'name email')
-      .populate('editedBy', 'name')
-      .sort({ createdAt: -1 });
-
-    res.json({ success: true, count: tasks.length, data: tasks });
-  } catch (error) {
-    sendServerError(res, error);
-  }
-};
-
-// @desc    Create a task for the team
-// @route   POST /api/teams/:teamId/tasks
-// @access  Private (Admin or team leader)
-export const createTeamTask = async (req, res) => {
-  try {
-    const { teamId } = req.params;
-
-    const team = await findTeamToManage(req, res, 'create team tasks');
-    if (!team) return;
-    // A frozen team takes no new work, not even from an admin
-    if (!team.isActive) return res.status(400).json({ success: false, message: FROZEN_TEAM_MESSAGE });
-
-    // Validate assignees are part of the team
-    const allTeamUserIds = [
-      ...team.leaders.map(l => l.toString()),
-      ...team.members.map(m => m.toString()),
-    ];
-
-    const assignedTo = Array.isArray(req.body.assignedTo) ? req.body.assignedTo : [req.body.assignedTo];
-    if (assignedTo.length === 0 || !assignedTo.every((id) => mongoose.isObjectIdOrHexString(id))) {
-      return res.status(400).json({ success: false, message: 'Assign the task to at least one team member' });
-    }
-    const invalidAssignees = assignedTo.filter(id => !allTeamUserIds.includes(String(id).toLowerCase()));
-    if (invalidAssignees.length > 0) {
-      return res.status(400).json({ success: false, message: 'All assignees must be members of the team' });
-    }
-
-    const task = await Task.create({
-      ...pick(req.body, TEAM_TASK_FIELDS),
-      createdBy: req.user.id,
-      team: teamId,
-    });
-
-    const populated = await Task.findById(task._id)
-      .populate('assignedTo', 'name email profileImage')
-      .populate('createdBy', 'name email')
-      .populate('team', 'name');
-
-    res.status(201).json({ success: true, data: populated });
-  } catch (error) {
-    sendServerError(res, error);
-  }
-};
-
-// @desc    Get tasks pending approval for a team
-// @route   GET /api/teams/:teamId/tasks/pending-approval
-// @access  Private (Admin or team leader)
-export const getTeamPendingApprovalTasks = async (req, res) => {
-  try {
-    const { teamId } = req.params;
-
-    const team = await findTeamToManage(req, res, 'view pending approvals');
-    if (!team) return;
-
-    const filter = { team: teamId, status: 'completion-requested' };
-    if (req.user.role !== 'admin') filter.assignedTo = { $ne: req.user._id };
-
-    const tasks = await Task.find(filter)
-      .populate('assignedTo', 'name email profileImage')
-      .populate('createdBy', 'name email')
-      .populate('completionRequestedBy', 'name email')
-      .sort({ completionRequestedAt: -1 });
-
-    res.json({ success: true, count: tasks.length, data: tasks });
-  } catch (error) {
-    sendServerError(res, error);
-  }
-};
-
-// @desc    Approve team task completion
-// @route   PUT /api/teams/:teamId/tasks/:taskId/approve
-// @access  Private (Admin or team leader)
-export const approveTeamTask = async (req, res) => {
-  try {
-    const { teamId, taskId } = req.params;
-
-    const team = await findTeamToManage(req, res, 'approve tasks');
-    if (!team) return;
-
-    const task = await Task.findOne({ _id: taskId, team: teamId });
-    if (!task) return res.status(404).json({ success: false, message: 'Task not found in this team' });
-
-    if (!(await canReviewFor(req.user, task.assignedTo))) {
-      return res.status(403).json({ success: false, message: 'You cannot approve a task assigned to you' });
-    }
-
-    if (!task.hasCompletionRequest()) {
-      return res.status(400).json({ success: false, message: 'Task completion has not been requested' });
-    }
-
-    task.approveCompletion(req.user.id);
-    await task.save();
-
-    const populated = await Task.findById(task._id)
-      .populate('assignedTo', 'name email profileImage')
-      .populate('createdBy', 'name email')
-      .populate('approvedBy', 'name email')
-      .populate('completionRequestedBy', 'name email');
-
-    res.json({ success: true, message: 'Task completion approved', data: populated });
-  } catch (error) {
-    sendServerError(res, error);
-  }
-};
-
-// @desc    Reject team task completion
-// @route   PUT /api/teams/:teamId/tasks/:taskId/reject
-// @access  Private (Admin or team leader)
-export const rejectTeamTask = async (req, res) => {
-  try {
-    const { teamId, taskId } = req.params;
-
-    const team = await findTeamToManage(req, res, 'reject tasks');
-    if (!team) return;
-
-    const task = await Task.findOne({ _id: taskId, team: teamId });
-    if (!task) return res.status(404).json({ success: false, message: 'Task not found in this team' });
-
-    if (!(await canReviewFor(req.user, task.assignedTo))) {
-      return res.status(403).json({ success: false, message: 'You cannot reject a task assigned to you' });
-    }
-
-    if (!task.hasCompletionRequest()) {
-      return res.status(400).json({ success: false, message: 'Task completion has not been requested' });
-    }
-
-    task.rejectCompletion(req.user.id, req.body.rejectionReason);
-    await task.save();
-
-    const populated = await Task.findById(task._id)
-      .populate('assignedTo', 'name email profileImage')
-      .populate('createdBy', 'name email')
-      .populate('rejectedBy', 'name email');
-
-    res.json({ success: true, message: 'Task completion rejected', data: populated });
-  } catch (error) {
-    sendServerError(res, error);
-  }
-};
-
-// ─── Team Attendance ──────────────────────────────────────────────────────────
-
-// @desc    Get attendance for all team members
-// @route   GET /api/teams/:teamId/attendance
-// @access  Private (Admin or team leader)
-export const getTeamAttendance = async (req, res) => {
-  try {
-    const { teamId } = req.params;
-    const { startDate, endDate, status } = req.query;
-
-    const team = await Team.findById(teamId);
-    if (!team) return res.status(404).json({ success: false, message: 'Team not found' });
-
-    if (req.user.role !== 'admin') {
-      const isLeader = team.leaders.some(l => l.toString() === req.user.id.toString());
-      if (!isLeader) {
-        return res.status(403).json({ success: false, message: 'Only team leaders can view team attendance' });
-      }
-    }
-
-    // Matched by member rather than the record's team, so check-ins from
-    // before someone joined the team (or without a team set) still show
-    const filter = { user: { $in: teamUserIds(team) } };
-    if (status) {
-      // Accept the approval states the team dashboard filters by as well as day types
-      const approval = { requested: 'pending', pending: 'pending', approved: 'approved', rejected: 'rejected' }[status];
-      if (approval) filter.approvalStatus = approval;
-      else filter.status = status;
-    }
-    if (startDate || endDate) {
-      const { range, error } = dayRange(startDate, endDate);
-      if (error) return res.status(400).json({ success: false, message: error });
-      filter.day = range;
-    }
-
-    const attendance = await Attendance.find(filter)
-      .populate('user', 'name email department profileImage')
-      .populate('team', 'name')
-      .populate('approvedBy', 'name email')
-      .sort('-date');
-
-    res.json({ success: true, count: attendance.length, data: attendance });
-  } catch (error) {
-    sendServerError(res, error);
-  }
-};
-
-// @desc    Get pending attendance for team (for leader approval)
-// @route   GET /api/teams/:teamId/attendance/pending
-// @access  Private (Admin or team leader)
-export const getTeamPendingAttendance = async (req, res) => {
-  try {
-    const team = await findTeamToManage(req, res, 'view pending attendance');
-    if (!team) return;
-
-    const filter = { user: { $in: teamUserIds(team) }, approvalStatus: 'pending' };
-    if (req.user.role !== 'admin') filter.user.$ne = req.user._id;
-
-    const attendance = await Attendance.find(filter)
-      .populate('user', 'name email department profileImage')
-      .populate('team', 'name')
-      .sort('-date');
-
-    res.json({ success: true, count: attendance.length, data: attendance });
-  } catch (error) {
-    sendServerError(res, error);
-  }
-};
-
-// @desc    Approve attendance record (team leader)
-// @route   PUT /api/teams/:teamId/attendance/:attendanceId/approve
-// @access  Private (Admin or team leader)
-export const approveTeamAttendance = async (req, res) => {
-  try {
-    const { attendanceId } = req.params;
-
-    const team = await findTeamToManage(req, res, 'approve attendance');
-    if (!team) return;
-
-    const attendance = await Attendance.findById(attendanceId);
-    if (!attendance) return res.status(404).json({ success: false, message: 'Attendance record not found' });
-
-    // Make sure this attendance belongs to someone in the team
-    if (!teamUserIds(team).includes(attendance.user.toString())) {
-      return res.status(403).json({ success: false, message: 'This attendance does not belong to your team' });
-    }
-
-    if (!(await canReviewFor(req.user, [attendance.user]))) {
-      return res.status(403).json({ success: false, message: 'You cannot review your own attendance' });
-    }
-
-    attendance.approvalStatus = 'approved';
-    attendance.approvedBy = req.user.id;
-    await attendance.save();
-
-    const populated = await Attendance.findById(attendance._id)
-      .populate('user', 'name email department profileImage')
-      .populate('team', 'name')
-      .populate('approvedBy', 'name email');
-
-    res.json({ success: true, data: populated });
-  } catch (error) {
-    sendServerError(res, error);
-  }
-};
-
-// @desc    Disapprove attendance record (team leader)
-// @route   PUT /api/teams/:teamId/attendance/:attendanceId/disapprove
-// @access  Private (Admin or team leader)
-export const disapproveTeamAttendance = async (req, res) => {
-  try {
-    const { attendanceId } = req.params;
-
-    const team = await findTeamToManage(req, res, 'disapprove attendance');
-    if (!team) return;
-
-    const attendance = await Attendance.findById(attendanceId);
-    if (!attendance) return res.status(404).json({ success: false, message: 'Attendance record not found' });
-
-    // Make sure this attendance belongs to someone in the team
-    if (!teamUserIds(team).includes(attendance.user.toString())) {
-      return res.status(403).json({ success: false, message: 'This attendance does not belong to your team' });
-    }
-
-    if (!(await canReviewFor(req.user, [attendance.user]))) {
-      return res.status(403).json({ success: false, message: 'You cannot review your own attendance' });
-    }
-
-    attendance.approvalStatus = 'rejected';
-    attendance.approvedBy = req.user.id;
-    await attendance.save();
-
-    const populated = await Attendance.findById(attendance._id)
-      .populate('user', 'name email department profileImage')
-      .populate('team', 'name')
-      .populate('approvedBy', 'name email');
 
     res.json({ success: true, data: populated });
   } catch (error) {

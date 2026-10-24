@@ -207,5 +207,5 @@ export const logout = (req, res) => {
 // @route   POST /api/auth/socket-token
 // @access  Private
 export const getSocketToken = (req, res) => {
-  res.json({ success: true, data: { token: signSocketTicket(req.user._id) } });
+  res.json({ success: true, data: { token: signSocketTicket(req.user._id, req.session?.sid) } });
 };

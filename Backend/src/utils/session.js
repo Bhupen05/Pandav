@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
+import { escapeRegex } from './http.js';
 
 // The signed-in session is a JWT in an HttpOnly cookie, so page scripts (and
 // anything injected into them) can never read it. Browsers reach the API on
@@ -27,8 +28,10 @@ const cookieOptions = (req) => ({
 
 // Signs the user in on this response. `remember` keeps the cookie across
 // browser restarts for JWT_EXPIRE (default 30 days).
+// Each session gets an id (claim `sid`), carried over into its socket
+// tickets, so signing out of one browser can close that browser's sockets.
 export const setSessionCookie = (req, res, userId, remember) => {
-  const token = jwt.sign({ id: userId, remember }, process.env.JWT_SECRET, {
+  const token = jwt.sign({ id: userId, remember, sid: crypto.randomUUID() }, process.env.JWT_SECRET, {
     audience: SESSION_AUDIENCE,
     expiresIn: remember ? process.env.JWT_EXPIRE || '30d' : SHORT_SESSION,
   });
@@ -43,8 +46,8 @@ export const clearSessionCookie = (req, res) => {
 
 // Short-lived proof of identity for opening a socket. The socket server is
 // reached directly (Vercel can't proxy WebSockets), so it never sees the cookie.
-export const signSocketTicket = (userId) =>
-  jwt.sign({ id: userId }, process.env.JWT_SECRET, {
+export const signSocketTicket = (userId, sid) =>
+  jwt.sign({ id: userId, sid }, process.env.JWT_SECRET, {
     audience: SOCKET_AUDIENCE,
     expiresIn: SOCKET_TICKET_LIFETIME,
   });
@@ -79,9 +82,24 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 // Browsers send Origin with every POST, PUT, PATCH and DELETE. Refusing other
 // sites stops cross-site forms from riding on the session cookie (SameSite=Lax
 // already stops them in current browsers). Non-browser clients send no Origin.
-export const rejectForeignOrigin = (allowedOrigins) => (req, res, next) => {
+// `isAllowedOrigin(origin)` decides (see originMatcher).
+export const rejectForeignOrigin = (isAllowedOrigin) => (req, res, next) => {
   if (SAFE_METHODS.has(req.method)) return next();
   const origin = req.get('origin');
-  if (origin === undefined || allowedOrigins.includes(origin)) return next();
+  if (origin === undefined || isAllowedOrigin(origin)) return next();
   return res.status(403).json({ success: false, message: 'Request origin not allowed' });
+};
+
+// A test for allowed origins. Each entry is an exact origin, or a pattern
+// where * stands for one DNS label part (letters, digits and dashes, never a
+// dot), e.g. https://pandav-*-myteam.vercel.app for Vercel preview
+// deployments. Keep a pattern tied to something only you control (the Vercel
+// team's slug): https://pandav-*.vercel.app would also match other people's
+// projects.
+export const originMatcher = (entries) => {
+  const exact = new Set(entries.filter((entry) => !entry.includes('*')));
+  const patterns = entries
+    .filter((entry) => entry.includes('*'))
+    .map((entry) => new RegExp(`^${entry.split('*').map(escapeRegex).join('[a-z0-9-]+')}$`, 'i'));
+  return (origin) => typeof origin === 'string' && (exact.has(origin) || patterns.some((pattern) => pattern.test(origin)));
 };

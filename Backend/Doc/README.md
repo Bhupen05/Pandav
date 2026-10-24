@@ -10,6 +10,8 @@ Reference for the backend's HTTP API and its real-time events. Each module has i
 | [Teams.md](Teams.md) | Teams, invites, membership rules, team tasks and attendance |
 | [Chat.md](Chat.md) | Direct and team chat, read receipts, Socket.io events |
 | [SocialHub.md](SocialHub.md) | Feed, posts, publishing to LinkedIn/GitHub, connections, personal tasks, contact form |
+| [Notifications.md](Notifications.md) | Notifications: stored, live over the socket, optionally emailed |
+| [Admin.md](Admin.md) | Admin-only endpoints: background jobs |
 
 This page covers what every endpoint has in common.
 
@@ -83,8 +85,11 @@ team names its leader. See [Teams.md](Teams.md).
   from an allowed origin, or they get `403 Request origin not allowed`. Allowed origins are
   `http://localhost:5173`, `http://localhost:5174`, `http://localhost:3000`,
   `https://pandav.onrender.com`, and whatever `CLIENT_URL` and `FRONTEND_URL` list
-  (comma-separated). Requests without an `Origin` header (curl, scripts) are not affected. CORS
-  and Socket.io use the same list.
+  (comma-separated). An entry may contain `*`, which stands for letters, digits and dashes (never
+  a dot), for preview deployments: `https://pandav-*-myteam.vercel.app`. Tie a pattern to
+  something only you control, such as the Vercel team's name; `https://pandav-*.vercel.app` would
+  also match other people's projects. Requests without an `Origin` header (curl, scripts) are not
+  affected. CORS and Socket.io use the same list.
 - **Behind the frontend's proxy:** when `ORIGIN_SECRET` is set, every `/api` request except the
   health checks must carry it in `x-origin-secret` (Vercel adds it), or it gets
   `403 Requests must come through the app`. Rate limits then count the visitor's address from
@@ -105,7 +110,7 @@ Most responses are JSON with a `success` flag. Errors look like this:
 | `403` | Signed in but not allowed, or refused by the origin checks above |
 | `404` | Not found, or not visible to this user |
 | `409` | The request conflicts with the current state (for example retrying a job that didn't fail) |
-| `413` | Request body over 1 MB |
+| `413` | Request body over 1 MB (3 MB for file uploads, `POST .../attachments`) |
 | `429` | Rate limited; `Retry-After` says when to try again |
 | `500` | Server error. The message is `Server error` in production; in development it is the error's own message |
 

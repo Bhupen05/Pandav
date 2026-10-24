@@ -59,6 +59,50 @@ const userSchema = new mongoose.Schema({
     type: Date,
     select: false,
   },
+  // Every session token carries the version it was issued under (claim `tv`).
+  // Raising it ends all of the user's sessions at once: "sign out
+  // everywhere", deactivation, deletion.
+  tokenVersion: {
+    type: Number,
+    default: 0,
+    select: false,
+  },
+  emailVerified: {
+    type: Boolean,
+    default: false,
+  },
+  emailVerifiedAt: {
+    type: Date,
+  },
+  // Set when an admin resets the password: the user has to choose their own
+  // before doing anything else
+  mustChangePassword: {
+    type: Boolean,
+    default: false,
+  },
+  // Two-step sign-in with an authenticator app (TOTP). The secrets are
+  // encrypted (utils/secrets.js); backup codes are stored as SHA-256 hashes.
+  twoFactor: {
+    enabled: { type: Boolean, default: false },
+    secret: { type: String, select: false },
+    // Chosen during setup, until the first code confirms it
+    pendingSecret: { type: String, select: false },
+    backupCodes: { type: [String], select: false, default: undefined },
+  },
+  // Whether notifications marked for email are also emailed
+  emailNotifications: {
+    type: Boolean,
+    default: true,
+  },
+  lastLoginAt: {
+    type: Date,
+  },
+  // A deleted account keeps its record, anonymised and deactivated, so tasks,
+  // approvals and messages it was part of still point at someone ("Deleted user")
+  deletedAt: {
+    type: Date,
+    default: null,
+  },
 }, {
   timestamps: true,
 });
