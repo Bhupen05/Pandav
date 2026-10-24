@@ -8,21 +8,18 @@ import {
   updateTeam,
   deleteTeam,
   inviteMember,
+  getInviteCandidates,
+  getTeamInvites,
+  withdrawInvite,
+  leaveTeam,
   removeMember,
   addLeader,
   acceptInvite,
   declineInvite,
   getMyInvites,
-  getTeamTasks,
-  createTeamTask,
-  getTeamPendingApprovalTasks,
-  approveTeamTask,
-  rejectTeamTask,
-  getTeamAttendance,
-  getTeamPendingAttendance,
-  approveTeamAttendance,
-  disapproveTeamAttendance,
 } from '../controllers/teamController.js';
+import teamTaskRoutes from './teamTaskRoutes.js';
+import teamAttendanceRoutes from './teamAttendanceRoutes.js';
 
 const router = express.Router();
 
@@ -44,22 +41,20 @@ router.route('/:id')
   .put(protect, adminOrLeader, isLeaderOfTeam, updateTeam)
   .delete(protect, authorize('admin'), deleteTeam);
 
-// ── Member management ─────────────────────────────────────────────────────────
+// ── Invites a team sends ──────────────────────────────────────────────────────
+// The handlers check who may call them (the team's leaders, admins)
 router.post('/:teamId/invite', protect, adminOrLeader, isLeaderOfTeam, inviteMember);
+router.get('/:teamId/invite-candidates', protect, getInviteCandidates);
+router.get('/:teamId/invites', protect, getTeamInvites);
+router.delete('/:teamId/invites/:inviteId', protect, withdrawInvite);
+
+// ── Member management ─────────────────────────────────────────────────────────
+router.post('/:teamId/leave', protect, leaveTeam);
 router.post('/:teamId/leaders', protect, authorize('admin'), addLeader);
 router.delete('/:teamId/members/:userId', protect, adminOrLeader, removeMember);
 
-// ── Team Tasks ────────────────────────────────────────────────────────────────
-router.get('/:teamId/tasks/pending-approval', protect, adminOrLeader, getTeamPendingApprovalTasks);
-router.get('/:teamId/tasks', protect, getTeamTasks);
-router.post('/:teamId/tasks', protect, adminOrLeader, createTeamTask);
-router.put('/:teamId/tasks/:taskId/approve', protect, adminOrLeader, approveTeamTask);
-router.put('/:teamId/tasks/:taskId/reject', protect, adminOrLeader, rejectTeamTask);
-
-// ── Team Attendance ───────────────────────────────────────────────────────────
-router.get('/:teamId/attendance/pending', protect, adminOrLeader, getTeamPendingAttendance);
-router.get('/:teamId/attendance', protect, adminOrLeader, getTeamAttendance);
-router.put('/:teamId/attendance/:attendanceId/approve', protect, adminOrLeader, approveTeamAttendance);
-router.put('/:teamId/attendance/:attendanceId/disapprove', protect, adminOrLeader, disapproveTeamAttendance);
+// ── Team tasks and attendance (their own routers) ───────────────────────────
+router.use('/:teamId/tasks', teamTaskRoutes);
+router.use('/:teamId/attendance', teamAttendanceRoutes);
 
 export default router;

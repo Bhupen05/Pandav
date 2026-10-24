@@ -8,6 +8,8 @@ import teamRoutes from './teamRoutes.js';
 import chatRoutes from './chatRoutes.js';
 import contactRoutes from './contactRoutes.js';
 import socialRoutes from './socialV2Routes.js';
+import notificationRoutes from './notificationRoutes.js';
+import adminRoutes from './adminRoutes.js';
 
 const router = express.Router();
 
@@ -26,5 +28,8 @@ router.use('/contact', contactRoutes);
 
 // New v2 social/network module
 router.use('/social', socialRoutes);
+
+router.use('/notifications', notificationRoutes);
+router.use('/admin', adminRoutes);
 
 export default router;

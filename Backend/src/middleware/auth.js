@@ -4,10 +4,22 @@ import Team from '../models/Team.js';
 import { sendServerError } from '../utils/http.js';
 import { SESSION_AUDIENCE, SESSION_COOKIE } from '../utils/session.js';
 
+// Whether a token's claims still hold for this user (loaded with
+// +tokenVersion +passwordChangedAt): issued under the account's current token
+// version (claim `tv`; a token without one counts as 0), and not before the
+// last password change. The version goes up on "sign out everywhere",
+// deactivation, deletion and a password reset by email.
+export const claimsStillValid = (user, claims) => {
+  if ((claims.tv ?? 0) !== (user.tokenVersion ?? 0)) return false;
+  if (user.passwordChangedAt && claims.iat < Math.floor(user.passwordChangedAt.getTime() / 1000)) return false;
+  return true;
+};
+
 // Resolves a JWT to { user, claims } for an active user. Returns null if the
 // token is invalid, expired or meant for another audience, the account is
-// deactivated, or the password changed after the token was issued. Shared by
-// HTTP routes (session cookie) and socket connections (socket ticket).
+// deactivated or deleted, or the token no longer holds (see
+// claimsStillValid). Shared by HTTP routes (session cookie) and socket
+// connections (socket ticket).
 export const getUserFromToken = async (token, audience) => {
   let decoded;
   try {
@@ -16,18 +28,27 @@ export const getUserFromToken = async (token, audience) => {
     return null;
   }
 
-  const user = await User.findById(decoded.id).select('+passwordChangedAt');
-  if (!user || !user.isActive) return null;
+  const user = await User.findById(decoded.id).select('+passwordChangedAt +tokenVersion');
+  if (!user || !user.isActive || user.deletedAt) return null;
+  if (!claimsStillValid(user, decoded)) return null;
 
-  if (user.passwordChangedAt && decoded.iat < Math.floor(user.passwordChangedAt.getTime() / 1000)) {
-    return null;
+  // Only needed for the checks above. Unmarked, so saving req.user can't erase them.
+  for (const path of ['passwordChangedAt', 'tokenVersion']) {
+    user[path] = undefined;
+    user.unmarkModified(path);
   }
-
-  user.passwordChangedAt = undefined;
   return { user, claims: decoded };
 };
 
-export const protect = async (req, res, next) => {
+// What every route except a few answers while an admin-set password is
+// waiting to be replaced (see protectAllowingPasswordChange)
+const PASSWORD_CHANGE_REQUIRED = {
+  success: false,
+  code: 'PASSWORD_CHANGE_REQUIRED',
+  message: 'Please choose a new password before you continue',
+};
+
+const authenticate = (allowPendingPasswordChange) => async (req, res, next) => {
   try {
     const token = req.cookies?.[SESSION_COOKIE];
 
@@ -49,6 +70,10 @@ export const protect = async (req, res, next) => {
       });
     }
 
+    if (req.user.mustChangePassword && !allowPendingPasswordChange) {
+      return res.status(403).json(PASSWORD_CHANGE_REQUIRED);
+    }
+
     next();
   } catch (error) {
     console.error(error);
@@ -58,6 +83,15 @@ export const protect = async (req, res, next) => {
     });
   }
 };
+
+// Needs a session. After an admin reset the password (mustChangePassword),
+// it answers 403 PASSWORD_CHANGE_REQUIRED until the user picks a new one.
+export const protect = authenticate(false);
+
+// Needs a session, and also lets through a user who still has to replace an
+// admin-set password: for the routes they need to do that (who am I, change
+// password, sign out, socket ticket)
+export const protectAllowingPasswordChange = authenticate(true);
 
 export const authorize = (...roles) => {
   return (req, res, next) => {

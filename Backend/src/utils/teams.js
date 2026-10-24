@@ -28,6 +28,21 @@ export const ledUserIds = async (userId, { activeOnly = false } = {}) => {
   return [...new Set(teams.flatMap(teamUserIds))];
 };
 
+// Ids of the teams this user leads. With `activeOnly`, frozen teams are left out.
+export const ledTeamIds = async (userId, { activeOnly = false } = {}) =>
+  (await Team.find({ leaders: userId, ...(activeOnly ? { isActive: true } : {}) }).distinct('_id')).map(String);
+
+// Whether a reviewer may change a record that belongs to a team (a task's or
+// an attendance record's `team`): admins always; a team leader only for a
+// team they lead that isn't frozen. A record that belongs to no team, or to a
+// team the person was in before, is for admins only, so moving someone into a
+// team doesn't hand their history to its leader.
+export const leadsRecordTeam = async (reviewer, teamId) => {
+  if (reviewer.role === 'admin') return true;
+  if (reviewer.role !== 'team_leader' || !teamId) return false;
+  return Boolean(await Team.exists({ _id: idOf(teamId), leaders: idOf(reviewer), isActive: true }));
+};
+
 // Whether two users are in the same team, and that team isn't frozen
 export const areTeammates = async (userId, otherId) =>
   Boolean(await Team.exists({
@@ -51,4 +66,27 @@ export const canReviewFor = async (reviewer, userIds) => {
 
   const led = await ledUserIds(reviewer.id ?? idOf(reviewer), { activeOnly: true });
   return ids.every((id) => led.includes(id));
+};
+
+// Loads the team in req.params.teamId for a leader's action, or sends why the
+// caller can't take it and returns null. Admins act on any team, frozen or
+// not, so a frozen team's waiting reviews go to them; leaders act only on
+// their own team while it is active.
+export const findTeamToManage = async (req, res, action) => {
+  const team = await Team.findById(req.params.teamId);
+  if (!team) {
+    res.status(404).json({ success: false, message: 'Team not found' });
+    return null;
+  }
+  if (req.user.role !== 'admin') {
+    if (!isTeamLeader(team, req.user.id)) {
+      res.status(403).json({ success: false, message: `Only team leaders can ${action}` });
+      return null;
+    }
+    if (!team.isActive) {
+      res.status(400).json({ success: false, message: FROZEN_TEAM_MESSAGE });
+      return null;
+    }
+  }
+  return team;
 };

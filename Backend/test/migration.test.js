@@ -22,10 +22,16 @@ test('migration', async (t) => {
   const worker = new ObjectId();
   const bigAvatar = new ObjectId();
   const deletedUser = new ObjectId();
+  // Registered after Phase 9: has every account field already
+  const newcomer = new ObjectId();
   await db.collection('users').insertMany([
     { _id: admin, name: 'Admin', email: 'a@x.com', password: 'x', role: 'admin', isActive: true },
-    { _id: worker, name: 'Worker', email: 'w@x.com', password: 'x', role: 'user', isActive: true },
+    { _id: worker, name: 'Worker', email: 'w@x.com', password: 'x', role: 'user', isActive: true, twoFactor: null },
     { _id: bigAvatar, name: 'Big', email: 'b@x.com', password: 'x', role: 'user', isActive: true, profileImage: `data:image/png;base64,${'A'.repeat(300000)}` },
+    {
+      _id: newcomer, name: 'New', email: 'n@x.com', password: 'x', role: 'user', isActive: true,
+      emailVerified: false, tokenVersion: 2, deletedAt: null, twoFactor: { enabled: true },
+    },
   ]);
 
   const at = (iso) => new Date(iso);
@@ -67,6 +73,17 @@ test('migration', async (t) => {
   await check('orphans reported, not deleted, without the flag', /--clean-orphans/.test(firstRun) && (await db.collection('chats').countDocuments()) === 1);
   await check('oversized image reported, not deleted, without the flag', /--drop-oversized-images/.test(firstRun) && !!(await db.collection('users').findOne({ _id: bigAvatar })).profileImage);
 
+  const accounts = Object.fromEntries((await db.collection('users').find().toArray()).map((u) => [String(u._id), u]));
+  const older = [admin, worker, bigAvatar].map((id) => accounts[String(id)]);
+  await check('existing addresses count as confirmed', older.every((u) => u.emailVerified === true));
+  await check('existing accounts get session version 0, no deletedAt and two-step sign-in off',
+    older.every((u) => u.tokenVersion === 0 && u.deletedAt === null && u.twoFactor?.enabled === false), JSON.stringify(older.map((u) => u.twoFactor)));
+  const fresh = accounts[String(newcomer)];
+  await check('an account that already has the fields keeps them',
+    fresh.emailVerified === false && fresh.tokenVersion === 2 && fresh.twoFactor.enabled === true);
+  await check('the account step reports its counts',
+    /marked 3 email address\(es\) as confirmed, set the session version of 3, deletedAt of 3 and two-step sign-in of 3 account/.test(firstRun), firstRun);
+
   // ---------- Second run: after fixing duplicates, with cleanup flags ----------
   await db.collection('attendances').deleteOne({ user: worker, date: at('2026-09-05T09:00:00Z') });
   migrate('--clean-orphans', '--drop-oversized-images');
@@ -81,6 +98,7 @@ test('migration', async (t) => {
   // ---------- Third run: nothing left to do ----------
   const thirdRun = migrate();
   await check('re-running is a no-op', /migrated 0 record/.test(thirdRun) && /added assignee progress to 0 task/.test(thirdRun) && /Nothing else needs attention/.test(thirdRun), thirdRun);
+  await check('including the account step', /marked 0 email address\(es\) as confirmed, set the session version of 0, deletedAt of 0 and two-step sign-in of 0 account/.test(thirdRun), thirdRun);
 
   const duplicateInsert = await db.collection('attendances').insertOne({ user: worker, day: '2026-09-01', date: new Date() }).then(() => 'inserted', (e) => e.code);
   await check('database now rejects a second record for the same day', duplicateInsert === 11000, String(duplicateInsert));

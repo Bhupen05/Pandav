@@ -30,6 +30,15 @@ const TeamManagement = lazy(() => import('./pages/TeamManagement'))
 const TeamMemberDashboard = lazy(() => import('./pages/TeamMemberDashboard'))
 const SocialHub = lazy(() => import('./pages/SocialHub'))
 const DashboardRedirect = lazy(() => import('./pages/DashboardRedirect'))
+const ForgotPassword = lazy(() => import('./pages/ForgotPassword'))
+const ResetPassword = lazy(() => import('./pages/ResetPassword'))
+const VerifyEmail = lazy(() => import('./pages/VerifyEmail'))
+const Notifications = lazy(() => import('./pages/Notifications'))
+const Approvals = lazy(() => import('./pages/Approvals'))
+const AdminPeople = lazy(() => import('./pages/AdminPeople'))
+const AdminPerson = lazy(() => import('./pages/AdminPerson'))
+const AuditLog = lazy(() => import('./pages/AuditLog'))
+const AdminReports = lazy(() => import('./pages/AdminReports'))
 
 const PageLoading = () => (
   <div className="flex min-h-[60vh] items-center justify-center" role="status" aria-label="Loading page">
@@ -41,7 +50,7 @@ function AppRoutes() {
   const location = useLocation()
   const { isAuthenticated } = useAuth()
 
-  const publicPaths = ['/', '/about', '/service', '/pricing', '/login', '/register', '/contact']
+  const publicPaths = ['/', '/about', '/service', '/pricing', '/login', '/register', '/contact', '/forgot-password', '/reset-password', '/verify-email']
   const isPublicRoute = publicPaths.includes(location.pathname)
   const showAppShell = isAuthenticated && !isPublicRoute
 
@@ -58,6 +67,9 @@ function AppRoutes() {
             <Route path="/contact" element={<Contactus />} />
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
+            <Route path="/verify-email" element={<VerifyEmail />} />
 
             <Route element={<RequireAuth />}>
               <Route path="/dashboard" element={<DashboardRedirect />} />
@@ -74,13 +86,19 @@ function AppRoutes() {
               <Route path="/network" element={<SocialHub />} />
               <Route path="/integrations" element={<SocialHub />} />
               <Route path="/publish-jobs" element={<SocialHub />} />
+              <Route path="/notifications" element={<Notifications />} />
+              {/* Team leaders and admins: tasks, attendance, leave and posts waiting for review */}
+              <Route path="/approvals" element={<Approvals />} />
             </Route>
 
             <Route element={<RequireAuth admin />}>
               <Route path="/admin" element={<AdminDashboard />} />
               <Route path="/admin/attendance" element={<AttendanceAdmin />} />
               <Route path="/admin/userview" element={<Userview />} />
-              <Route path="/admin/users" element={<Userview />} />
+              <Route path="/admin/users" element={<AdminPeople />} />
+              <Route path="/admin/users/:id" element={<AdminPerson />} />
+              <Route path="/admin/audit" element={<AuditLog />} />
+              <Route path="/admin/reports" element={<AdminReports />} />
               <Route path="/admin/messages" element={<ContactMessages />} />
               <Route path="/admin/teams" element={<TeamManagement />} />
               <Route path="/admin/moderation" element={<SocialHub />} />

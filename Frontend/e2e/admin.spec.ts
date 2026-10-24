@@ -63,6 +63,9 @@ test('a user checks in and the admin approves it', async ({ browser }) => {
   await user.getByRole('button', { name: 'Check In', exact: true }).click()
   await expect(user.getByText('Checked in successfully. Your attendance is pending approval.')).toBeVisible()
   await expect(user.getByRole('button', { name: '✓ Checked In' })).toBeDisabled()
+  // A day can be reviewed once it is over: the check-out comes first
+  await user.getByRole('button', { name: 'Check Out', exact: true }).click()
+  await expect(user.getByRole('button', { name: '✓ Checked Out' })).toBeDisabled()
 
   const admin = await signedInPage(browser, ADMIN)
   await admin.goto('/admin/attendance')

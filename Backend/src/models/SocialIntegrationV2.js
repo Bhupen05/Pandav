@@ -46,9 +46,18 @@ const socialIntegrationSchema = new mongoose.Schema({
     set: encryptSecret,
     get: decryptSecret,
   },
+  // When the access token stops working. An expired LinkedIn token is
+  // refreshed with refreshToken before use; any other expired token has to be
+  // linked again.
   tokenExpiresAt: {
     type: Date,
     default: null,
+  },
+  // Set when LinkedIn refused to refresh the token: the user has to link the
+  // account again. Linking clears it.
+  needsRelink: {
+    type: Boolean,
+    default: false,
   },
   accessTokenHint: {
     type: String,

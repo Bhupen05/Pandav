@@ -167,10 +167,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [userId, loading, markTeamMessagesAsRead]);
 
   const sendMessage = useCallback(async (receiverId: string, message: string) => {
-    const { data } = await api.post<Message>('/chat/send', { receiverId, message });
+    const { data } = await api.post<{ data: Message }>('/chat/send', { receiverId, message });
     // The receiver gets it over the socket; add the sender's own copy here
     if (receiverId === openChatUserIdRef.current) {
-      setMessages((prev) => mergeMessages(prev, data));
+      setMessages((prev) => mergeMessages(prev, data.data));
     }
   }, []);
 
@@ -261,6 +261,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setHasMoreMessages(false);
   }, []);
 
+  // Everything unread, for the badge in the navigation
+  const totalUnread = Object.values(unreadCounts).reduce((sum, count) => sum + count, 0);
+
   return (
     <ChatContext.Provider
       value={{
@@ -269,6 +272,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         activeUsers,
         loadingMessages,
         unreadCounts,
+        totalUnread,
         typingUsers,
         clearUnread,
         sendMessage,

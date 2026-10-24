@@ -6,17 +6,25 @@ import PersonalTask from '../models/PersonalTaskV2.js';
 import SocialIntegration from '../models/SocialIntegrationV2.js';
 import SocialPublishJobV2 from '../models/SocialPublishJobV2.js';
 import Chat from '../models/Chat.js';
+import Team from '../models/Team.js';
 import User from '../models/User.js';
-import { isGithubRepo } from '../middleware/validateV2.js';
+import { EDITABLE_POST_FIELDS, GITHUB_REPO_REQUIRED, isGithubRepo } from '../middleware/validateV2.js';
+import { keepRateLimitSlot } from '../middleware/rateLimitV2.js';
 import { logAuditEventV2 } from '../utils/auditLoggerV2.js';
-import { escapeRegex, sendServerError } from '../utils/http.js';
-import { directMessageProblem } from '../utils/messaging.js';
-import { canReviewFor, ledUserIds } from '../utils/teams.js';
+import { blockedUserIds, isBlockedBetween } from '../utils/blocks.js';
+import { escapeRegex, pick, sendServerError } from '../utils/http.js';
+import { contactsChanged, directMessageProblem } from '../utils/messaging.js';
+import { adminIds, notify } from '../utils/notify.js';
+import { canReviewFor, ledUserIds, teamUserIds } from '../utils/teams.js';
 
 const MAX_MESSAGE_LENGTH = 2000;
 // SocialPostV2 content limit
 const MAX_POST_CONTENT_LENGTH = 5000;
 const FEED_PAGE_SIZE = 50;
+const DISCOVER_LIMIT = 20;
+const SUGGESTION_LIMIT = 10;
+// A declined connection request can be sent again after this long
+const REQUEST_AGAIN_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
 
 // Only what a conversation needs about each participant (as in chatController)
 const participants = [
@@ -24,10 +32,78 @@ const participants = [
   { path: 'receiver', select: 'name' },
 ];
 
-const LINKEDIN_API_BASE = process.env.LINKEDIN_API_BASE || 'https://api.linkedin.com';
-const GITHUB_API_BASE = process.env.GITHUB_API_BASE || 'https://api.github.com';
+// A post's author as the feed shows it. Posts by deleted accounts populate as
+// null and are left out.
+const authorPopulate = { path: 'author', select: 'name role profileImage teamId', match: { deletedAt: null } };
+const sourceTaskPopulate = { path: 'sourceTask', select: 'title status completedAt' };
+const commenterPopulate = { path: 'comments.user', select: 'name profileImage' };
 
+const idOf = (ref) => String(ref?._id ?? ref);
 const toIso = (value) => (value ? new Date(value).toISOString() : null);
+const postLink = (postId) => `/social?post=${postId}`;
+const snippet = (text, length = 140) => {
+  const flat = String(text || '').replace(/\s+/g, ' ').trim();
+  return flat.length > length ? `${flat.slice(0, length - 1)}…` : flat;
+};
+
+// notify() with the text cut to what a notification holds (title 200, body
+// 1000 characters; models/Notification.js). Longer text would be refused, and
+// notify() swallows the error, so the notification and its email would be lost.
+const NOTICE_TITLE_MAX = 200;
+const NOTICE_BODY_MAX = 1000;
+const clip = (text, length) => (text.length > length ? `${text.slice(0, length - 1)}…` : text);
+const tell = (req, recipients, notice) =>
+  notify(req, recipients, {
+    ...notice,
+    title: clip(String(notice.title).trim(), NOTICE_TITLE_MAX),
+    ...(notice.body ? { body: clip(String(notice.body).trim(), NOTICE_BODY_MAX) } : {}),
+  });
+
+// Dates in messages, as people read them, in the app's timezone
+const timezone = () => process.env.APP_TIMEZONE || 'Asia/Kolkata';
+const formatWhen = (date) =>
+  new Intl.DateTimeFormat('en-GB', { timeZone: timezone(), dateStyle: 'medium', timeStyle: 'short' }).format(date);
+const formatDay = (date) =>
+  new Intl.DateTimeFormat('en-GB', { timeZone: timezone(), dateStyle: 'long' }).format(date);
+
+const targetNames = (targets) =>
+  EXTERNAL_PROVIDERS.filter((provider) => targets?.[provider]).map(providerName).join(' and ');
+
+// ---------- LinkedIn and GitHub ----------
+//
+// Everything that talks to the two providers (profiles, activity, OAuth,
+// token refresh), publishing a post to them, and running publish jobs. The
+// social-publish background job (jobs/socialJobs.js) uses publishDueJobs.
+
+const EXTERNAL_PROVIDERS = ['linkedin', 'github'];
+const PROVIDER_NAMES = { linkedin: 'LinkedIn', github: 'GitHub', pandav: 'Pandav' };
+const providerName = (provider) => PROVIDER_NAMES[provider] || provider;
+
+// Read when used, not at import: dotenv loads after imports are evaluated.
+// The tests point these at a fake provider.
+const linkedinApiBase = () => process.env.LINKEDIN_API_BASE || 'https://api.linkedin.com';
+const githubApiBase = () => process.env.GITHUB_API_BASE || 'https://api.github.com';
+const linkedinOAuthBase = () => process.env.LINKEDIN_OAUTH_BASE || 'https://www.linkedin.com';
+const githubOAuthBase = () => process.env.GITHUB_OAUTH_BASE || 'https://github.com';
+
+// A call to LinkedIn or GitHub that didn't work. `status` is what to answer
+// the client (502: the provider failed us), `providerStatus` the provider's
+// own HTTP status when it answered at all, and `detail` its own message.
+class ProviderError extends Error {
+  constructor(message, { status = 502, providerStatus = null, detail = null } = {}) {
+    super(message);
+    this.name = 'ProviderError';
+    this.status = status;
+    this.providerStatus = providerStatus;
+    this.detail = detail || message;
+  }
+
+  // The provider answered and said no (a bad or expired token or code), as
+  // opposed to being unreachable or failing on its side
+  get refused() {
+    return this.providerStatus >= 400 && this.providerStatus < 500;
+  }
+}
 
 const safeJson = async (response) => {
   try {
@@ -37,23 +113,43 @@ const safeJson = async (response) => {
   }
 };
 
-const providerHeaders = (token, extra = {}) => ({
-  Authorization: `Bearer ${token}`,
-  Accept: 'application/json',
-  ...extra,
-});
+// How long a provider gets to answer. It keeps a publish well inside the
+// 10-minute claims below: a claim that old really was left behind.
+const PROVIDER_TIMEOUT_MS = 30 * 1000;
 
-const fetchGithubProfile = async (token) => {
-  const response = await fetch(`${GITHUB_API_BASE}/user`, {
-    method: 'GET',
-    headers: providerHeaders(token),
-  });
-
-  const data = await safeJson(response);
-  if (!response.ok) {
-    throw new Error(data?.message || 'Unable to verify GitHub token');
+// Calls a provider and returns its JSON body (and the response), or throws a
+// ProviderError a user can read
+const providerCall = async (provider, url, { method = 'GET', token, headers = {}, body } = {}, fallback = 'no reason given') => {
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: { Accept: 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers },
+      body,
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (error?.name === 'TimeoutError') {
+      throw new ProviderError(`${providerName(provider)} didn't answer in time. Try again in a moment.`);
+    }
+    throw new ProviderError(`Couldn't reach ${providerName(provider)}. Try again in a moment.`);
   }
 
+  const data = await safeJson(response);
+  // GitHub's OAuth endpoint answers 200 with an `error` field
+  if (!response.ok || data?.error) {
+    const detail = data?.error_description || data?.message || (typeof data?.error === 'string' ? data.error : null) || fallback;
+    const providerStatus = response.ok ? 400 : response.status;
+    const what = providerStatus >= 500 ? 'had a problem' : 'refused the request';
+    throw new ProviderError(`${providerName(provider)} ${what}: ${detail}`, { providerStatus, detail });
+  }
+  return { data, response };
+};
+
+// ---------- LinkedIn and GitHub: profiles and activity ----------
+
+const fetchGithubProfile = async (token) => {
+  const { data } = await providerCall('github', `${githubApiBase()}/user`, { token }, 'Unable to verify GitHub token');
   return {
     providerUserId: String(data.id),
     accountHandle: data.login,
@@ -66,13 +162,8 @@ const fetchGithubProfile = async (token) => {
 };
 
 const fetchLinkedInProfile = async (token) => {
-  const userInfoResponse = await fetch(`${LINKEDIN_API_BASE}/v2/userinfo`, {
-    method: 'GET',
-    headers: providerHeaders(token),
-  });
-
-  if (userInfoResponse.ok) {
-    const data = await safeJson(userInfoResponse);
+  try {
+    const { data } = await providerCall('linkedin', `${linkedinApiBase()}/v2/userinfo`, { token });
     return {
       providerUserId: String(data?.sub || ''),
       accountHandle: data?.name || data?.email || String(data?.sub || ''),
@@ -82,155 +173,528 @@ const fetchLinkedInProfile = async (token) => {
         picture: data?.picture || null,
       },
     };
+  } catch (error) {
+    // Unreachable: the older endpoint won't do better
+    if (!error.providerStatus) throw error;
   }
 
-  const meResponse = await fetch(`${LINKEDIN_API_BASE}/v2/me`, {
-    method: 'GET',
-    headers: providerHeaders(token),
-  });
-
-  const meData = await safeJson(meResponse);
-  if (!meResponse.ok) {
-    throw new Error(meData?.message || 'Unable to verify LinkedIn token');
-  }
-
-  const localizedFirstName = meData?.localizedFirstName || '';
-  const localizedLastName = meData?.localizedLastName || '';
-
+  // Apps without OpenID Connect only have the older profile endpoint
+  const { data } = await providerCall('linkedin', `${linkedinApiBase()}/v2/me`, { token }, 'Unable to verify LinkedIn token');
+  const first = data?.localizedFirstName || '';
+  const last = data?.localizedLastName || '';
   return {
-    providerUserId: String(meData.id),
-    accountHandle: `${localizedFirstName} ${localizedLastName}`.trim() || String(meData.id),
+    providerUserId: String(data.id),
+    accountHandle: `${first} ${last}`.trim() || String(data.id),
     metadata: {
-      localizedFirstName: meData?.localizedFirstName || null,
-      localizedLastName: meData?.localizedLastName || null,
+      localizedFirstName: data?.localizedFirstName || null,
+      localizedLastName: data?.localizedLastName || null,
     },
   };
 };
 
-const fetchLinkedInPosts = async (token, providerUserId) => {
-  const ownerUrn = `urn:li:person:${providerUserId}`;
-  const url = `${LINKEDIN_API_BASE}/v2/shares?q=owners&owners=${encodeURIComponent(ownerUrn)}&count=20`;
+const fetchProfile = (provider, token) =>
+  (provider === 'linkedin' ? fetchLinkedInProfile(token) : fetchGithubProfile(token));
 
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: providerHeaders(token, { 'X-Restli-Protocol-Version': '2.0.0' }),
-  });
-
-  const data = await safeJson(response);
-  if (!response.ok) {
-    throw new Error(data?.message || 'Unable to fetch LinkedIn posts');
+// Recent activity as the provider sends it: the member's latest LinkedIn
+// shares, or the account's latest public GitHub events
+const fetchActivity = async (integration, token) => {
+  if (integration.provider === 'linkedin') {
+    const owner = encodeURIComponent(`urn:li:person:${integration.providerUserId}`);
+    const { data } = await providerCall('linkedin', `${linkedinApiBase()}/v2/shares?q=owners&owners=${owner}&count=20`, {
+      token,
+      headers: { 'X-Restli-Protocol-Version': '2.0.0' },
+    }, 'Unable to fetch LinkedIn posts');
+    return data?.elements || [];
   }
 
-  return data?.elements || [];
-};
-
-const fetchGithubPosts = async (token, accountHandle) => {
-  const url = `${GITHUB_API_BASE}/users/${encodeURIComponent(accountHandle)}/events/public?per_page=20`;
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: providerHeaders(token),
-  });
-
-  const data = await safeJson(response);
-  if (!response.ok) {
-    throw new Error(data?.message || 'Unable to fetch GitHub activity');
-  }
-
+  const { data } = await providerCall('github',
+    `${githubApiBase()}/users/${encodeURIComponent(integration.accountHandle)}/events/public?per_page=20`,
+    { token }, 'Unable to fetch GitHub activity');
   return Array.isArray(data) ? data : [];
 };
 
-const publishToLinkedIn = async (integration, text) => {
-  const ownerUrn = `urn:li:person:${integration.providerUserId}`;
-  const body = {
-    author: ownerUrn,
-    lifecycleState: 'PUBLISHED',
-    specificContent: {
-      'com.linkedin.ugc.ShareContent': {
-        shareCommentary: { text },
-        shareMediaCategory: 'NONE',
-      },
-    },
-    visibility: {
-      'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC',
-    },
-  };
+// ---------- LinkedIn and GitHub: OAuth ----------
 
-  const response = await fetch(`${LINKEDIN_API_BASE}/v2/ugcPosts`, {
-    method: 'POST',
-    headers: providerHeaders(integration.accessToken, {
-      'Content-Type': 'application/json',
-      'X-Restli-Protocol-Version': '2.0.0',
-    }),
-    body: JSON.stringify(body),
-  });
-
-  const data = await safeJson(response);
-  if (!response.ok) {
-    throw new Error(data?.message || 'LinkedIn publish failed');
+const oauthConfig = (provider) => {
+  if (provider === 'github') {
+    return {
+      clientId: process.env.GITHUB_CLIENT_ID,
+      clientSecret: process.env.GITHUB_CLIENT_SECRET,
+      redirectUri: process.env.GITHUB_REDIRECT_URI,
+      authUrl: `${githubOAuthBase()}/login/oauth/authorize`,
+      tokenUrl: `${githubOAuthBase()}/login/oauth/access_token`,
+      scope: process.env.GITHUB_OAUTH_SCOPE || 'read:user user:email public_repo',
+    };
   }
 
-  const externalId = data?.id || response.headers.get('x-restli-id') || null;
-  return { externalId, raw: data };
+  return {
+    clientId: process.env.LINKEDIN_CLIENT_ID,
+    clientSecret: process.env.LINKEDIN_CLIENT_SECRET,
+    redirectUri: process.env.LINKEDIN_REDIRECT_URI,
+    authUrl: `${linkedinOAuthBase()}/oauth/v2/authorization`,
+    tokenUrl: `${linkedinOAuthBase()}/oauth/v2/accessToken`,
+    scope: process.env.LINKEDIN_OAUTH_SCOPE || 'openid profile email w_member_social',
+  };
 };
 
-const publishToGithub = async (integration, post, githubRepo) => {
-  const targetRepo = githubRepo || process.env.GITHUB_DEFAULT_REPO;
-  if (!targetRepo) {
-    throw new Error('githubRepo is required (owner/repo) or set GITHUB_DEFAULT_REPO');
-  }
-  // It becomes part of the API path: never let it reach another GitHub endpoint
-  if (!isGithubRepo(targetRepo)) {
-    throw new Error('githubRepo must look like owner/repo');
-  }
+const oauthConfigured = (cfg) => Boolean(cfg.clientId && cfg.clientSecret && cfg.redirectUri);
 
-  const body = {
-    title: post.title || `Pandav update by ${post.author.name}`,
-    body: post.content,
-  };
-
-  const response = await fetch(`${GITHUB_API_BASE}/repos/${targetRepo}/issues`, {
+const linkedInTokenRequest = (cfg, params) =>
+  providerCall('linkedin', cfg.tokenUrl, {
     method: 'POST',
-    headers: providerHeaders(integration.accessToken, { 'Content-Type': 'application/json' }),
-    body: JSON.stringify(body),
-  });
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ ...params, client_id: cfg.clientId, client_secret: cfg.clientSecret }).toString(),
+  }, 'LinkedIn OAuth token exchange failed');
 
-  const data = await safeJson(response);
-  if (!response.ok) {
-    throw new Error(data?.message || 'GitHub publish failed');
+// Swaps the code from the provider's redirect for a token:
+// { accessToken, refreshToken, expiresIn (seconds), scope }
+const exchangeOAuthCode = async (provider, code, cfg) => {
+  let tokenData;
+  if (provider === 'github') {
+    const { data } = await providerCall('github', cfg.tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: cfg.clientId, client_secret: cfg.clientSecret, code, redirect_uri: cfg.redirectUri }),
+    }, 'GitHub OAuth token exchange failed');
+    tokenData = {
+      accessToken: data.access_token,
+      refreshToken: null,
+      expiresIn: null,
+      scope: data.scope ? String(data.scope).split(',').filter(Boolean) : [],
+    };
+  } else {
+    const { data } = await linkedInTokenRequest(cfg, { grant_type: 'authorization_code', code, redirect_uri: cfg.redirectUri });
+    tokenData = {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token || null,
+      expiresIn: data.expires_in || null,
+      scope: cfg.scope ? String(cfg.scope).split(' ').filter(Boolean) : [],
+    };
   }
 
+  if (!tokenData.accessToken) {
+    throw new ProviderError(`${providerName(provider)} sent no access token`);
+  }
+  return tokenData;
+};
+
+// A new LinkedIn access token from a refresh token. Throws a ProviderError
+// that counts as refused when LinkedIn says no or this server can't ask.
+const refreshLinkedInToken = async (refreshToken) => {
+  const cfg = oauthConfig('linkedin');
+  if (!cfg.clientId || !cfg.clientSecret) {
+    throw new ProviderError("LinkedIn isn't set up on this server", { status: 400, providerStatus: 400 });
+  }
+  const { data } = await linkedInTokenRequest(cfg, { grant_type: 'refresh_token', refresh_token: refreshToken });
+  if (!data.access_token) {
+    throw new ProviderError('LinkedIn sent no access token', { providerStatus: 400 });
+  }
+  return { accessToken: data.access_token, refreshToken: data.refresh_token || null, expiresIn: data.expires_in || null };
+};
+
+// ---------- LinkedIn and GitHub: linked account tokens ----------
+
+const isExpired = (integration, now) => Boolean(integration.tokenExpiresAt) && integration.tokenExpiresAt <= now;
+
+// The token to call the provider with for a linked account (loaded with
+// +accessToken +refreshToken), as { token }, or { problem } saying why there
+// is none:
+//   not_linked   nothing is linked
+//   relink       the token can't be read (JWT_SECRET changed), or it expired
+//                and couldn't be refreshed: the user has to link again
+//   unreachable  LinkedIn couldn't be reached to refresh it (`error` says so)
+// An expired LinkedIn token is refreshed first when there is a refresh token.
+// When LinkedIn refuses, the account is marked as needing to be linked again,
+// and that refresh token isn't sent again (each try is a call with this
+// server's client secret) until the account is linked again.
+const accessTokenFor = async (integration, now = new Date()) => {
+  if (!integration || !integration.isConnected) return { problem: 'not_linked' };
+  const token = integration.accessToken;
+  if (!token) return { problem: 'relink' };
+  if (!isExpired(integration, now)) return { token };
+  if (integration.needsRelink) return { problem: 'relink' };
+
+  const refreshToken = integration.provider === 'linkedin' ? integration.refreshToken : null;
+  if (!refreshToken) return { problem: 'relink' };
+
+  try {
+    const fresh = await refreshLinkedInToken(refreshToken);
+    integration.accessToken = fresh.accessToken;
+    if (fresh.refreshToken) integration.refreshToken = fresh.refreshToken;
+    integration.tokenExpiresAt = fresh.expiresIn ? new Date(now.getTime() + Number(fresh.expiresIn) * 1000) : null;
+    integration.needsRelink = false;
+    await integration.save();
+    return { token: fresh.accessToken };
+  } catch (error) {
+    if (!(error instanceof ProviderError)) throw error;
+    // LinkedIn being down says nothing about the link itself
+    if (!error.refused) return { problem: 'unreachable', error };
+    await SocialIntegration.updateOne({ _id: integration._id }, { $set: { needsRelink: true } });
+    integration.needsRelink = true;
+    return { problem: 'relink' };
+  }
+};
+
+// A linked account as the owner sees it (loaded with +accessToken
+// +refreshToken), without its tokens. isConnected only while the stored token
+// can be read; needsRelink when the user has to link it again.
+const describeIntegration = (integration, now = new Date()) => {
+  const readable = Boolean(integration.accessToken);
+  const canRefresh = integration.provider === 'linkedin' && Boolean(integration.refreshToken);
+  const data = integration.toObject();
+  delete data.accessToken;
+  delete data.refreshToken;
+  return {
+    ...data,
+    isConnected: Boolean(integration.isConnected) && readable,
+    needsRelink: Boolean(integration.needsRelink) || !readable || (isExpired(integration, now) && !canRefresh),
+    tokenExpiresAt: integration.tokenExpiresAt || null,
+  };
+};
+
+// ---------- LinkedIn and GitHub: publishing a post ----------
+
+// Hidden and removed posts never leave Pandav
+const isPublishable = (post) => !['hidden', 'removed'].includes(post.moderationStatus);
+
+// Posts by users and team members for LinkedIn or GitHub wait for a leader's
+// or an admin's approval
+const needsExternalApproval = (role, targets) =>
+  Boolean(targets?.linkedin || targets?.github) && (role === 'team_member' || role === 'user');
+
+const PUBLISH_LOCK_MS = 10 * 60 * 1000;
+
+// Claims one external target of a post for publishing, so two requests (or a
+// request and a job) never publish the post to the same place twice. Returns
+// 'claimed', or why not: 'published' (it already is) or 'busy' (something is
+// publishing it there right now). publishTarget releases the claim.
+const claimTarget = async (postId, provider, now = new Date()) => {
+  const path = `publishResults.${provider}`;
+  const claimed = await SocialPost.findOneAndUpdate(
+    {
+      _id: postId,
+      [`${path}.status`]: { $ne: 'published' },
+      // A claim left behind by a crash expires
+      $or: [
+        { [`${path}.publishingAt`]: null },
+        { [`${path}.publishingAt`]: { $lt: new Date(now.getTime() - PUBLISH_LOCK_MS) } },
+      ],
+    },
+    { $set: { [`${path}.publishingAt`]: now } },
+    { projection: { _id: 1 } },
+  );
+  if (claimed) return 'claimed';
+
+  const post = await SocialPost.findById(postId).select(path).lean();
+  return post?.publishResults?.[provider]?.status === 'published' ? 'published' : 'busy';
+};
+
+const releaseTarget = (postId, provider) =>
+  SocialPost.updateOne({ _id: postId }, { $set: { [`publishResults.${provider}.publishingAt`]: null } });
+
+// The personal task a shared post came from follows it
+const markTaskPublished = async (post, message) => {
+  if (!post.sourceTask) return;
+  await PersonalTask.updateOne(
+    { _id: post.sourceTask._id ?? post.sourceTask, lastAutoGeneratedPost: post._id },
+    { $set: { autoPostStatus: 'published', autoPostMessage: message } },
+  );
+};
+
+const publishToLinkedIn = async (integration, token, text) => {
+  const { data, response } = await providerCall('linkedin', `${linkedinApiBase()}/v2/ugcPosts`, {
+    method: 'POST',
+    token,
+    headers: { 'Content-Type': 'application/json', 'X-Restli-Protocol-Version': '2.0.0' },
+    body: JSON.stringify({
+      author: `urn:li:person:${integration.providerUserId}`,
+      lifecycleState: 'PUBLISHED',
+      specificContent: {
+        'com.linkedin.ugc.ShareContent': {
+          shareCommentary: { text },
+          shareMediaCategory: 'NONE',
+        },
+      },
+      visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' },
+    }),
+  }, 'LinkedIn publish failed');
+  return { externalId: data?.id || response.headers.get('x-restli-id') || null, raw: data };
+};
+
+const publishToGithub = async (token, post, githubRepo) => {
+  const targetRepo = githubRepo || process.env.GITHUB_DEFAULT_REPO;
+  if (!targetRepo) throw new Error(GITHUB_REPO_REQUIRED);
+  // It becomes part of the API path: never let it reach another GitHub endpoint
+  if (!isGithubRepo(targetRepo)) throw new Error('githubRepo must look like owner/repo');
+
+  const { data } = await providerCall('github', `${githubApiBase()}/repos/${targetRepo}/issues`, {
+    method: 'POST',
+    token,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: post.title || `Pandav update by ${post.author.name}`, body: post.content }),
+  }, 'GitHub publish failed');
   return { externalId: data?.html_url || data?.id || null, raw: data };
 };
 
-const needsExternalApproval = (role, targets) => {
-  const hasExternal = Boolean(targets.linkedin || targets.github);
-  if (!hasExternal) return false;
-  return role === 'team_member' || role === 'user';
+// Publishes a post (with `author` populated) to one external target with the
+// author's linked account, and stores the outcome in publishResults (which
+// also releases a claim from claimTarget). Never throws for a failed
+// publish: returns { status: 'published' | 'failed', message, externalId, raw }.
+// publishedAt is when the provider accepted it.
+const publishTarget = async (post, provider, { githubRepo = null } = {}) => {
+  const name = providerName(provider);
+  let entry;
+  let raw = null;
+  try {
+    const integration = await SocialIntegration.findOne({ user: post.author._id, provider }).select('+accessToken +refreshToken');
+    const { token, problem, error } = await accessTokenFor(integration);
+    if (problem === 'not_linked') throw new Error(`The author hasn't linked a ${name} account`);
+    if (problem === 'relink') throw new Error(`The author's ${name} account has to be linked again`);
+    if (problem) throw error;
+
+    const published = provider === 'linkedin'
+      ? await publishToLinkedIn(integration, token, post.content)
+      : await publishToGithub(token, post, githubRepo);
+    raw = published.raw;
+    entry = {
+      status: 'published',
+      externalId: published.externalId ? String(published.externalId) : null,
+      message: `Published to ${name}`,
+      publishedAt: new Date(),
+      publishingAt: null,
+    };
+  } catch (error) {
+    entry = { status: 'failed', externalId: null, message: error.message, publishedAt: null, publishingAt: null };
+  }
+
+  await SocialPost.updateOne({ _id: post._id }, { $set: { [`publishResults.${provider}`]: entry } });
+  post.set(`publishResults.${provider}`, entry);
+  if (entry.status === 'published') await markTaskPublished(post, entry.message);
+  return { status: entry.status, message: entry.message, externalId: entry.externalId, raw };
 };
+
+// Publishes a post to each of `targets` now; returns the outcome per target
+// ({ status: 'none' | 'published' | 'failed', message, externalId? }).
+// External targets must have been claimed (claimTarget), unless the post is
+// brand new.
+const executePublishForPost = async (post, targets = {}, { githubRepo = null } = {}) => {
+  const result = {
+    pandav: { status: 'none', message: null },
+    linkedin: { status: 'none', message: null },
+    github: { status: 'none', message: null },
+  };
+
+  if (targets.pandav) {
+    // Nothing to send: the post is in the feed already
+    const entry = { status: 'published', message: 'Post is available in Pandav feed', publishedAt: new Date() };
+    await SocialPost.updateOne({ _id: post._id }, { $set: { 'publishResults.pandav': entry } });
+    post.set('publishResults.pandav', entry);
+    result.pandav = { status: entry.status, message: entry.message };
+  }
+
+  for (const provider of EXTERNAL_PROVIDERS) {
+    if (!targets[provider]) continue;
+    const outcome = await publishTarget(post, provider, { githubRepo });
+    result[provider] = outcome.status === 'published'
+      ? { status: 'published', externalId: outcome.externalId, message: outcome.message }
+      : { status: 'failed', message: outcome.message };
+  }
+
+  return result;
+};
+
+// ---------- LinkedIn and GitHub: running publish jobs ----------
+
+// A run that stopped part-way (the server restarted) is picked up again
+// after this long
+const STUCK_AFTER_MS = 10 * 60 * 1000;
+const backoffMs = (attempts) => Math.min(2 ** attempts, 60) * 60 * 1000;
+
+// Tells whoever the job is for (the author) and whoever queued it that it
+// won't publish without a retry
+const notifyPublishFailed = (req, job) =>
+  tell(req, [job.owner, job.queuedBy], {
+    type: 'publish_failed',
+    title: `Publishing to ${providerName(job.provider)} failed`,
+    body: `${String(job.lastError || 'It failed').replace(/\.$/, '')}. You can retry it on the Publish jobs page.`,
+    link: '/publish-jobs',
+    data: { jobId: String(job._id), postId: String(job.post?._id ?? job.post), provider: job.provider },
+    email: true,
+  });
+
+const finishJob = async (job, fields, { req, notifyFailure = false } = {}) => {
+  job.set({ lockedAt: null, ...fields });
+  await job.save();
+  if (notifyFailure) await notifyPublishFailed(req, job);
+  return job;
+};
+
+// Runs one queued publish job. It is claimed first (queued → processing in
+// one atomic update), so two runs can never publish the same job twice.
+// `claimed: false` means it wasn't queued (another run has it, or it's done
+// or failed). `req` is the request that ran it (null in the background job).
+// Every time it records (the claim, the post's publishingAt, completedAt,
+// the next retry) is read from the clock when it happens, never the time a
+// queue pass started: a pass runs its jobs one after another, and a lock
+// stamped with an earlier time would look stale while the job still runs.
+const runPublishJob = async (jobId, { req = null } = {}) => {
+  const claimedAt = new Date();
+  const job = await SocialPublishJobV2.findOneAndUpdate(
+    { _id: jobId, status: 'queued' },
+    { $set: { status: 'processing', startedAt: claimedAt, lockedAt: claimedAt }, $inc: { attempts: 1 } },
+    { new: true },
+  );
+  if (!job) {
+    return { success: false, claimed: false, error: 'This job is already being processed or is no longer queued' };
+  }
+
+  // Things a retry can't fix: the job fails at once
+  const fail = async (reason) => {
+    await finishJob(job, { status: 'failed', lastError: reason, completedAt: new Date(), nextRetryAt: null }, { req, notifyFailure: true });
+    return { success: false, error: reason, job };
+  };
+
+  const post = await SocialPost.findById(job.post).populate('author', 'name role teamId');
+  if (!post || !post.author) return fail('The post no longer exists');
+  if (post.approvalStatus === 'pending') return fail('The post is waiting for approval');
+  if (post.approvalStatus === 'rejected') return fail('The post was not approved');
+  if (!isPublishable(post)) return fail(`The post is ${post.moderationStatus}`);
+
+  const claim = await claimTarget(post._id, job.provider);
+  if (claim === 'published') {
+    // Published another way since it was queued (directly, or by another job)
+    await finishJob(job, {
+      status: 'completed',
+      lastError: null,
+      completedAt: new Date(),
+      result: { externalId: post.publishResults?.[job.provider]?.externalId || null, alreadyPublished: true },
+    });
+    return { success: true, job };
+  }
+  if (claim === 'busy') {
+    // Being published there right now: look again shortly, without using up an attempt
+    await finishJob(job, {
+      status: 'queued',
+      attempts: Math.max(0, job.attempts - 1),
+      nextRetryAt: new Date(Date.now() + 60 * 1000),
+      lastError: `The post is being published to ${providerName(job.provider)} right now`,
+    });
+    return { success: false, error: job.lastError, job };
+  }
+
+  const outcome = await publishTarget(post, job.provider, { githubRepo: job.payload?.githubRepo || null });
+  const finishedAt = new Date();
+  if (outcome.status === 'published') {
+    await finishJob(job, {
+      status: 'completed',
+      lastError: null,
+      completedAt: finishedAt,
+      result: { externalId: outcome.externalId, raw: outcome.raw },
+    });
+    return { success: true, job };
+  }
+
+  const outOfAttempts = job.attempts >= job.maxAttempts;
+  await finishJob(job, {
+    status: outOfAttempts ? 'failed' : 'queued',
+    lastError: outcome.message,
+    nextRetryAt: outOfAttempts ? null : new Date(finishedAt.getTime() + backoffMs(job.attempts)),
+    completedAt: outOfAttempts ? finishedAt : null,
+  }, { req, notifyFailure: outOfAttempts });
+  return { success: false, error: outcome.message, job };
+};
+
+// Jobs left in 'processing' for over 10 minutes (their run stopped part-way)
+// go back in the queue with the usual backoff, or fail when their attempts
+// are used up
+const recoverStuckJobs = async (now = new Date(), req = null) => {
+  const cutoff = new Date(now.getTime() - STUCK_AFTER_MS);
+  const stuck = await SocialPublishJobV2.find({
+    status: 'processing',
+    // Jobs from before lockedAt existed have only startedAt
+    $or: [{ lockedAt: { $lt: cutoff } }, { lockedAt: null, startedAt: { $lt: cutoff } }],
+  });
+
+  const recovered = { requeued: 0, failed: 0 };
+  for (const job of stuck) {
+    const outOfAttempts = job.attempts >= job.maxAttempts;
+    const update = outOfAttempts
+      ? { status: 'failed', lastError: 'Publishing stopped part-way and no attempts are left', completedAt: now, nextRetryAt: null, lockedAt: null }
+      : { status: 'queued', lastError: 'Publishing stopped part-way; it will try again', nextRetryAt: new Date(now.getTime() + backoffMs(job.attempts)), lockedAt: null };
+    // Unless the run finished meanwhile
+    const changed = await SocialPublishJobV2.findOneAndUpdate(
+      { _id: job._id, status: 'processing', lockedAt: job.lockedAt },
+      { $set: update },
+      { new: true },
+    );
+    if (!changed) continue;
+    if (outOfAttempts) {
+      recovered.failed += 1;
+      await notifyPublishFailed(req, changed);
+    } else {
+      recovered.requeued += 1;
+    }
+  }
+  return recovered;
+};
+
+// One pass of the publishing queue: recover stuck jobs, then run up to
+// `limit` queued jobs that are due, oldest first, one after another. `now`
+// (the pass's time, which an admin may set outside production) only decides
+// which jobs are stuck and which are due; each job records its own times.
+export const publishDueJobs = async (now = new Date(), limit = 20, req = null) => {
+  const recovered = await recoverStuckJobs(now, req);
+  const due = await SocialPublishJobV2.find({ status: 'queued', nextRetryAt: { $lte: now } })
+    .sort({ nextRetryAt: 1 })
+    .limit(limit)
+    .select('_id');
+
+  const outcomes = [];
+  for (const { _id } of due) {
+    const run = await runPublishJob(_id, { req });
+    // Another run took it first
+    if (run.claimed === false) continue;
+    outcomes.push({ jobId: _id, success: run.success, status: run.job.status, error: run.error || null });
+  }
+  return { recovered, outcomes };
+};
+
+// Answers for a ProviderError (LinkedIn or GitHub failed us), and for a
+// linked account whose token can't be used
+const sendProviderError = (res, error) =>
+  (error instanceof ProviderError
+    ? res.status(error.status).json({ success: false, message: error.message })
+    : sendServerError(res, error));
+
+const sendTokenProblem = (res, provider, { problem, error }) => {
+  if (problem === 'unreachable') return sendProviderError(res, error);
+  if (problem === 'not_linked') {
+    return res.status(404).json({ success: false, message: `${providerName(provider)} account is not linked` });
+  }
+  return res.status(409).json({
+    success: false,
+    message: `Your ${providerName(provider)} sign-in has expired or can no longer be read. Link the account again.`,
+  });
+};
+
+// ---------- Who sees and may act on a post ----------
 
 const canUserViewPost = async (post, currentUser) => {
   // Left behind by a deleted account
-  if (!post.author) {
-    return currentUser.role === 'admin';
-  }
+  if (!post.author) return currentUser.role === 'admin';
+  if (currentUser.role === 'admin') return true;
+  if (post.moderationStatus === 'removed') return false;
 
-  if (post.moderationStatus === 'removed') {
-    return currentUser.role === 'admin';
-  }
+  const authorId = idOf(post.author);
+  if (authorId === String(currentUser._id)) return true;
 
-  if (post.moderationStatus === 'hidden') {
-    const authorIdHidden = post.author._id ? post.author._id.toString() : post.author.toString();
-    const isOwnerHidden = authorIdHidden === currentUser.id.toString();
-    return isOwnerHidden || currentUser.role === 'admin';
-  }
+  // Only the author sees a post that is hidden, not meant for the Pandav
+  // feed, or waiting for (or refused) approval
+  if (post.moderationStatus === 'hidden') return false;
+  if (post.targets?.pandav === false) return false;
+  if (['pending', 'rejected'].includes(post.approvalStatus)) return false;
 
   if (post.visibility === 'public') return true;
-
-  const authorId = post.author._id ? post.author._id.toString() : post.author.toString();
-  const isOwner = authorId === currentUser.id.toString();
-  if (isOwner) return true;
-
-  if (currentUser.role === 'admin') return true;
 
   if (post.visibility === 'team') {
     const authorTeamId = post.author.teamId ? post.author.teamId.toString() : null;
@@ -239,14 +703,13 @@ const canUserViewPost = async (post, currentUser) => {
   }
 
   if (post.visibility === 'connections') {
-    const connection = await NetworkConnection.findOne({
+    return Boolean(await NetworkConnection.exists({
+      status: 'accepted',
       $or: [
-        { requester: authorId, recipient: currentUser._id, status: 'accepted' },
-        { requester: currentUser._id, recipient: authorId, status: 'accepted' },
+        { requester: authorId, recipient: currentUser._id },
+        { requester: currentUser._id, recipient: authorId },
       ],
-    }).lean();
-
-    return Boolean(connection);
+    }));
   }
 
   return false;
@@ -266,21 +729,22 @@ const feedFilter = async (user) => {
   ]);
   const connectedIds = connections.map((connection) =>
     (String(connection.requester) === String(user._id) ? connection.recipient : connection.requester));
-  const shown = { $ne: 'hidden' };
+  // What others may see of someone's posts
+  const shown = {
+    moderationStatus: { $nin: ['hidden', 'removed'] },
+    'targets.pandav': { $ne: false },
+    approvalStatus: { $nin: ['pending', 'rejected'] },
+  };
 
   return {
     moderationStatus: { $ne: 'removed' },
     $or: [
       { author: user._id },
-      { moderationStatus: shown, visibility: 'public' },
-      { moderationStatus: shown, visibility: 'team', author: { $in: teammateIds } },
-      { moderationStatus: shown, visibility: 'connections', author: { $in: connectedIds } },
+      { ...shown, visibility: 'public' },
+      { ...shown, visibility: 'team', author: { $in: teammateIds } },
+      { ...shown, visibility: 'connections', author: { $in: connectedIds } },
     ],
   };
-};
-
-const ensureAtLeastOneTarget = (targets = {}) => {
-  return Boolean(targets.pandav || targets.linkedin || targets.github);
 };
 
 // Who may publish a post or run its publish jobs: the author, an admin, or a
@@ -292,8 +756,63 @@ const canPublishFor = async (user, authorId) => {
   return (await ledUserIds(user._id, { activeOnly: true })).includes(String(authorId));
 };
 
-// Hidden and removed posts never leave Pandav
-const isPublishable = (post) => !['hidden', 'removed'].includes(post.moderationStatus);
+// What the current user may do with posts, worked out once per request
+const viewerContext = async (user) => ({
+  userId: String(user._id),
+  isAdmin: user.role === 'admin',
+  ledIds: new Set(user.role === 'team_leader' ? await ledUserIds(user._id, { activeOnly: true }) : []),
+});
+
+// The buttons a post should offer the current user. The same rules as the
+// endpoints: approve (admin, or the author's leader, never their own), publish
+// (author, admin, author's leader; while approved or not needing approval,
+// not hidden or removed, with somewhere outside Pandav left to publish),
+// edit (author) and delete (author or admin; a removed post admin only).
+const postActions = (post, ctx) => {
+  const authorId = post.author ? idOf(post.author) : null;
+  const isAuthor = authorId !== null && authorId === ctx.userId;
+  const leadsAuthor = authorId !== null && ctx.ledIds.has(authorId);
+  const live = post.moderationStatus !== 'removed';
+  const decided = !['pending', 'rejected'].includes(post.approvalStatus);
+  const leftToPublish = EXTERNAL_PROVIDERS.some((provider) =>
+    post.targets?.[provider] && post.publishResults?.[provider]?.status !== 'published');
+
+  return {
+    canApprove: authorId !== null && post.approvalStatus === 'pending' && live && !isAuthor && (ctx.isAdmin || leadsAuthor),
+    canPublish: authorId !== null && (isAuthor || ctx.isAdmin || leadsAuthor) && isPublishable(post) && decided && leftToPublish,
+    canEdit: isAuthor && live,
+    canDelete: ctx.isAdmin || (isAuthor && live),
+  };
+};
+
+const withViewer = (post, ctx) => ({ ...post.toObject(), viewer: postActions(post, ctx) });
+
+// A post loaded as the feed shows it
+const findPostForView = (postId) =>
+  SocialPost.findById(postId).populate(authorPopulate).populate(sourceTaskPopulate).populate(commenterPopulate);
+
+// Who is asked to approve an author's LinkedIn/GitHub post: the active
+// leaders of the author's team, unless it is frozen or has none; otherwise
+// the admins
+const approversFor = async (authorId) => {
+  const team = await Team.findOne({ isActive: true, $or: [{ leaders: authorId }, { members: authorId }] }).select('leaders');
+  if (team) {
+    const leaders = await User.find({ _id: { $in: team.leaders, $ne: authorId }, isActive: true, deletedAt: null }).distinct('_id');
+    if (leaders.length > 0) return leaders;
+  }
+  return adminIds();
+};
+
+const askForApproval = async (req, post) =>
+  tell(req, await approversFor(idOf(post.author)), {
+    type: 'post_approval_needed',
+    title: `${req.user.name} asks to share a post on ${targetNames(post.targets)}`,
+    body: post.title || snippet(post.content),
+    link: '/approvals',
+    data: { postId: String(post._id) },
+  });
+
+const ensureAtLeastOneTarget = (targets = {}) => Boolean(targets.pandav || targets.linkedin || targets.github);
 
 const TARGETS = ['pandav', 'linkedin', 'github'];
 
@@ -313,6 +832,12 @@ const refuseTargets = (res, refused) =>
     message: `This post was not created for ${refused.join(', ')}. Create a new post to share it there.`,
   });
 
+const alreadyPublished = (res, providers) =>
+  res.status(409).json({
+    success: false,
+    message: `This post has already been published to ${providers.map(providerName).join(' and ')}`,
+  });
+
 const buildTaskPostContent = (task, user, options = {}) => {
   const intro = options.intro || 'Task update';
   const lines = [
@@ -325,64 +850,6 @@ const buildTaskPostContent = (task, user, options = {}) => {
   ].filter(Boolean);
 
   return lines.join('\n');
-};
-
-const executePublishForPost = async (post, effectiveTargets = {}, githubRepo = null) => {
-  const result = {
-    pandav: { status: 'none', message: null },
-    linkedin: { status: 'none', message: null },
-    github: { status: 'none', message: null },
-  };
-
-  if (effectiveTargets.pandav) {
-    result.pandav = { status: 'published', message: 'Post is available in Pandav feed' };
-    post.publishResults.pandav = { status: 'published', message: 'Post is available in Pandav feed', publishedAt: new Date() };
-  }
-
-  if (effectiveTargets.linkedin) {
-    try {
-      const linkedInIntegration = await SocialIntegration.findOne({ user: post.author._id, provider: 'linkedin' }).select('+accessToken');
-      if (!linkedInIntegration || !linkedInIntegration.isConnected || !linkedInIntegration.accessToken) {
-        throw new Error('LinkedIn account not linked for post author');
-      }
-
-      const linkedInPublish = await publishToLinkedIn(linkedInIntegration, post.content);
-      result.linkedin = { status: 'published', externalId: linkedInPublish.externalId, message: 'Published to LinkedIn' };
-      post.publishResults.linkedin = {
-        status: 'published',
-        externalId: linkedInPublish.externalId,
-        message: 'Published to LinkedIn',
-        publishedAt: new Date(),
-      };
-    } catch (error) {
-      result.linkedin = { status: 'failed', message: error.message };
-      post.publishResults.linkedin = { status: 'failed', message: error.message, publishedAt: null, externalId: null };
-    }
-  }
-
-  if (effectiveTargets.github) {
-    try {
-      const githubIntegration = await SocialIntegration.findOne({ user: post.author._id, provider: 'github' }).select('+accessToken');
-      if (!githubIntegration || !githubIntegration.isConnected || !githubIntegration.accessToken) {
-        throw new Error('GitHub account not linked for post author');
-      }
-
-      const githubPublish = await publishToGithub(githubIntegration, post, githubRepo);
-      result.github = { status: 'published', externalId: githubPublish.externalId, message: 'Published to GitHub' };
-      post.publishResults.github = {
-        status: 'published',
-        externalId: githubPublish.externalId,
-        message: 'Published to GitHub',
-        publishedAt: new Date(),
-      };
-    } catch (error) {
-      result.github = { status: 'failed', message: error.message };
-      post.publishResults.github = { status: 'failed', message: error.message, publishedAt: null, externalId: null };
-    }
-  }
-
-  await post.save();
-  return result;
 };
 
 // What sharing a completed personal task would post, for its owner to review
@@ -411,6 +878,8 @@ const suggestTaskShare = async (task, user) => {
 
   return { suggested: true, draft: taskShareDraft(task, user) };
 };
+
+// ---------- Posts ----------
 
 export const createPost = async (req, res) => {
   try {
@@ -453,14 +922,16 @@ export const createPost = async (req, res) => {
       approvalStatus: needsExternalApproval(req.user.role, targets) ? 'pending' : 'none',
     });
 
-    const populatedPost = await SocialPost.findById(post._id).populate('author', 'name email role profileImage teamId');
+    if (post.approvalStatus === 'pending') await askForApproval(req, post);
+
     await logAuditEventV2(req, {
       action: 'social_post_created',
       targetType: 'SocialPostV2',
       targetId: post._id,
       details: { targets: post.targets, visibility: post.visibility },
     });
-    return res.status(201).json({ success: true, data: populatedPost });
+    const [populatedPost, ctx] = await Promise.all([findPostForView(post._id), viewerContext(req.user)]);
+    return res.status(201).json({ success: true, data: withViewer(populatedPost, ctx) });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -473,7 +944,7 @@ export const generatePostFromPersonalTask = async (req, res) => {
       targets = { pandav: true, linkedin: false, github: false },
       visibility = 'public',
       intro = 'Completed task',
-    } = req.body;
+    } = req.body || {};
 
     if (!ensureAtLeastOneTarget(targets)) {
       return res.status(400).json({ success: false, message: 'Select at least one target: pandav, linkedin, or github' });
@@ -488,14 +959,11 @@ export const generatePostFromPersonalTask = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Only completed personal tasks can be generated as posts' });
     }
 
-    const content = buildTaskPostContent(task, req.user, { intro });
-    const title = `Task completed: ${task.title}`;
-
     const post = await SocialPost.create({
       author: req.user._id,
       sourceTask: task._id,
-      title,
-      content,
+      title: `Task completed: ${task.title}`,
+      content: buildTaskPostContent(task, req.user, { intro: intro.trim() }),
       tags: ['task', 'progress'],
       visibility,
       targets: {
@@ -506,9 +974,7 @@ export const generatePostFromPersonalTask = async (req, res) => {
       approvalStatus: needsExternalApproval(req.user.role, targets) ? 'pending' : 'none',
     });
 
-    const populatedPost = await SocialPost.findById(post._id)
-      .populate('author', 'name email role profileImage teamId')
-      .populate('sourceTask', 'title status completedAt');
+    if (post.approvalStatus === 'pending') await askForApproval(req, post);
 
     await logAuditEventV2(req, {
       action: 'social_post_created',
@@ -516,37 +982,79 @@ export const generatePostFromPersonalTask = async (req, res) => {
       targetId: post._id,
       details: { targets: post.targets, visibility: post.visibility },
     });
-    return res.status(201).json({ success: true, data: populatedPost });
+    const [populatedPost, ctx] = await Promise.all([findPostForView(post._id), viewerContext(req.user)]);
+    return res.status(201).json({ success: true, data: withViewer(populatedPost, ctx) });
   } catch (error) {
     return sendServerError(res, error);
   }
 };
 
-// Newest posts the user may see. Pass ?before=<createdAt of the oldest post
-// shown> for the page before it.
+// Newest posts the user may see, 50 at a time. For the page before, pass the
+// oldest post shown as ?before=<its createdAt>&beforeId=<its _id> (the
+// response's `next`): posts created in the same millisecond are then ordered
+// by id, so none is skipped.
 export const getFeed = async (req, res) => {
   try {
-    const filter = await feedFilter(req.user);
-    if (req.query.before) {
-      const before = new Date(req.query.before);
+    const conditions = [await feedFilter(req.user)];
+    if (req.query.before !== undefined) {
+      const before = new Date(typeof req.query.before === 'string' ? req.query.before : NaN);
       if (Number.isNaN(before.getTime())) {
         return res.status(400).json({ success: false, message: 'Invalid before date' });
       }
-      filter.createdAt = { $lt: before };
+      const { beforeId } = req.query;
+      if (beforeId === undefined) {
+        conditions.push({ createdAt: { $lt: before } });
+      } else if (typeof beforeId === 'string' && mongoose.isObjectIdOrHexString(beforeId)) {
+        conditions.push({
+          $or: [
+            { createdAt: { $lt: before } },
+            { createdAt: before, _id: { $lt: new mongoose.Types.ObjectId(beforeId) } },
+          ],
+        });
+      } else {
+        return res.status(400).json({ success: false, message: 'Invalid beforeId' });
+      }
     }
 
     // One extra tells us whether there is an older page
-    const newestFirst = await SocialPost.find(filter)
-      .populate('author', 'name email role profileImage teamId')
-      .populate('sourceTask', 'title status completedAt')
-      .sort({ createdAt: -1 })
-      .limit(FEED_PAGE_SIZE + 1);
+    const [newestFirst, ctx] = await Promise.all([
+      SocialPost.find(conditions.length === 1 ? conditions[0] : { $and: conditions })
+        .populate(authorPopulate)
+        .populate(sourceTaskPopulate)
+        .populate(commenterPopulate)
+        .sort({ createdAt: -1, _id: -1 })
+        .limit(FEED_PAGE_SIZE + 1),
+      viewerContext(req.user),
+    ]);
 
     const hasMore = newestFirst.length > FEED_PAGE_SIZE;
-    // Skip posts left behind by a deleted account (npm run migrate -- --clean-orphans removes them)
-    const posts = newestFirst.slice(0, FEED_PAGE_SIZE).filter((post) => post.author);
+    const page = newestFirst.slice(0, FEED_PAGE_SIZE);
+    // Skip posts left behind by a deleted account
+    const posts = page.filter((post) => post.author).map((post) => withViewer(post, ctx));
+    const oldest = page.at(-1);
 
-    return res.json({ success: true, count: posts.length, data: posts, hasMore });
+    return res.json({
+      success: true,
+      count: posts.length,
+      data: posts,
+      hasMore,
+      next: hasMore ? { before: toIso(oldest.createdAt), beforeId: String(oldest._id) } : null,
+    });
+  } catch (error) {
+    return sendServerError(res, error);
+  }
+};
+
+// One post, for links to it (notifications open /social?post=<id>). Anyone
+// who may see it; the author also sees their own removed post.
+export const getPost = async (req, res) => {
+  try {
+    const post = await findPostForView(req.params.postId);
+    const isAuthor = post?.author && idOf(post.author) === String(req.user._id);
+    if (!post || !(isAuthor || (await canUserViewPost(post, req.user)))) {
+      return res.status(404).json({ success: false, message: 'Post not found' });
+    }
+    return res.json({ success: true, data: withViewer(post, await viewerContext(req.user)) });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -554,12 +1062,166 @@ export const getFeed = async (req, res) => {
 
 export const getMyPosts = async (req, res) => {
   try {
-    const posts = await SocialPost.find({ author: req.user._id })
-      .populate('author', 'name email role profileImage teamId')
-      .populate('sourceTask', 'title status completedAt')
-      .sort({ createdAt: -1 });
+    const [posts, ctx] = await Promise.all([
+      SocialPost.find({ author: req.user._id })
+        .populate(authorPopulate)
+        .populate(sourceTaskPopulate)
+        .populate(commenterPopulate)
+        .sort({ createdAt: -1 }),
+      viewerContext(req.user),
+    ]);
 
-    return res.json({ success: true, count: posts.length, data: posts });
+    return res.json({ success: true, count: posts.length, data: posts.map((post) => withViewer(post, ctx)) });
+  } catch (error) {
+    return sendServerError(res, error);
+  }
+};
+
+// Posts waiting for approval that the caller may decide: every one for an
+// admin; for a team leader, those by people in the teams they lead while the
+// team isn't frozen (never their own). Newest first, at most 200.
+export const getPendingApprovalPosts = async (req, res) => {
+  try {
+    const filter = { approvalStatus: 'pending', moderationStatus: { $ne: 'removed' } };
+    if (req.user.role !== 'admin') {
+      const led = (await ledUserIds(req.user._id, { activeOnly: true })).filter((id) => id !== String(req.user._id));
+      filter.author = { $in: led };
+    }
+
+    const [posts, ctx] = await Promise.all([
+      SocialPost.find(filter)
+        .populate(authorPopulate)
+        .populate(sourceTaskPopulate)
+        .sort({ createdAt: -1 })
+        .limit(200),
+      viewerContext(req.user),
+    ]);
+    const data = posts.filter((post) => post.author).map((post) => withViewer(post, ctx));
+    return res.json({ success: true, count: data.length, data });
+  } catch (error) {
+    return sendServerError(res, error);
+  }
+};
+
+// The author edits their post. Targets are fixed at creation. A member's (or
+// user's) approved post that still has somewhere outside Pandav to go goes
+// back for approval: the approval was for the old text.
+export const updatePost = async (req, res) => {
+  try {
+    const post = await SocialPost.findById(req.params.postId).populate('author', 'teamId');
+    if (!post || !post.author) {
+      return res.status(404).json({ success: false, message: 'Post not found' });
+    }
+    if (idOf(post.author) !== String(req.user._id)) {
+      return (await canUserViewPost(post, req.user))
+        ? res.status(403).json({ success: false, message: 'Only the author can edit a post' })
+        : res.status(404).json({ success: false, message: 'Post not found' });
+    }
+    if (post.moderationStatus === 'removed') {
+      return res.status(409).json({ success: false, message: "This post was removed by an admin and can't be changed" });
+    }
+
+    const updates = pick(req.body, EDITABLE_POST_FIELDS);
+    if (typeof updates.content === 'string') updates.content = updates.content.trim();
+    if (typeof updates.title === 'string') updates.title = updates.title.trim();
+    post.set(updates);
+    post.editedAt = new Date();
+
+    const leftToPublish = EXTERNAL_PROVIDERS.some((provider) =>
+      post.targets?.[provider] && post.publishResults?.[provider]?.status !== 'published');
+    const backToApproval = post.approvalStatus === 'approved' && needsExternalApproval(req.user.role, post.targets) && leftToPublish;
+    if (backToApproval) {
+      post.approvalStatus = 'pending';
+      post.approvedBy = null;
+      post.approvedAt = null;
+    }
+    await post.save();
+
+    let cancelledJobs = 0;
+    if (backToApproval) {
+      // They would only fail while the post waits; queue them again once it's approved
+      cancelledJobs = (await SocialPublishJobV2.deleteMany({ post: post._id, status: 'queued' })).deletedCount;
+      if (post.sourceTask) {
+        await PersonalTask.updateOne(
+          { _id: post.sourceTask, lastAutoGeneratedPost: post._id },
+          { $set: { autoPostStatus: 'pending_approval' } },
+        );
+      }
+      await askForApproval(req, post);
+    }
+
+    await logAuditEventV2(req, {
+      action: 'social_post_updated',
+      targetType: 'SocialPostV2',
+      targetId: post._id,
+      details: { fields: Object.keys(updates), backToApproval, cancelledJobs },
+    });
+
+    const [updated, ctx] = await Promise.all([findPostForView(post._id), viewerContext(req.user)]);
+    return res.json({
+      success: true,
+      data: withViewer(updated, ctx),
+      ...(backToApproval ? { message: `Saved. The post needs approval again before it goes to ${targetNames(post.targets)}.` } : {}),
+    });
+  } catch (error) {
+    return sendServerError(res, error);
+  }
+};
+
+// The author or an admin deletes a post. Its queued and failed publish jobs
+// go with it; completed ones stay as the record of what was published.
+export const deletePost = async (req, res) => {
+  try {
+    const post = await SocialPost.findById(req.params.postId).populate('author', 'teamId');
+    if (!post) {
+      return res.status(404).json({ success: false, message: 'Post not found' });
+    }
+    const isAuthor = Boolean(post.author) && idOf(post.author) === String(req.user._id);
+    const isAdmin = req.user.role === 'admin';
+    if (!isAuthor && !isAdmin) {
+      return (await canUserViewPost(post, req.user))
+        ? res.status(403).json({ success: false, message: 'Only the author or an admin can delete a post' })
+        : res.status(404).json({ success: false, message: 'Post not found' });
+    }
+    // A removed post is the record of a moderation decision, which an admin
+    // can still review or undo: only an admin may delete it
+    if (post.moderationStatus === 'removed' && !isAdmin) {
+      return res.status(409).json({ success: false, message: "This post was removed by an admin and can't be deleted" });
+    }
+
+    await SocialPost.deleteOne({ _id: post._id });
+    const { deletedCount: jobsRemoved } = await SocialPublishJobV2.deleteMany({ post: post._id, status: { $in: ['queued', 'failed'] } });
+    // A shared task whose post is gone can be shared again
+    if (post.sourceTask) {
+      await PersonalTask.updateOne(
+        { _id: post.sourceTask, lastAutoGeneratedPost: post._id },
+        { $set: { lastAutoGeneratedPost: null, autoPostStatus: 'none', autoPostMessage: null } },
+      );
+    }
+
+    await logAuditEventV2(req, {
+      action: 'social_post_deleted',
+      targetType: 'SocialPostV2',
+      targetId: post._id,
+      details: {
+        author: post.author ? idOf(post.author) : null,
+        byAuthor: isAuthor,
+        jobsRemoved,
+        moderationStatus: post.moderationStatus,
+        moderationReason: post.moderationReason || null,
+      },
+    });
+    if (!isAuthor && post.author) {
+      await tell(req, [post.author._id], {
+        type: 'post_moderated',
+        title: 'An admin deleted your post',
+        body: post.title || snippet(post.content),
+        link: '/social',
+        data: { postId: String(post._id), action: 'delete' },
+        email: true,
+      });
+    }
+    return res.json({ success: true, message: 'Post deleted' });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -595,11 +1257,9 @@ export const toggleLike = async (req, res) => {
       );
     }
 
-    return res.json({
-      success: true,
-      liked,
-      likesCount: updated?.likes.length ?? 0,
-    });
+    const data = { liked, likesCount: updated?.likes.length ?? 0 };
+    // `liked` and `likesCount` are also at the top level, as before
+    return res.json({ success: true, data, ...data });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -627,13 +1287,62 @@ export const addComment = async (req, res) => {
 
     post.comments.push({ user: req.user._id, text: text.trim() });
     await post.save();
-    await post.populate('comments.user', 'name email role profileImage');
+    await post.populate(commenterPopulate);
+    const comment = post.comments[post.comments.length - 1];
 
-    return res.status(201).json({ success: true, data: post.comments[post.comments.length - 1] });
+    if (post.author) {
+      await tell(req, [post.author._id], {
+        type: 'post_comment',
+        title: `${req.user.name} commented on your post`,
+        body: snippet(comment.text),
+        link: postLink(post._id),
+        data: { postId: String(post._id), commentId: String(comment._id) },
+      });
+    }
+
+    return res.status(201).json({ success: true, data: comment });
   } catch (error) {
     return sendServerError(res, error);
   }
 };
+
+// The comment's author, the post's author or an admin removes a comment
+export const deleteComment = async (req, res) => {
+  try {
+    const { postId, commentId } = req.params;
+    if (!mongoose.isObjectIdOrHexString(commentId)) {
+      return res.status(400).json({ success: false, message: 'Invalid commentId' });
+    }
+
+    const post = await SocialPost.findById(postId).select('author comments');
+    if (!post) {
+      return res.status(404).json({ success: false, message: 'Post not found' });
+    }
+    const comment = post.comments.id(commentId);
+    if (!comment) {
+      return res.status(404).json({ success: false, message: 'Comment not found' });
+    }
+
+    const me = String(req.user._id);
+    const isCommenter = idOf(comment.user) === me;
+    if (!isCommenter && idOf(post.author) !== me && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Only the comment\'s author, the post\'s author or an admin can delete it' });
+    }
+
+    await SocialPost.updateOne({ _id: post._id }, { $pull: { comments: { _id: comment._id } } });
+    await logAuditEventV2(req, {
+      action: 'social_comment_deleted',
+      targetType: 'SocialPostV2',
+      targetId: post._id,
+      details: { commentId, commenter: idOf(comment.user), byCommenter: isCommenter },
+    });
+    return res.json({ success: true, message: 'Comment deleted' });
+  } catch (error) {
+    return sendServerError(res, error);
+  }
+};
+
+// ---------- Connections ----------
 
 export const requestConnection = async (req, res) => {
   try {
@@ -647,34 +1356,81 @@ export const requestConnection = async (req, res) => {
       return res.status(400).json({ success: false, message: 'You cannot connect with yourself' });
     }
 
-    const targetUser = await User.findById(userId).select('_id isActive');
-    if (!targetUser || !targetUser.isActive) {
+    const targetUser = await User.findOne({ _id: userId, isActive: true, deletedAt: null }).select('_id');
+    if (!targetUser) {
       return res.status(404).json({ success: false, message: 'User not found or inactive' });
     }
 
-    let connection = await NetworkConnection.findOne({ requester: req.user._id, recipient: userId });
-    if (!connection) {
-      connection = await NetworkConnection.findOne({ requester: userId, recipient: req.user._id });
-      if (connection && connection.status === 'pending') {
-        connection.status = 'accepted';
-        connection.respondedAt = new Date();
-        await connection.save();
-        return res.json({ success: true, message: 'Connection accepted from existing request', data: connection });
+    if (await isBlockedBetween(req.user._id, userId)) {
+      return res.status(403).json({ success: false, message: "You can't connect with this person" });
+    }
+
+    const mine = await NetworkConnection.findOne({ requester: req.user._id, recipient: userId });
+    const theirs = mine ? null : await NetworkConnection.findOne({ requester: userId, recipient: req.user._id });
+    const existing = mine || theirs;
+
+    // They asked first: asking back accepts
+    if (theirs?.status === 'pending') {
+      theirs.status = 'accepted';
+      theirs.respondedAt = new Date();
+      await theirs.save();
+      // Connections may message each other: whom they see online changes
+      contactsChanged([theirs.requester, theirs.recipient]);
+      await tell(req, [theirs.requester], {
+        type: 'connection_accepted',
+        title: `${req.user.name} accepted your connection request`,
+        link: '/network',
+        data: { connectionId: String(theirs._id) },
+      });
+      return res.json({ success: true, message: 'Connection accepted from existing request', data: theirs });
+    }
+
+    if (existing?.status === 'accepted') {
+      return res.status(409).json({ success: false, message: "You're already connected" });
+    }
+    if (mine?.status === 'pending') {
+      return res.status(409).json({ success: false, message: "You've already sent this person a request" });
+    }
+
+    let connection;
+    if (mine?.status === 'rejected') {
+      // They declined: the same request can be sent again after 14 days
+      const requestAgainAt = new Date((mine.respondedAt || mine.updatedAt).getTime() + REQUEST_AGAIN_AFTER_MS);
+      if (requestAgainAt > new Date()) {
+        return res.status(409).json({
+          success: false,
+          message: `This person declined your request. You can ask again on ${formatDay(requestAgainAt)}.`,
+          data: { requestAgainAt },
+        });
       }
+      mine.status = 'pending';
+      mine.respondedAt = null;
+      connection = await mine.save();
+    } else if (theirs?.status === 'rejected') {
+      // The caller declined them before and now asks them: it becomes the caller's request
+      theirs.requester = req.user._id;
+      theirs.recipient = userId;
+      theirs.status = 'pending';
+      theirs.respondedAt = null;
+      connection = await theirs.save();
+    } else {
+      connection = await NetworkConnection.create({ requester: req.user._id, recipient: userId });
     }
 
-    if (connection) {
-      return res.status(409).json({ success: false, message: `Connection already ${connection.status}` });
-    }
-
-    const created = await NetworkConnection.create({ requester: req.user._id, recipient: userId });
     await logAuditEventV2(req, {
       action: 'network_connection_requested',
       targetType: 'NetworkConnectionV2',
-      targetId: created._id,
-      details: { recipient: userId },
+      targetId: connection._id,
+      details: { recipient: userId, again: Boolean(existing) },
     });
-    return res.status(201).json({ success: true, data: created });
+    await tell(req, [userId], {
+      type: 'connection_request',
+      title: `${req.user.name} wants to connect`,
+      body: 'Accept or decline the request in your network.',
+      link: '/network',
+      data: { connectionId: String(connection._id) },
+    });
+    return res.status(201).json({ success: true, data: connection });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -702,9 +1458,24 @@ export const respondConnection = async (req, res) => {
       return res.status(409).json({ success: false, message: `Request already ${connection.status}` });
     }
 
+    if (action === 'accepted' && (await isBlockedBetween(connection.requester, connection.recipient))) {
+      return res.status(403).json({ success: false, message: "You can't connect with this person" });
+    }
+
     connection.status = action;
     connection.respondedAt = new Date();
     await connection.save();
+    if (action === 'accepted') contactsChanged([connection.requester, connection.recipient]);
+
+    // A declined request isn't announced
+    if (action === 'accepted') {
+      await tell(req, [connection.requester], {
+        type: 'connection_accepted',
+        title: `${req.user.name} accepted your connection request`,
+        link: '/network',
+        data: { connectionId: String(connection._id) },
+      });
+    }
 
     return res.json({ success: true, data: connection });
   } catch (error) {
@@ -712,29 +1483,82 @@ export const respondConnection = async (req, res) => {
   }
 };
 
-export const getConnections = async (req, res) => {
+// The requester withdraws a pending request, or either person removes an
+// accepted connection
+export const removeConnection = async (req, res) => {
   try {
-    const [sent, received, connected] = await Promise.all([
-      NetworkConnection.find({ requester: req.user._id, status: 'pending' }).populate('recipient', 'name email role profileImage'),
-      NetworkConnection.find({ recipient: req.user._id, status: 'pending' }).populate('requester', 'name email role profileImage'),
-      NetworkConnection.find({
-        $or: [{ requester: req.user._id }, { recipient: req.user._id }],
-        status: 'accepted',
-      }).populate('requester recipient', 'name email role profileImage'),
-    ]);
+    const connection = await NetworkConnection.findById(req.params.connectionId);
+    const me = String(req.user._id);
+    const isRequester = connection && String(connection.requester) === me;
+    const isRecipient = connection && String(connection.recipient) === me;
+    if (!connection || (!isRequester && !isRecipient)) {
+      return res.status(404).json({ success: false, message: 'Connection not found' });
+    }
 
+    if (connection.status === 'pending' && !isRequester) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only the person who sent a request can withdraw it. Accept or decline it instead.',
+      });
+    }
+    if (connection.status === 'rejected') {
+      return res.status(409).json({ success: false, message: "A declined request can't be withdrawn" });
+    }
+
+    await connection.deleteOne();
+    if (connection.status === 'accepted') contactsChanged([connection.requester, connection.recipient]);
+    await logAuditEventV2(req, {
+      action: 'social_connection_removed',
+      targetType: 'NetworkConnectionV2',
+      targetId: connection._id,
+      details: { status: connection.status, otherUser: isRequester ? String(connection.recipient) : String(connection.requester) },
+    });
     return res.json({
       success: true,
-      data: {
-        pendingSent: sent,
-        pendingReceived: received,
-        connected,
-      },
+      message: connection.status === 'pending' ? 'Request withdrawn' : 'Connection removed',
     });
   } catch (error) {
     return sendServerError(res, error);
   }
 };
+
+// The other person in each connection; deactivated and deleted accounts are
+// left out. Their email only once both have agreed to connect: anyone may send
+// a request, and a pending one would otherwise hand out the email that
+// GET /users/discover keeps to admins.
+const personPopulate = (path, { withEmail = false } = {}) => ({
+  path,
+  select: `name role profileImage${withEmail ? ' email' : ''}`,
+  match: { isActive: true, deletedAt: null },
+});
+
+export const getConnections = async (req, res) => {
+  try {
+    const [sent, received, connected] = await Promise.all([
+      NetworkConnection.find({ requester: req.user._id, status: 'pending' }).populate(personPopulate('recipient')),
+      NetworkConnection.find({ recipient: req.user._id, status: 'pending' }).populate(personPopulate('requester')),
+      NetworkConnection.find({
+        $or: [{ requester: req.user._id }, { recipient: req.user._id }],
+        status: 'accepted',
+      }).populate(personPopulate('requester', { withEmail: true })).populate(personPopulate('recipient', { withEmail: true })),
+    ]);
+
+    const data = {
+      pendingSent: sent.filter((connection) => connection.recipient),
+      pendingReceived: received.filter((connection) => connection.requester),
+      connected: connected.filter((connection) => connection.requester && connection.recipient),
+    };
+    return res.json({
+      success: true,
+      counts: Object.fromEntries(Object.entries(data).map(([key, list]) => [key, list.length])),
+      data,
+    });
+  } catch (error) {
+    return sendServerError(res, error);
+  }
+};
+
+// ---------- Messages ----------
 
 export const sendNetworkMessage = async (req, res) => {
   try {
@@ -801,23 +1625,52 @@ export const getNetworkMessages = async (req, res) => {
   }
 };
 
+// Finding people to connect with. A search needs at least 2 characters and
+// matches names (admins: names and emails; others: a whole email address).
+// Without a search: up to 10 teammates not yet connected. Never the caller,
+// people blocked either way, or deactivated and deleted accounts; emails only
+// for admins.
 export const discoverUsers = async (req, res) => {
   try {
-    // Matched as plain text, not as a regular expression
-    const q = typeof req.query.q === 'string' ? escapeRegex(req.query.q.trim().slice(0, 100)) : '';
-    const filter = {
-      _id: { $ne: req.user._id },
-      isActive: true,
-      $or: [
-        { name: { $regex: q, $options: 'i' } },
-        { email: { $regex: q, $options: 'i' } },
-      ],
-    };
+    const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : '';
+    const isAdmin = req.user.role === 'admin';
+    const fields = `name role profileImage teamId department${isAdmin ? ' email' : ''}`;
+    const excluded = [String(req.user._id), ...(await blockedUserIds(req.user._id))];
+    const people = { isActive: true, deletedAt: null };
 
-    const users = await User.find(filter)
-      .select('name email role profileImage teamId department')
-      .limit(30)
-      .sort({ name: 1 });
+    if (!q) {
+      const [teams, connections] = await Promise.all([
+        Team.find({ isActive: true, $or: [{ leaders: req.user._id }, { members: req.user._id }] }).select('leaders members'),
+        NetworkConnection.find({ status: 'accepted', $or: [{ requester: req.user._id }, { recipient: req.user._id }] })
+          .select('requester recipient').lean(),
+      ]);
+      const connected = connections.flatMap((connection) => [String(connection.requester), String(connection.recipient)]);
+      const suggestions = await User.find({
+        ...people,
+        _id: { $in: teams.flatMap(teamUserIds), $nin: [...excluded, ...connected] },
+      })
+        .select(fields)
+        .sort({ name: 1 })
+        .limit(SUGGESTION_LIMIT);
+      return res.json({ success: true, count: suggestions.length, data: suggestions });
+    }
+
+    if (q.length < 2) {
+      return res.status(400).json({ success: false, message: 'Type at least 2 characters to search' });
+    }
+
+    // Matched as plain text, not as a regular expression
+    const pattern = { $regex: escapeRegex(q), $options: 'i' };
+    const users = await User.find({
+      ...people,
+      _id: { $nin: excluded },
+      $or: isAdmin
+        ? [{ name: pattern }, { email: pattern }]
+        : [{ name: pattern }, { email: q.toLowerCase() }],
+    })
+      .select(fields)
+      .sort({ name: 1 })
+      .limit(DISCOVER_LIMIT);
 
     return res.json({ success: true, count: users.length, data: users });
   } catch (error) {
@@ -825,22 +1678,26 @@ export const discoverUsers = async (req, res) => {
   }
 };
 
+// ---------- Approval ----------
+
+const APPROVAL_STATE_MESSAGES = {
+  none: "This post doesn't need approval",
+  approved: 'This post has already been approved',
+  rejected: 'This post has already been rejected',
+};
+
 export const approvePost = async (req, res) => {
   try {
     const { postId } = req.params;
-    const { action = 'approved' } = req.body;
+    const { action = 'approved' } = req.body || {};
 
     if (!['approved', 'rejected'].includes(action)) {
       return res.status(400).json({ success: false, message: 'action must be approved or rejected' });
     }
 
-    const post = await SocialPost.findById(postId).populate('author', 'teamId');
-    if (!post || !post.author) {
+    const post = await SocialPost.findById(postId).populate('author', 'teamId deletedAt');
+    if (!post || !post.author || post.author.deletedAt) {
       return res.status(404).json({ success: false, message: 'Post not found' });
-    }
-
-    if (post.approvalStatus !== 'pending') {
-      return res.status(409).json({ success: false, message: `Post approval is ${post.approvalStatus}` });
     }
 
     // An admin, or a leader of the author's team (not frozen), and never for
@@ -849,10 +1706,41 @@ export const approvePost = async (req, res) => {
       return res.status(403).json({ success: false, message: "Only an admin or a leader of the author's team can approve" });
     }
 
-    post.approvalStatus = action;
-    post.approvedBy = req.user._id;
-    post.approvedAt = new Date();
-    await post.save();
+    if (post.approvalStatus !== 'pending') {
+      return res.status(409).json({ success: false, message: APPROVAL_STATE_MESSAGES[post.approvalStatus] || `Post approval is ${post.approvalStatus}` });
+    }
+    if (post.moderationStatus === 'removed') {
+      return res.status(409).json({ success: false, message: 'This post was removed by an admin' });
+    }
+
+    // Only while still pending, so two reviewers can't both decide it
+    const decided = await SocialPost.findOneAndUpdate(
+      { _id: post._id, approvalStatus: 'pending' },
+      { $set: { approvalStatus: action, approvedBy: req.user._id, approvedAt: new Date() } },
+      { new: true },
+    );
+    if (!decided) {
+      return res.status(409).json({ success: false, message: 'Someone else has just decided this post' });
+    }
+
+    // A shared personal task follows its post
+    if (decided.sourceTask) {
+      await PersonalTask.updateOne(
+        { _id: decided.sourceTask, lastAutoGeneratedPost: decided._id },
+        { $set: { autoPostStatus: action } },
+      );
+    }
+
+    const approved = action === 'approved';
+    await tell(req, [post.author._id], {
+      type: approved ? 'post_approved' : 'post_rejected',
+      title: approved ? `${req.user.name} approved your post` : `${req.user.name} didn't approve your post`,
+      body: approved
+        ? `It can now be published to ${targetNames(decided.targets)}.`
+        : `It won't be published to ${targetNames(decided.targets)}.`,
+      link: postLink(decided._id),
+      data: { postId: String(decided._id) },
+    });
 
     await logAuditEventV2(req, {
       action: 'social_post_approval_updated',
@@ -860,11 +1748,14 @@ export const approvePost = async (req, res) => {
       targetId: post._id,
       details: { action },
     });
-    return res.json({ success: true, data: post });
+    const [populated, ctx] = await Promise.all([findPostForView(decided._id), viewerContext(req.user)]);
+    return res.json({ success: true, data: withViewer(populated, ctx) });
   } catch (error) {
     return sendServerError(res, error);
   }
 };
+
+// ---------- Personal tasks ----------
 
 export const createPersonalTask = async (req, res) => {
   try {
@@ -914,7 +1805,7 @@ export const getPersonalTasks = async (req, res) => {
 export const updatePersonalTask = async (req, res) => {
   try {
     const { taskId } = req.params;
-    const updates = { ...req.body };
+    const updates = pick(req.body, ['title', 'description', 'status', 'priority', 'dueDate', 'autoGenerateLinkedInPost']);
 
     if (typeof updates.title === 'string') updates.title = updates.title.trim();
     if (typeof updates.description === 'string') updates.description = updates.description.trim();
@@ -925,10 +1816,9 @@ export const updatePersonalTask = async (req, res) => {
     }
 
     if (updates.status === 'completed') {
-      updates.completedAt = new Date();
-    }
-
-    if (updates.status && updates.status !== 'completed') {
+      // Sending 'completed' again keeps the time it was first completed
+      if (existingTask.status !== 'completed') updates.completedAt = new Date();
+    } else if (updates.status) {
       updates.completedAt = null;
     }
 
@@ -1017,7 +1907,7 @@ export const sharePersonalTask = async (req, res) => {
 
     const existing = await findTaskPost(task, req.user);
     if (existing) {
-      return res.status(409).json({ success: false, message: 'This task has already been shared', postId: existing._id });
+      return res.status(409).json({ success: false, message: 'This task has already been shared', data: { postId: existing._id } });
     }
 
     const draft = taskShareDraft(task, req.user);
@@ -1039,12 +1929,13 @@ export const sharePersonalTask = async (req, res) => {
       task.autoPostStatus = 'pending_approval';
     } else {
       await post.populate('author', 'name role teamId');
-      publishResult = await executePublishForPost(post, targets, null);
+      publishResult = await executePublishForPost(post, targets);
       const external = linkedin ? publishResult.linkedin : publishResult.pandav;
       task.autoPostStatus = external.status === 'published' ? 'published' : 'failed';
       task.autoPostMessage = external.message || null;
     }
     await task.save();
+    if (post.approvalStatus === 'pending') await askForApproval(req, post);
 
     await logAuditEventV2(req, {
       action: 'social_post_created',
@@ -1081,47 +1972,65 @@ export const deletePersonalTask = async (req, res) => {
   }
 };
 
+// ---------- Linked accounts ----------
+
+// Creates or replaces the caller's linked account for a provider, and returns
+// it as GET /integrations shows it
+const saveIntegration = async (userId, provider, { profile, accessToken, refreshToken, tokenExpiresAt, scopes, hint }) => {
+  await SocialIntegration.findOneAndUpdate(
+    { user: userId, provider },
+    {
+      user: userId,
+      provider,
+      providerUserId: profile.providerUserId,
+      accountHandle: profile.accountHandle,
+      isConnected: true,
+      needsRelink: false,
+      scopes,
+      accessToken,
+      refreshToken,
+      tokenExpiresAt,
+      connectedAt: new Date(),
+      accessTokenHint: hint,
+      metadata: profile.metadata || {},
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  return SocialIntegration.findOne({ user: userId, provider }).select('+accessToken +refreshToken');
+};
+
 export const linkProviderAccount = async (req, res) => {
   try {
     const { provider } = req.params;
     const { accessToken, refreshToken = null, tokenExpiresAt = null, scopes = [] } = req.body;
 
-    if (!['linkedin', 'github'].includes(provider)) {
-      return res.status(400).json({ success: false, message: 'provider must be linkedin or github' });
-    }
-
     if (!accessToken || !String(accessToken).trim()) {
       return res.status(400).json({ success: false, message: 'accessToken is required' });
     }
 
+    const token = String(accessToken).trim();
     let profile;
+    // From here the provider is asked: a refused token still counts toward the limit
+    keepRateLimitSlot(res);
     try {
-      profile = provider === 'linkedin'
-        ? await fetchLinkedInProfile(String(accessToken).trim())
-        : await fetchGithubProfile(String(accessToken).trim());
+      profile = await fetchProfile(provider, token);
     } catch (error) {
-      // The provider refused the token: tell the user rather than a bare 500
-      return res.status(400).json({ success: false, message: error.message });
+      if (!(error instanceof ProviderError)) throw error;
+      // The provider refused the token: bad input, with its reason
+      if (error.refused) {
+        return res.status(400).json({ success: false, message: `${providerName(provider)} didn't accept this token: ${error.detail}` });
+      }
+      return sendProviderError(res, error);
     }
 
-    const integration = await SocialIntegration.findOneAndUpdate(
-      { user: req.user._id, provider },
-      {
-        user: req.user._id,
-        provider,
-        providerUserId: profile.providerUserId,
-        accountHandle: profile.accountHandle,
-        isConnected: true,
-        scopes: Array.isArray(scopes) ? scopes.filter((scope) => typeof scope === 'string').slice(0, 20) : [],
-        accessToken: String(accessToken).trim(),
-        refreshToken: refreshToken ? String(refreshToken).trim() : null,
-        tokenExpiresAt: tokenExpiresAt ? new Date(tokenExpiresAt) : null,
-        connectedAt: new Date(),
-        accessTokenHint: `${provider}-token-configured`,
-        metadata: profile.metadata || {},
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    ).select('-accessToken -refreshToken');
+    const integration = await saveIntegration(req.user._id, provider, {
+      profile,
+      accessToken: token,
+      refreshToken: refreshToken ? String(refreshToken).trim() : null,
+      tokenExpiresAt: tokenExpiresAt ? new Date(tokenExpiresAt) : null,
+      scopes: Array.isArray(scopes) ? scopes.filter((scope) => typeof scope === 'string').slice(0, 20) : [],
+      hint: `${provider}-token-configured`,
+    });
 
     await logAuditEventV2(req, {
       action: 'social_integration_linked',
@@ -1129,7 +2038,7 @@ export const linkProviderAccount = async (req, res) => {
       targetId: integration._id,
       details: { provider },
     });
-    return res.json({ success: true, data: integration });
+    return res.json({ success: true, data: describeIntegration(integration) });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -1138,153 +2047,71 @@ export const linkProviderAccount = async (req, res) => {
 export const getSocialIntegrations = async (req, res) => {
   try {
     const integrations = await SocialIntegration.find({ user: req.user._id })
-      .select('-accessToken -refreshToken')
+      .select('+accessToken +refreshToken')
       .sort({ provider: 1 });
 
-    return res.json({ success: true, count: integrations.length, data: integrations });
+    const now = new Date();
+    return res.json({ success: true, count: integrations.length, data: integrations.map((item) => describeIntegration(item, now)) });
   } catch (error) {
     return sendServerError(res, error);
   }
 };
 
+// Unlinks the caller's account: the record and its stored tokens are deleted.
+// Queued jobs for it then fail when they run.
+export const unlinkProviderAccount = async (req, res) => {
+  try {
+    const { provider } = req.params;
+    const integration = await SocialIntegration.findOneAndDelete({ user: req.user._id, provider });
+    if (!integration) {
+      return res.status(404).json({ success: false, message: `${providerName(provider)} account is not linked` });
+    }
+
+    await logAuditEventV2(req, {
+      action: 'social_integration_unlinked',
+      targetType: 'SocialIntegrationV2',
+      targetId: integration._id,
+      details: { provider },
+    });
+    return res.json({ success: true, message: `${providerName(provider)} account unlinked` });
+  } catch (error) {
+    return sendServerError(res, error);
+  }
+};
+
+const findOwnIntegration = (user, provider) =>
+  SocialIntegration.findOne({ user: user._id, provider }).select('+accessToken +refreshToken');
+
 export const getProviderProfile = async (req, res) => {
   try {
     const { provider } = req.params;
-    if (!['linkedin', 'github'].includes(provider)) {
-      return res.status(400).json({ success: false, message: 'provider must be linkedin or github' });
-    }
+    const integration = await findOwnIntegration(req.user, provider);
+    const access = await accessTokenFor(integration);
+    if (access.problem) return sendTokenProblem(res, provider, access);
 
-    const integration = await SocialIntegration.findOne({ user: req.user._id, provider }).select('+accessToken');
-    if (!integration || !integration.isConnected || !integration.accessToken) {
-      return res.status(404).json({ success: false, message: `${provider} account is not linked` });
-    }
-
-    const profile = provider === 'linkedin'
-      ? await fetchLinkedInProfile(integration.accessToken)
-      : await fetchGithubProfile(integration.accessToken);
-
+    const profile = await fetchProfile(provider, access.token);
     return res.json({ success: true, data: profile });
   } catch (error) {
-    return sendServerError(res, error);
+    return sendProviderError(res, error);
   }
 };
 
 export const fetchProviderPosts = async (req, res) => {
   try {
     const { provider } = req.params;
-    if (!['linkedin', 'github'].includes(provider)) {
-      return res.status(400).json({ success: false, message: 'provider must be linkedin or github' });
-    }
+    const integration = await findOwnIntegration(req.user, provider);
+    const access = await accessTokenFor(integration);
+    if (access.problem) return sendTokenProblem(res, provider, access);
 
-    const integration = await SocialIntegration.findOne({ user: req.user._id, provider }).select('+accessToken');
-    if (!integration || !integration.isConnected || !integration.accessToken) {
-      return res.status(404).json({ success: false, message: `${provider} account is not linked` });
-    }
-
-    const posts = provider === 'linkedin'
-      ? await fetchLinkedInPosts(integration.accessToken, integration.providerUserId)
-      : await fetchGithubPosts(integration.accessToken, integration.accountHandle);
-
+    const posts = await fetchActivity(integration, access.token);
     return res.json({ success: true, provider, count: posts.length, data: posts });
   } catch (error) {
-    return sendServerError(res, error);
+    return sendProviderError(res, error);
   }
 };
 
-export const publishPostToTargets = async (req, res) => {
-  try {
-    const { postId } = req.params;
-    const { targets = null, githubRepo = null } = req.body;
-
-    const post = await SocialPost.findById(postId).populate('author', 'name role teamId');
-    if (!post || !post.author) {
-      return res.status(404).json({ success: false, message: 'Post not found' });
-    }
-
-    if (!(await canPublishFor(req.user, post.author._id))) {
-      return res.status(403).json({ success: false, message: 'Not allowed to publish this post' });
-    }
-
-    if (!isPublishable(post)) {
-      return res.status(409).json({ success: false, message: `This post is ${post.moderationStatus} and can't be published` });
-    }
-
-    if (post.approvalStatus === 'pending') {
-      return res.status(409).json({ success: false, message: 'Post is pending approval before external publish' });
-    }
-
-    if (post.approvalStatus === 'rejected') {
-      return res.status(409).json({ success: false, message: 'Post approval was rejected for external publish' });
-    }
-
-    const { targets: effectiveTargets, refused } = publishTargets(post, targets);
-    if (refused.length > 0) {
-      return refuseTargets(res, refused);
-    }
-    if (!ensureAtLeastOneTarget(effectiveTargets)) {
-      return res.status(400).json({ success: false, message: 'At least one target is required' });
-    }
-
-    const result = await executePublishForPost(post, effectiveTargets, githubRepo);
-
-    await logAuditEventV2(req, {
-      action: 'social_post_publish_triggered',
-      targetType: 'SocialPostV2',
-      targetId: post._id,
-      details: { targets: effectiveTargets },
-    });
-    return res.json({
-      success: true,
-      postId: post._id,
-      approvalStatus: post.approvalStatus,
-      targets: effectiveTargets,
-      result,
-      publishedAt: toIso(new Date()),
-    });
-  } catch (error) {
-    return sendServerError(res, error);
-  }
-};
-
-
-
-
-
-
-
-
-
-
-
-const getOAuthConfig = (provider) => {
-  if (provider === 'github') {
-    return {
-      clientId: process.env.GITHUB_CLIENT_ID,
-      clientSecret: process.env.GITHUB_CLIENT_SECRET,
-      redirectUri: process.env.GITHUB_REDIRECT_URI,
-      authUrl: 'https://github.com/login/oauth/authorize',
-      tokenUrl: 'https://github.com/login/oauth/access_token',
-      scope: process.env.GITHUB_OAUTH_SCOPE || 'read:user user:email public_repo',
-    };
-  }
-
-  return {
-    clientId: process.env.LINKEDIN_CLIENT_ID,
-    clientSecret: process.env.LINKEDIN_CLIENT_SECRET,
-    redirectUri: process.env.LINKEDIN_REDIRECT_URI,
-    authUrl: 'https://www.linkedin.com/oauth/v2/authorization',
-    tokenUrl: 'https://www.linkedin.com/oauth/v2/accessToken',
-    scope: process.env.LINKEDIN_OAUTH_SCOPE || 'openid profile email w_member_social',
-  };
-};
-
-const verifyOAuthConfig = (provider) => {
-  const cfg = getOAuthConfig(provider);
-  if (!cfg.clientId || !cfg.clientSecret || !cfg.redirectUri) {
-    throw new Error(`${provider} OAuth env vars are missing`);
-  }
-  return cfg;
-};
+const notSetUp = (res, provider) =>
+  res.status(400).json({ success: false, message: `${providerName(provider)} isn't set up on this server` });
 
 const signOAuthState = (provider, userId) => {
   return jwt.sign(
@@ -1304,192 +2131,19 @@ const decodeOAuthState = (state) => {
   }
 };
 
-const exchangeGithubCodeForToken = async (code, cfg) => {
-  const response = await fetch(cfg.tokenUrl, {
-    method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_id: cfg.clientId,
-      client_secret: cfg.clientSecret,
-      code,
-      redirect_uri: cfg.redirectUri,
-    }),
-  });
-
-  const data = await safeJson(response);
-  if (!response.ok || data?.error) {
-    throw new Error(data?.error_description || data?.error || 'GitHub OAuth token exchange failed');
-  }
-
-  return {
-    accessToken: data.access_token,
-    scope: data.scope ? String(data.scope).split(',').filter(Boolean) : [],
-    tokenType: data.token_type || null,
-  };
-};
-
-const exchangeLinkedInCodeForToken = async (code, cfg) => {
-  const body = new URLSearchParams({
-    grant_type: 'authorization_code',
-    code,
-    redirect_uri: cfg.redirectUri,
-    client_id: cfg.clientId,
-    client_secret: cfg.clientSecret,
-  });
-
-  const response = await fetch(cfg.tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
-
-  const data = await safeJson(response);
-  if (!response.ok || data?.error) {
-    throw new Error(data?.error_description || data?.error || 'LinkedIn OAuth token exchange failed');
-  }
-
-  return {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token || null,
-    expiresIn: data.expires_in || null,
-    scope: cfg.scope ? String(cfg.scope).split(' ').filter(Boolean) : [],
-  };
-};
-
-// Runs one publish job. The job is claimed first (queued or failed →
-// processing in one atomic update), so two requests can never publish the
-// same job twice. `claimed: false` means another request has it or it's done.
-const runPublishJob = async (jobId) => {
-  const job = await SocialPublishJobV2.findOneAndUpdate(
-    { _id: jobId, status: { $in: ['queued', 'failed'] } },
-    { $set: { status: 'processing', startedAt: new Date() }, $inc: { attempts: 1 } },
-    { new: true },
-  );
-  if (!job) {
-    return { success: false, claimed: false, error: 'Job is already being processed or completed' };
-  }
-
-  const post = await SocialPost.findById(job.post).populate('author', 'name role teamId');
-  if (!post || !post.author) {
-    job.status = 'failed';
-    job.lastError = 'Post not found';
-    job.completedAt = new Date();
-    await job.save();
-    return { success: false, error: job.lastError };
-  }
-
-  if (post.approvalStatus === 'pending' || post.approvalStatus === 'rejected') {
-    job.status = 'failed';
-    job.lastError = `Post approval status is ${post.approvalStatus}`;
-    job.completedAt = new Date();
-    await job.save();
-    return { success: false, error: job.lastError };
-  }
-
-  if (!isPublishable(post)) {
-    job.status = 'failed';
-    job.lastError = `Post is ${post.moderationStatus}`;
-    job.completedAt = new Date();
-    await job.save();
-    return { success: false, error: job.lastError };
-  }
-
-  try {
-    let publishResult = null;
-
-    if (job.provider === 'linkedin') {
-      const integration = await SocialIntegration.findOne({ user: post.author._id, provider: 'linkedin' }).select('+accessToken');
-      if (!integration || !integration.isConnected || !integration.accessToken) {
-        throw new Error('LinkedIn account not linked for post author');
-      }
-      publishResult = await publishToLinkedIn(integration, post.content);
-      post.publishResults.linkedin = {
-        status: 'published',
-        externalId: publishResult.externalId,
-        message: 'Published to LinkedIn',
-        publishedAt: new Date(),
-      };
-    }
-
-    if (job.provider === 'github') {
-      const integration = await SocialIntegration.findOne({ user: post.author._id, provider: 'github' }).select('+accessToken');
-      if (!integration || !integration.isConnected || !integration.accessToken) {
-        throw new Error('GitHub account not linked for post author');
-      }
-      publishResult = await publishToGithub(integration, post, job.payload?.githubRepo || null);
-      post.publishResults.github = {
-        status: 'published',
-        externalId: publishResult.externalId,
-        message: 'Published to GitHub',
-        publishedAt: new Date(),
-      };
-    }
-
-    await post.save();
-
-    job.status = 'completed';
-    job.lastError = null;
-    job.result = publishResult;
-    job.completedAt = new Date();
-    await job.save();
-
-    return { success: true, result: publishResult, post };
-  } catch (error) {
-    const backoffMinutes = Math.min(2 ** job.attempts, 60);
-
-    job.lastError = error.message;
-    job.status = job.attempts >= job.maxAttempts ? 'failed' : 'queued';
-    job.nextRetryAt = job.status === 'queued' ? new Date(Date.now() + backoffMinutes * 60 * 1000) : null;
-    job.completedAt = job.status === 'failed' ? new Date() : null;
-    await job.save();
-
-    if (job.provider === 'linkedin') {
-      const post = await SocialPost.findById(job.post);
-      if (post) {
-        post.publishResults.linkedin = {
-          status: 'failed',
-          externalId: null,
-          message: error.message,
-          publishedAt: null,
-        };
-        await post.save();
-      }
-    }
-
-    if (job.provider === 'github') {
-      const post = await SocialPost.findById(job.post);
-      if (post) {
-        post.publishResults.github = {
-          status: 'failed',
-          externalId: null,
-          message: error.message,
-          publishedAt: null,
-        };
-        await post.save();
-      }
-    }
-
-    return { success: false, error: error.message };
-  }
-};
-
 export const getProviderOAuthStart = async (req, res) => {
   try {
     const { provider } = req.params;
+    const cfg = oauthConfig(provider);
+    if (!oauthConfigured(cfg)) return notSetUp(res, provider);
 
-    if (!['linkedin', 'github'].includes(provider)) {
-      return res.status(400).json({ success: false, message: 'provider must be linkedin or github' });
-    }
-
-    const cfg = verifyOAuthConfig(provider);
     const state = signOAuthState(provider, req.user._id);
-
-    let authUrl = '';
-    if (provider === 'github') {
-      authUrl = `${cfg.authUrl}?client_id=${encodeURIComponent(cfg.clientId)}&redirect_uri=${encodeURIComponent(cfg.redirectUri)}&scope=${encodeURIComponent(cfg.scope)}&state=${encodeURIComponent(state)}`;
-    } else {
-      authUrl = `${cfg.authUrl}?response_type=code&client_id=${encodeURIComponent(cfg.clientId)}&redirect_uri=${encodeURIComponent(cfg.redirectUri)}&state=${encodeURIComponent(state)}&scope=${encodeURIComponent(cfg.scope)}`;
-    }
+    const params = provider === 'github'
+      ? { client_id: cfg.clientId, redirect_uri: cfg.redirectUri, scope: cfg.scope, state }
+      : { response_type: 'code', client_id: cfg.clientId, redirect_uri: cfg.redirectUri, state, scope: cfg.scope };
+    // Spaces in the scope as %20, as the providers document
+    const query = Object.entries(params).map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+    const authUrl = `${cfg.authUrl}?${query}`;
 
     return res.json({ success: true, data: { provider, authUrl, state, redirectUri: cfg.redirectUri } });
   } catch (error) {
@@ -1502,13 +2156,8 @@ export const completeProviderOAuth = async (req, res) => {
     const { provider } = req.params;
     const { code, state } = req.body;
 
-    if (!['linkedin', 'github'].includes(provider)) {
-      return res.status(400).json({ success: false, message: 'provider must be linkedin or github' });
-    }
-
-    if (!code || !state) {
-      return res.status(400).json({ success: false, message: 'code and state are required' });
-    }
+    const cfg = oauthConfig(provider);
+    if (!oauthConfigured(cfg)) return notSetUp(res, provider);
 
     const statePayload = decodeOAuthState(state);
     if (!statePayload) {
@@ -1518,43 +2167,28 @@ export const completeProviderOAuth = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Invalid OAuth state' });
     }
 
-    const cfg = verifyOAuthConfig(provider);
-
     let tokenData;
     let profile;
+    // From here the provider is asked, with this server's client secret: a
+    // refused code still counts toward the limit
+    keepRateLimitSlot(res);
     try {
-      tokenData = provider === 'github'
-        ? await exchangeGithubCodeForToken(String(code), cfg)
-        : await exchangeLinkedInCodeForToken(String(code), cfg);
-
-      profile = provider === 'github'
-        ? await fetchGithubProfile(tokenData.accessToken)
-        : await fetchLinkedInProfile(tokenData.accessToken);
+      tokenData = await exchangeOAuthCode(provider, String(code), cfg);
+      profile = await fetchProfile(provider, tokenData.accessToken);
     } catch (error) {
-      // The provider refused the code or the token
-      return res.status(400).json({ success: false, message: error.message });
+      // The provider refused the code or the token, or couldn't be reached
+      if (error instanceof ProviderError) return sendProviderError(res, error);
+      throw error;
     }
 
-    const tokenExpiresAt = tokenData.expiresIn ? new Date(Date.now() + Number(tokenData.expiresIn) * 1000) : null;
-
-    const integration = await SocialIntegration.findOneAndUpdate(
-      { user: req.user._id, provider },
-      {
-        user: req.user._id,
-        provider,
-        providerUserId: profile.providerUserId,
-        accountHandle: profile.accountHandle,
-        isConnected: true,
-        scopes: tokenData.scope || [],
-        accessToken: String(tokenData.accessToken).trim(),
-        refreshToken: tokenData.refreshToken ? String(tokenData.refreshToken).trim() : null,
-        tokenExpiresAt,
-        connectedAt: new Date(),
-        accessTokenHint: `${provider}-oauth-token-configured`,
-        metadata: profile.metadata || {},
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    ).select('-accessToken -refreshToken');
+    const integration = await saveIntegration(req.user._id, provider, {
+      profile,
+      accessToken: String(tokenData.accessToken).trim(),
+      refreshToken: tokenData.refreshToken ? String(tokenData.refreshToken).trim() : null,
+      tokenExpiresAt: tokenData.expiresIn ? new Date(Date.now() + Number(tokenData.expiresIn) * 1000) : null,
+      scopes: tokenData.scope || [],
+      hint: `${provider}-oauth-token-configured`,
+    });
 
     await logAuditEventV2(req, {
       action: 'social_oauth_completed',
@@ -1563,7 +2197,104 @@ export const completeProviderOAuth = async (req, res) => {
       details: { provider },
     });
 
-    return res.json({ success: true, data: integration });
+    return res.json({ success: true, data: describeIntegration(integration) });
+  } catch (error) {
+    return sendServerError(res, error);
+  }
+};
+
+// ---------- Publishing ----------
+
+// The checks publishing and queuing share. Sends the refusal and returns
+// null, or returns the post (author populated) and the targets to use.
+const loadPostToPublish = async (req, res, action) => {
+  const { targets = null, githubRepo = null } = req.body || {};
+  const post = await SocialPost.findById(req.params.postId).populate('author', 'name role teamId');
+  if (!post || !post.author) {
+    res.status(404).json({ success: false, message: 'Post not found' });
+    return null;
+  }
+  if (!(await canPublishFor(req.user, post.author._id))) {
+    res.status(403).json({ success: false, message: `Not allowed to ${action} this post` });
+    return null;
+  }
+  if (!isPublishable(post)) {
+    res.status(409).json({ success: false, message: `This post is ${post.moderationStatus} and can't be published` });
+    return null;
+  }
+  if (post.approvalStatus === 'pending') {
+    res.status(409).json({ success: false, message: 'Post is pending approval before external publish' });
+    return null;
+  }
+  if (post.approvalStatus === 'rejected') {
+    res.status(409).json({ success: false, message: 'Post approval was rejected for external publish' });
+    return null;
+  }
+
+  const { targets: effectiveTargets, refused } = publishTargets(post, targets);
+  if (refused.length > 0) {
+    refuseTargets(res, refused);
+    return null;
+  }
+  if (effectiveTargets.github && !githubRepo && !process.env.GITHUB_DEFAULT_REPO) {
+    res.status(400).json({ success: false, message: GITHUB_REPO_REQUIRED });
+    return null;
+  }
+  return { post, effectiveTargets, githubRepo };
+};
+
+export const publishPostToTargets = async (req, res) => {
+  try {
+    const loaded = await loadPostToPublish(req, res, 'publish');
+    if (!loaded) return undefined;
+    const { post, effectiveTargets, githubRepo } = loaded;
+
+    if (!ensureAtLeastOneTarget(effectiveTargets)) {
+      return res.status(400).json({ success: false, message: 'At least one target is required' });
+    }
+
+    // Publishing again would make a second LinkedIn post or GitHub issue
+    const external = EXTERNAL_PROVIDERS.filter((provider) => effectiveTargets[provider]);
+    const done = external.filter((provider) => post.publishResults?.[provider]?.status === 'published');
+    if (done.length > 0) return alreadyPublished(res, done);
+
+    const now = new Date();
+    const claimed = [];
+    const releaseClaims = () => Promise.all(claimed.map((provider) => releaseTarget(post._id, provider)));
+    let result;
+    try {
+      for (const provider of external) {
+        const claim = await claimTarget(post._id, provider, now);
+        if (claim !== 'claimed') {
+          await releaseClaims();
+          return claim === 'published'
+            ? alreadyPublished(res, [provider])
+            : res.status(409).json({ success: false, message: `This post is being published to ${providerName(provider)} right now. Check its result in a moment.` });
+        }
+        claimed.push(provider);
+      }
+      // Each target's result releases its claim
+      result = await executePublishForPost(post, effectiveTargets, { githubRepo });
+    } catch (error) {
+      await releaseClaims();
+      throw error;
+    }
+
+    await logAuditEventV2(req, {
+      action: 'social_post_publish_triggered',
+      targetType: 'SocialPostV2',
+      targetId: post._id,
+      details: { targets: effectiveTargets },
+    });
+    const data = {
+      postId: post._id,
+      approvalStatus: post.approvalStatus,
+      targets: effectiveTargets,
+      result,
+      publishedAt: toIso(now),
+    };
+    // The same fields are also at the top level, as before
+    return res.json({ success: true, data, ...data });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -1571,41 +2302,29 @@ export const completeProviderOAuth = async (req, res) => {
 
 export const createPublishJobs = async (req, res) => {
   try {
-    const { postId } = req.params;
-    const { targets = null, githubRepo = null, maxAttempts = 3 } = req.body || {};
+    const { maxAttempts = 3 } = req.body || {};
+    const loaded = await loadPostToPublish(req, res, 'queue publish jobs for');
+    if (!loaded) return undefined;
+    const { post, effectiveTargets, githubRepo } = loaded;
 
-    const post = await SocialPost.findById(postId).populate('author', 'name role teamId');
-    if (!post || !post.author) {
-      return res.status(404).json({ success: false, message: 'Post not found' });
-    }
-
-    if (!(await canPublishFor(req.user, post.author._id))) {
-      return res.status(403).json({ success: false, message: 'Not allowed to queue publish jobs for this post' });
-    }
-
-    if (!isPublishable(post)) {
-      return res.status(409).json({ success: false, message: `This post is ${post.moderationStatus} and can't be published` });
-    }
-
-    if (post.approvalStatus === 'pending' || post.approvalStatus === 'rejected') {
-      return res.status(409).json({ success: false, message: `Post approval status is ${post.approvalStatus}` });
-    }
-
-    const { targets: effectiveTargets, refused } = publishTargets(post, targets);
-    if (refused.length > 0) {
-      return refuseTargets(res, refused);
-    }
-    const providers = ['linkedin', 'github'].filter((provider) => Boolean(effectiveTargets[provider]));
-
+    const providers = EXTERNAL_PROVIDERS.filter((provider) => Boolean(effectiveTargets[provider]));
     if (providers.length === 0) {
       return res.status(400).json({ success: false, message: 'At least one external target (linkedin/github) is required' });
     }
 
-    const jobs = [];
+    // A job after a published one would publish it a second time
+    const done = [];
+    for (const provider of providers) {
+      if (post.publishResults?.[provider]?.status === 'published'
+        || (await SocialPublishJobV2.exists({ post: post._id, provider, status: 'completed' }))) {
+        done.push(provider);
+      }
+    }
+    if (done.length > 0) return alreadyPublished(res, done);
 
+    const jobs = [];
     for (const provider of providers) {
       const existing = await SocialPublishJobV2.findOne({
-        owner: post.author._id,
         post: post._id,
         provider,
         status: { $in: ['queued', 'processing'] },
@@ -1616,8 +2335,9 @@ export const createPublishJobs = async (req, res) => {
         continue;
       }
 
-      const job = await SocialPublishJobV2.create({
+      jobs.push(await SocialPublishJobV2.create({
         owner: post.author._id,
+        queuedBy: req.user._id,
         post: post._id,
         provider,
         status: 'queued',
@@ -1625,9 +2345,7 @@ export const createPublishJobs = async (req, res) => {
         maxAttempts: Math.max(1, Math.min(10, Number(maxAttempts) || 3)),
         nextRetryAt: new Date(),
         payload: { githubRepo: githubRepo || null },
-      });
-
-      jobs.push(job);
+      }));
     }
 
     await logAuditEventV2(req, {
@@ -1643,19 +2361,29 @@ export const createPublishJobs = async (req, res) => {
   }
 };
 
+// Admins see every job. Everyone else sees the jobs for their own posts and
+// the jobs they queued; team leaders also see the jobs for posts by people in
+// the teams they lead while the team isn't frozen.
 export const getPublishJobs = async (req, res) => {
   try {
     const { status, provider } = req.query;
 
-    const filter = req.user.role === 'admin'
-      ? {}
-      : { owner: req.user._id };
+    let filter = {};
+    if (req.user.role !== 'admin') {
+      const scope = [{ owner: req.user._id }, { queuedBy: req.user._id }];
+      if (req.user.role === 'team_leader') {
+        scope.push({ owner: { $in: await ledUserIds(req.user._id, { activeOnly: true }) } });
+      }
+      filter = { $or: scope };
+    }
 
     if (status) filter.status = status;
     if (provider) filter.provider = provider;
 
     const jobs = await SocialPublishJobV2.find(filter)
       .populate('post', 'title content approvalStatus targets publishResults')
+      .populate('owner', 'name')
+      .populate('queuedBy', 'name')
       .sort({ createdAt: -1 })
       .limit(200);
 
@@ -1669,7 +2397,7 @@ export const processPublishJob = async (req, res) => {
   try {
     const { jobId } = req.params;
 
-    const job = await SocialPublishJobV2.findById(jobId).populate('post', 'author');
+    const job = await SocialPublishJobV2.findById(jobId);
     if (!job) {
       return res.status(404).json({ success: false, message: 'Publish job not found' });
     }
@@ -1681,8 +2409,24 @@ export const processPublishJob = async (req, res) => {
     if (job.status === 'completed') {
       return res.json({ success: true, message: 'Job already completed', data: job });
     }
+    if (job.status === 'failed') {
+      return res.status(409).json({ success: false, message: 'This job failed. Retry it first.' });
+    }
+    if (job.status === 'processing') {
+      return res.status(409).json({ success: false, message: 'This job is being processed right now' });
+    }
 
-    const runResult = await runPublishJob(job._id);
+    // Waiting out its backoff after a failed attempt; an admin may run it anyway
+    const now = new Date();
+    if (job.nextRetryAt && job.nextRetryAt > now && req.user.role !== 'admin') {
+      return res.status(409).json({
+        success: false,
+        message: `This job will try again at ${formatWhen(job.nextRetryAt)}`,
+        data: { nextRetryAt: job.nextRetryAt },
+      });
+    }
+
+    const runResult = await runPublishJob(job._id, { req });
     if (runResult.claimed === false) {
       return res.status(409).json({ success: false, message: runResult.error });
     }
@@ -1715,16 +2459,16 @@ export const retryPublishJob = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Not allowed to retry this job' });
     }
 
-    // Retrying a published job would post it a second time
-    if (job.status !== 'failed') {
+    // Retrying a published job would post it a second time. A retry starts
+    // over with all its attempts, due now.
+    const retried = await SocialPublishJobV2.findOneAndUpdate(
+      { _id: job._id, status: 'failed' },
+      { $set: { status: 'queued', attempts: 0, nextRetryAt: new Date(), completedAt: null, lastError: null, lockedAt: null } },
+      { new: true },
+    );
+    if (!retried) {
       return res.status(409).json({ success: false, message: `Only failed jobs can be retried; this one is ${job.status}` });
     }
-
-    job.status = 'queued';
-    job.nextRetryAt = new Date();
-    job.completedAt = null;
-    job.lastError = null;
-    await job.save();
 
     await logAuditEventV2(req, {
       action: 'social_publish_job_retried',
@@ -1733,12 +2477,14 @@ export const retryPublishJob = async (req, res) => {
       details: { provider: job.provider },
     });
 
-    return res.json({ success: true, data: job });
+    return res.json({ success: true, data: retried });
   } catch (error) {
     return sendServerError(res, error);
   }
 };
 
+// What the social-publish background job does, on request: recover jobs
+// stuck part-way, then run the queued jobs that are due
 export const processDuePublishJobs = async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -1746,33 +2492,21 @@ export const processDuePublishJobs = async (req, res) => {
     }
 
     const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 10));
-
-    const dueJobs = await SocialPublishJobV2.find({
-      status: 'queued',
-      nextRetryAt: { $lte: new Date() },
-    })
-      .sort({ nextRetryAt: 1 })
-      .limit(limit);
-
-    const outcomes = [];
-
-    for (const job of dueJobs) {
-      const result = await runPublishJob(job._id);
-      outcomes.push({ jobId: job._id, success: result.success, error: result.error || null });
-    }
+    const { recovered, outcomes } = await publishDueJobs(new Date(), limit, req);
 
     await logAuditEventV2(req, {
       action: 'social_publish_due_jobs_processed',
       targetType: 'SocialPublishJobV2',
-      details: { processed: outcomes.length },
+      details: { processed: outcomes.length, recovered },
     });
 
-    return res.json({ success: true, count: outcomes.length, data: outcomes });
+    return res.json({ success: true, count: outcomes.length, data: outcomes, recovered });
   } catch (error) {
     return sendServerError(res, error);
   }
 };
 
+// ---------- Moderation ----------
 
 export const getModerationPosts = async (req, res) => {
   try {
@@ -1799,28 +2533,40 @@ export const getModerationPosts = async (req, res) => {
   }
 };
 
+// Moderation moves a post between states, and only these ways:
+// clean ⇄ flagged, clean or flagged → hidden → clean, anything → removed → clean
+const MODERATION = {
+  flag: { from: ['clean'], to: 'flagged', verb: 'flagged', title: 'An admin flagged your post', body: 'It stays visible while it is reviewed.' },
+  unflag: { from: ['flagged'], to: 'clean', verb: 'unflagged' },
+  hide: { from: ['clean', 'flagged'], to: 'hidden', verb: 'hidden', title: 'An admin hid your post', body: 'Only you and admins can see it now.' },
+  unhide: { from: ['hidden'], to: 'clean', verb: 'unhidden', title: 'Your post is visible again', body: 'An admin made it visible again.' },
+  remove: { from: ['clean', 'flagged', 'hidden'], to: 'removed', verb: 'removed', title: 'An admin removed your post', body: 'Nobody else can see it now.' },
+  restore: { from: ['removed'], to: 'clean', verb: 'restored', title: 'An admin restored your post', body: 'It is visible again.' },
+};
+
 export const moderatePost = async (req, res) => {
   try {
     const { postId } = req.params;
-    const { action, reason = null } = req.body;
+    const { action } = req.body;
+    const reason = typeof req.body.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim() : null;
+    const rule = MODERATION[action];
 
-    const post = await SocialPost.findById(postId);
+    // Only from a state the action applies to, in one update
+    const post = await SocialPost.findOneAndUpdate(
+      { _id: postId, moderationStatus: { $in: rule.from } },
+      { $set: { moderationStatus: rule.to, moderationReason: reason, moderatedBy: req.user._id, moderatedAt: new Date() } },
+      { new: true, runValidators: true },
+    );
     if (!post) {
-      return res.status(404).json({ success: false, message: 'Post not found' });
+      const current = await SocialPost.findById(postId).select('moderationStatus');
+      if (!current) {
+        return res.status(404).json({ success: false, message: 'Post not found' });
+      }
+      return res.status(409).json({
+        success: false,
+        message: `This post is ${current.moderationStatus}. Only ${rule.from.join(' or ')} posts can be ${rule.verb}.`,
+      });
     }
-
-    if (action === 'flag') post.moderationStatus = 'flagged';
-    if (action === 'unflag') post.moderationStatus = 'clean';
-    if (action === 'hide') post.moderationStatus = 'hidden';
-    if (action === 'unhide') post.moderationStatus = 'clean';
-    if (action === 'remove') post.moderationStatus = 'removed';
-    if (action === 'restore') post.moderationStatus = 'clean';
-
-    post.moderationReason = reason ? String(reason).trim() : null;
-    post.moderatedBy = req.user._id;
-    post.moderatedAt = new Date();
-
-    await post.save();
 
     await logAuditEventV2(req, {
       action: 'social_post_moderated',
@@ -1829,6 +2575,19 @@ export const moderatePost = async (req, res) => {
       details: { moderationAction: action, moderationStatus: post.moderationStatus, reason: post.moderationReason },
     });
 
+    // Unflagging changes nothing the author can see
+    if (rule.title) {
+      await tell(req, [post.author], {
+        type: 'post_moderated',
+        title: rule.title,
+        body: reason ? `${rule.body} Reason: ${reason}` : rule.body,
+        link: postLink(post._id),
+        data: { postId: String(post._id), action, moderationStatus: post.moderationStatus },
+        email: true,
+      });
+    }
+
+    await post.populate('author', 'name role profileImage');
     return res.json({ success: true, data: post });
   } catch (error) {
     return sendServerError(res, error);

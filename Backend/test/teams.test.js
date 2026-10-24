@@ -52,6 +52,8 @@ test('teams', async (t) => {
   await check('team pending list shows members\' check-ins', pendingIds.includes(miaDay._id), JSON.stringify(pending.data).slice(0, 200));
   await check('team pending list leaves out the leader\'s own', !pendingIds.includes(leeDay._id));
 
+  // Today's check-in can be reviewed once it is checked out
+  await call('POST', '/attendance/checkout', { token: mia.token });
   const approved = await call('PUT', `/teams/${team._id}/attendance/${miaDay._id}/approve`, { token: lee.token });
   await check('leader approves a member\'s attendance', approved.status === 200 && approved.data.data.approvalStatus === 'approved' && approved.data.data.status === 'present', JSON.stringify(approved.data).slice(0, 200));
   await check('leader cannot approve own attendance (team route)',
@@ -154,8 +156,8 @@ test('team membership rules', async (t) => {
     (await call('DELETE', `/teams/${gamma._id}/members/${dan._id}`, { token: ann.token })).status === 404);
 
   // ---------- One team per user ----------
-  await check('admins cannot be invited',
-    (await call('POST', `/teams/${gamma._id}/invite`, { token: ann.token, body: { userId: admin._id } })).status === 400);
+  await check('admins cannot be invited (to a leader, an admin looks like nobody)',
+    (await call('POST', `/teams/${gamma._id}/invite`, { token: ann.token, body: { userId: admin._id } })).status === 404);
   await check('team leaders cannot be invited',
     (await call('POST', `/teams/${gamma._id}/invite`, { token: ann.token, body: { userId: ben._id } })).status === 400);
   await check('members of another team cannot be invited',
