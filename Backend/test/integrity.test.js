@@ -53,8 +53,10 @@ test('integrity', async (t) => {
   const moved = await call('PUT', `/attendance/${recordId}`, { token: adminToken, body: { date: istDay() } });
   await check('moving a record onto a day that already has one is refused', moved.status === 400, `status ${moved.status}`);
 
+  // Today's check-in can be reviewed once it is checked out
+  await call('POST', '/attendance/checkout', { token: alice.token });
   const reject = await call('PUT', `/attendance/${checkin.data.data._id}/disapprove`, { token: adminToken, body: { remarks: 'not in office' } });
-  await check('reject endpoint sets approvalStatus=rejected and keeps the day type', reject.status === 200 && reject.data.data.approvalStatus === 'rejected' && reject.data.data.status === 'present' && reject.data.data.remarks === 'not in office');
+  await check('reject endpoint sets approvalStatus=rejected and keeps the day type', reject.status === 200 && reject.data.data.approvalStatus === 'rejected' && reject.data.data.status === 'present' && reject.data.data.reviewRemarks === 'not in office' && !reject.data.data.remarks, JSON.stringify(reject.data).slice(0, 300));
   await call('POST', '/attendance/checkin', { token: bob.token });
   const pending = await call('GET', '/attendance?approvalStatus=pending', { token: adminToken });
   await check('pending list shows only records awaiting approval', pending.status === 200 && pending.data.data.length > 0 && pending.data.data.every((r) => r.approvalStatus === 'pending'));

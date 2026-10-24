@@ -14,5 +14,6 @@ router.get('/pending', protect, adminOrLeader, getTeamPendingAttendance);
 router.get('/', protect, adminOrLeader, getTeamAttendance);
 router.put('/:attendanceId/approve', protect, adminOrLeader, approveTeamAttendance);
 router.put('/:attendanceId/disapprove', protect, adminOrLeader, disapproveTeamAttendance);
+router.put('/:attendanceId/reject', protect, adminOrLeader, disapproveTeamAttendance);
 
 export default router;
