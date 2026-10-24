@@ -1,6 +1,7 @@
 // Background jobs for the attendance module, registered with utils/scheduler.js
 // (see jobs/index.js). Each job's run(now) must be safe to repeat.
 import Attendance from '../models/Attendance.js';
+import AttendanceSettings, { AUTO_ABSENT_DAYS_KEPT, SETTINGS_KEY } from '../models/AttendanceSettings.js';
 import User from '../models/User.js';
 import { toDayKey } from '../utils/dates.js';
 import { notify } from '../utils/notify.js';
@@ -42,14 +43,17 @@ registerJob('attendance-missed-checkout', HOUR, async (now) => {
 });
 
 // With autoAbsent on: yesterday, if it was a workday, everyone in a team with
-// no record for it is marked absent. The unique (user, day) index keeps a
-// second pass from adding anything.
+// no record for it is marked absent. Each day is done once: it is remembered
+// in AttendanceSettings.autoAbsentDays, so the later passes of the day don't
+// bring back an absence an admin deleted. The unique (user, day) index keeps
+// two passes at the same moment from adding anyone twice.
 registerJob('attendance-auto-absent', HOUR, async (now) => {
   const settings = await getSettings();
   if (!settings.autoAbsent) return { skipped: 'autoAbsent is off' };
 
   const day = addDays(toDayKey(now), -1);
   if (!isWorkday(day, settings, await holidaysBetween(day, day))) return { day, skipped: 'not a workday' };
+  if (await AttendanceSettings.exists({ key: SETTINGS_KEY, autoAbsentDays: day })) return { day, skipped: 'already done' };
 
   const people = await User.find({
     role: { $in: ['team_member', 'team_leader'] },
@@ -59,24 +63,34 @@ registerJob('attendance-auto-absent', HOUR, async (now) => {
   const recorded = new Set((await Attendance.distinct('user', { day })).map(String));
   // Not people who only signed up after that day
   const missing = people.filter((person) => !recorded.has(String(person._id)) && toDayKey(person.createdAt) <= day);
-  if (missing.length === 0) return { day, marked: 0 };
 
   const reviewedAt = new Date();
-  try {
-    await Attendance.insertMany(missing.map((person) => ({
-      user: person._id,
-      team: person.teamId || null,
-      date: new Date(`${day}T00:00:00Z`),
-      day,
-      status: 'absent',
-      approvalStatus: 'approved',
-      reviewedAt,
-      autoMarked: true,
-      remarks: 'Marked absent: no check-in',
-    })), { ordered: false });
-  } catch (error) {
-    // Someone added their day meanwhile: those are left as they are
-    if (error.code !== 11000 && !error.writeErrors) throw error;
+  if (missing.length > 0) {
+    try {
+      await Attendance.insertMany(missing.map((person) => ({
+        user: person._id,
+        team: person.teamId || null,
+        date: new Date(`${day}T00:00:00Z`),
+        day,
+        status: 'absent',
+        approvalStatus: 'approved',
+        reviewedAt,
+        autoMarked: true,
+        remarks: 'Marked absent: no check-in',
+      })), { ordered: false });
+    } catch (error) {
+      // Someone added their day meanwhile: those are left as they are
+      if (error.code !== 11000 && !error.writeErrors) throw error;
+    }
   }
-  return { day, marked: await Attendance.countDocuments({ day, autoMarked: true, reviewedAt }) };
+
+  // Done, also when nobody was missing. timestamps: false, so the settings'
+  // updatedAt still says when an admin last changed them.
+  await AttendanceSettings.updateOne(
+    { key: SETTINGS_KEY },
+    { $push: { autoAbsentDays: { $each: [day], $slice: -AUTO_ABSENT_DAYS_KEPT } } },
+    { timestamps: false }
+  );
+  const marked = missing.length > 0 ? await Attendance.countDocuments({ day, autoMarked: true, reviewedAt }) : 0;
+  return { day, marked };
 });

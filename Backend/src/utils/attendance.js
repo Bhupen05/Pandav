@@ -33,11 +33,24 @@ export const addDays = (day, count) => {
   return date.toISOString().slice(0, 10);
 };
 
-// Every day from start to end, both included
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Whole days from start to end (negative when end is earlier, NaN when either
+// isn't a day)
+export const daysApart = (start, end) => Math.round((atMidnightUtc(end) - atMidnightUtc(start)) / DAY_MS);
+
+// More days than any caller needs: daysBetween refuses a longer range rather
+// than build a list of millions of days
+const MAX_SPAN_DAYS = 1000;
+
+// Every day from start to end, both included. The days are counted first, not
+// stepped through comparing strings, which never ends past 9999-12-31 (the
+// next day is '+010000-01', which sorts before it).
 export const daysBetween = (start, end) => {
-  const days = [];
-  for (let day = start; day <= end; day = addDays(day, 1)) days.push(day);
-  return days;
+  const count = daysApart(start, end) + 1;
+  if (!(count > 0)) return [];
+  if (count > MAX_SPAN_DAYS) throw new RangeError(`daysBetween: ${count} days is more than ${MAX_SPAN_DAYS}`);
+  return Array.from({ length: count }, (_, index) => addDays(start, index));
 };
 
 // Hours and minutes of a moment in APP_TIMEZONE
@@ -214,6 +227,12 @@ export const isOpenToday = (record) =>
 
 const isLeave = (record) => Boolean(record.leaveRequestId) || record.status === 'leave';
 
+// A filter on approvalStatus matching a loaded pending record only while it is
+// still pending in the database. A record from before the migration has no
+// approvalStatus stored (it is worked out on load, which marks it modified).
+export const pendingInDatabase = (record) =>
+  (record.isModified('approvalStatus') ? { $in: [null, 'pending'] } : 'pending');
+
 // Tells the owner their records (all theirs, one day or the days of one leave
 // request) were approved or rejected. Leave decisions are also emailed.
 export const notifyReviewed = async (req, records, settings = null) => {
@@ -262,14 +281,29 @@ export const reviewRecord = async (req, record, approvalStatus, reviewRemarks) =
     return { status: 409, message: "They haven't checked out yet" };
   }
 
-  record.approvalStatus = approvalStatus;
-  record.approvedBy = req.user._id;
-  record.reviewedAt = new Date();
-  if (reviewRemarks !== undefined) record.reviewRemarks = reviewRemarks;
-  await record.save();
+  const changes = { approvalStatus, approvedBy: req.user._id, reviewedAt: new Date() };
+  if (reviewRemarks !== undefined) changes.reviewRemarks = reviewRemarks;
+  // A record from before the migration also stores what it was converted to on load
+  for (const field of ['status', 'day']) {
+    if (record.isModified(field)) changes[field] = record[field];
+  }
 
-  await notifyReviewed(req, [record], isLeave(record) ? await getSettings() : null);
-  return { status: 200, record };
+  // Written only while the record is still pending, so of two reviews at the
+  // same moment (two reviewers, a bulk review and a single one) only the
+  // first counts and the other gets the 409 above
+  const updated = await Attendance.findOneAndUpdate(
+    { _id: record._id, approvalStatus: pendingInDatabase(record) },
+    { $set: changes },
+    { new: true }
+  );
+  if (!updated) {
+    const current = await Attendance.findById(record._id).select('approvalStatus');
+    if (!current) return { status: 404, message: 'Attendance record not found' };
+    return { status: 409, message: `This record was already ${current.approvalStatus}` };
+  }
+
+  await notifyReviewed(req, [updated], isLeave(updated) ? await getSettings() : null);
+  return { status: 200, record: updated };
 };
 
 // ─── Leave balances ──────────────────────────────────────────────────────────
@@ -302,11 +336,15 @@ export const leaveUsage = async (userId, year) => {
 
 // Why asking for more leave of `type` would go over its yearly allowance, or
 // null if it fits (or the type has no limit). `requested` is { [year]: days }.
-export const balanceProblem = async (userId, type, requested) => {
+// With `saved`, the request's days are already stored (and so counted in the
+// usage): checked again after saving, because two requests sent at the same
+// moment both pass the check made before.
+export const balanceProblem = async (userId, type, requested, { saved = false } = {}) => {
   if (type.daysPerYear === null || type.daysPerYear === undefined) return null;
   for (const [year, days] of Object.entries(requested)) {
     const used = (await leaveUsage(userId, year))[type.key] || { approved: 0, pending: 0 };
-    const remaining = Math.max(0, type.daysPerYear - used.approved - used.pending);
+    const others = used.approved + used.pending - (saved ? days : 0);
+    const remaining = Math.max(0, type.daysPerYear - others);
     if (days > remaining) {
       return `You have ${dayCount(remaining)} of ${type.label} left for ${year}, and this request needs ${dayCount(days)}`;
     }

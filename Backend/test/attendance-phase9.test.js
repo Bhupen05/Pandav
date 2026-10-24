@@ -60,6 +60,15 @@ const insertRecord = async (fields) => {
   return String(insertedId);
 };
 const recordById = (id) => db.collection('attendances').findOne({ _id: new ObjectId(id) });
+
+// A request that doesn't answer within `ms` resolves as { status: 'timeout' }
+const withTimeout = (promise, ms = 5000) => {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((resolve) => { timer = setTimeout(() => resolve({ status: 'timeout' }), ms); }),
+  ]).finally(() => clearTimeout(timer));
+};
 const audits = () => db.collection('auditeventv2');
 const auditCount = (action, filter = {}) => audits().countDocuments({ action, ...filter });
 
@@ -86,7 +95,7 @@ before(async () => {
   const demoToken = await login(USER);
   demo = { token: demoToken, ...(await me(demoToken)) };
 
-  for (const [key, name] of [['lee', 'Lee Leader'], ['mia', 'Mia Member'], ['max', 'Max Mover'], ['kim', 'Kim Leader'], ['oz', 'Oz Outsider']]) {
+  for (const [key, name] of [['lee', 'Lee Leader'], ['mia', 'Mia Member'], ['max', 'Max Mover'], ['kim', 'Kim Leader'], ['oz', 'Oz Outsider'], ['flo', 'Flo Flooder']]) {
     people[key] = await register(name, `${key}@attend.test`);
   }
   const { lee, mia, max, kim } = people;
@@ -181,6 +190,9 @@ test('check-in and check-out', async (t) => {
   const check = checker(t);
   const { call } = server.api;
   const { lee, mia, max, kim, oz } = people;
+  // Every day a workday, so a day of leave today is allowed whatever weekday
+  // the tests run on
+  await call('PUT', '/attendance/settings', { token: adminToken, body: { workdays: [1, 2, 3, 4, 5, 6, 7] } });
 
   // A pending request for today without a check-in time
   const request = await call('POST', '/attendance', { token: mia.token, body: { date: today(), status: 'present', remarks: 'In after the dentist' } });
@@ -226,6 +238,13 @@ test('check-in and check-out', async (t) => {
   await check('after the leave was turned down, check-in works and starts a new pending day',
     maxIn.status === 200 && maxIn.data.data.checkInTime && maxIn.data.data.approvalStatus === 'pending' && maxIn.data.data.status === 'present' &&
     !maxIn.data.data.leaveType && !maxIn.data.data.reviewRemarks && !maxIn.data.data.approvedBy, JSON.stringify(maxIn.data).slice(0, 300));
+  await check("the employee's own remarks stay", maxIn.data.data.remarks === 'Doctor', JSON.stringify(maxIn.data).slice(0, 300));
+  const replaced = await audits().findOne({ action: 'attendance_record_edited', targetId: leave.data.data._id });
+  const changes = replaced?.details?.changes || {};
+  await check('the decision it replaces is kept in the audit log',
+    /rejected/.test(replaced?.details?.reason) && changes.approvalStatus?.from === 'rejected' && changes.approvalStatus.to === 'pending' &&
+    changes.reviewRemarks?.from === 'We need you in' && changes.approvedBy?.from === lee._id && changes.leaveType?.from === 'casual' &&
+    changes.leaveRequestId?.from === leave.data.data.leaveRequestId && !changes.remarks, JSON.stringify(replaced));
 
   // Other requests for today
   const absent = (await call('POST', '/attendance', { token: oz.token, body: { date: today(), status: 'absent' } })).data.data;
@@ -256,6 +275,21 @@ test('check-in and check-out', async (t) => {
   await check("a shift that started yesterday is checked out today",
     ozOut.status === 200 && ozOut.data.data._id === nightShift && ozOut.data.data.day === yesterday && ozOut.data.data.workHours >= 2.9, JSON.stringify(ozOut.data).slice(0, 300));
   await check('then nothing is left to check out', (await call('POST', '/attendance/checkout', { token: oz.token })).status === 404);
+
+  // Once today is checked in, an earlier day's forgotten check-in is not a shift still running
+  const forgotten = await insertRecord({ user: lee._id, team: alpha._id, day: yesterday, checkInTime: new Date(Date.now() - 5 * HOUR) });
+  await check('setup: a check-in today with yesterday still open', (await call('POST', '/attendance/checkin', { token: lee.token })).status === 201);
+  const [leeOut, doubleClick] = await Promise.all([
+    call('POST', '/attendance/checkout', { token: lee.token }),
+    call('POST', '/attendance/checkout', { token: lee.token }),
+  ]);
+  await check("checking out closes today's day, once, even with a double click",
+    [leeOut, doubleClick].filter((res) => res.status === 200 && res.data.data.day === today()).length === 1 &&
+    [leeOut, doubleClick].some((res) => res.status === 400 && res.data.message === 'Already checked out today'),
+    JSON.stringify([leeOut.status, leeOut.data?.message, doubleClick.status, doubleClick.data?.message]));
+  const again = await call('POST', '/attendance/checkout', { token: lee.token });
+  await check("a second check-out says so, and doesn't check out yesterday's forgotten check-in",
+    again.status === 400 && again.data.message === 'Already checked out today' && !(await recordById(forgotten)).checkOutTime, JSON.stringify(again.data));
 
   await insertRecord({ user: demo._id, day: dayFromNow(-3), checkInTime: new Date(Date.now() - 3 * DAY) });
   await check('a check-in more than 20 hours ago is not checked out',
@@ -311,7 +345,34 @@ test("reviews follow the record's team", async (t) => {
   await check('a day asked for after joining belongs to the team', ozNew.team?._id === alpha._id);
   const teamPending = (await call('GET', `/teams/${alpha._id}/attendance/pending`, { token: lee.token })).data.data.map((r) => r._id);
   await check('and is in the team queue, the old one is not', teamPending.includes(ozNew._id) && !teamPending.includes(ozOld), JSON.stringify(teamPending));
-  await check('the leader approves it', (await call('PUT', `/attendance/${ozNew._id}/approve`, { token: lee.token })).status === 200);
+
+  // Reviews at the same moment, on every route: only the first counts
+  const reviews = await Promise.all([
+    call('PUT', `/attendance/${ozNew._id}/approve`, { token: lee.token }),
+    call('PUT', `/attendance/${ozNew._id}/reject`, { token: adminToken, body: { reviewRemarks: 'No' } }),
+    call('PUT', `/teams/${alpha._id}/attendance/${ozNew._id}/approve`, { token: lee.token }),
+    call('POST', '/attendance/bulk-review', { token: adminToken, body: { ids: [ozNew._id], action: 'reject' } }),
+  ]);
+  const outcome = (res) => res.data?.data?.results?.[0] ?? res;
+  const wins = reviews.filter((res) => outcome(res).status === 200);
+  await check('of reviews sent together, exactly one is applied and the others are refused',
+    wins.length === 1 && reviews.every((res) => outcome(res).status === 200 || [403, 409].includes(outcome(res).status)),
+    JSON.stringify(reviews.map((res) => [outcome(res).status, outcome(res).message ?? outcome(res).data?.message])));
+  const decided = await recordById(ozNew._id);
+  await check('the stored decision is the one applied', ['approved', 'rejected'].includes(decided.approvalStatus) && decided.approvedBy);
+  const ozTold = (await notificationsOf(oz.token)).filter((n) => n.type === 'attendance_reviewed' && n.data.attendanceIds?.includes(ozNew._id));
+  await check('and the owner is told once', ozTold.length === 1 && ozTold[0].data.approvalStatus === decided.approvalStatus, JSON.stringify(ozTold));
+  // A leader's edit of the decision at the same moment as a review
+  const ozNext = (await call('POST', '/attendance', { token: oz.token, body: { date: dayFromNow(-3), status: 'present' } })).data.data;
+  const [edit, approval] = await Promise.all([
+    call('PUT', `/attendance/${ozNext._id}`, { token: lee.token, body: { approvalStatus: 'rejected' } }),
+    call('PUT', `/attendance/${ozNext._id}/approve`, { token: adminToken }),
+  ]);
+  const settled = await recordById(ozNext._id);
+  await check('an edit and a review sent together: one is applied, the other refused',
+    [edit, approval].filter((res) => res.status === 200).length === 1 && [edit, approval].every((res) => [200, 403, 409].includes(res.status)) &&
+    settled.approvalStatus === (edit.status === 200 ? 'rejected' : 'approved'),
+    JSON.stringify([edit.status, edit.data?.message, approval.status, approval.data?.message, settled.approvalStatus]));
 
   // Someone who moves to another team leaves their history with the old one
   const maxOld = (await call('POST', '/attendance', { token: max.token, body: { date: dayFromNow(-2), status: 'present' } })).data.data;
@@ -378,6 +439,8 @@ test('leave over several days', async (t) => {
     ['no leave type', { startDate: '2030-05-06' }],
     ['an end before the start', { startDate: '2030-05-07', endDate: '2030-05-06', leaveType: 'casual' }],
     ['a date that does not exist', { startDate: '2030-02-30', leaveType: 'casual' }],
+    ['a range of thousands of years', { startDate: '0001-01-01', endDate: '9999-12-31', leaveType: 'unpaid' }],
+    ['an end after the year 9999', { startDate: '9999-12-31', endDate: '+010000-01-01T00:00:00Z', leaveType: 'unpaid' }],
   ]) {
     const res = await call('POST', '/attendance/leave', { token: mia.token, body });
     await check(`leave refuses ${name}`, res.status === 400, `${res.status} ${JSON.stringify(res.data)}`);
@@ -424,6 +487,37 @@ test('leave over several days', async (t) => {
 
   const after = Object.fromEntries((await call('GET', '/attendance/leave/balance?year=2030', { token: mia.token })).data.data.types.map((type) => [type.key, type]));
   await check('approved days move from pending to approved', after.sick.approved === 5 && after.sick.pending === 0 && after.sick.remaining === 1);
+
+  // The last day before the year 10000 used to loop forever, blocking the server
+  const lastDay = await withTimeout(call('POST', '/attendance/leave', { token: oz.token, body: { startDate: '9999-12-31', leaveType: 'unpaid' } }));
+  await check('leave on 9999-12-31 is answered at once', lastDay.status === 201 && lastDay.data.data.days === 1, JSON.stringify(lastDay.data ?? lastDay).slice(0, 300));
+  if (lastDay.status === 201) await call('DELETE', `/attendance/leave/${lastDay.data.data.leaveRequestId}`, { token: oz.token });
+
+  // One day of leave through POST /attendance follows the same rules
+  const ozCount = () => db.collection('attendances').countDocuments({ user: new ObjectId(oz._id) });
+  const ozBefore = await ozCount();
+  const noType = await call('POST', '/attendance', { token: oz.token, body: { date: '2030-05-06', status: 'leave' } });
+  await check('a day of leave needs a leave type, so it counts against a balance',
+    noType.status === 400 && noType.data.message === 'Please choose a leave type', JSON.stringify(noType.data));
+  for (const [name, date] of [['a non-workday', addDays(MONDAY, 5)], ['a holiday', HOLIDAY]]) {
+    const res = await call('POST', '/attendance', { token: oz.token, body: { date, status: 'leave', leaveType: 'casual' } });
+    await check(`a day of leave is refused on ${name}`, res.status === 400 && /isn't a workday/.test(res.data.message), JSON.stringify(res.data));
+  }
+  await check('and none of them is created', (await ozCount()) === ozBefore);
+
+  // Two requests sent together can't both use the same allowance
+  const MONDAY_2031 = '2031-03-03';
+  const together = await Promise.all([MONDAY_2031, addDays(MONDAY_2031, 7)].map((startDate) =>
+    call('POST', '/attendance/leave', { token: oz.token, body: { startDate, endDate: addDays(startDate, 3), leaveType: 'sick' } })));
+  const sick2031 = Object.fromEntries((await call('GET', '/attendance/leave/balance?year=2031', { token: oz.token })).data.data.types.map((type) => [type.key, type])).sick;
+  await check('two requests sent at once that together go over the allowance are not both kept',
+    together.filter((res) => res.status === 201).length <= 1 &&
+    together.every((res) => res.status === 201 || (res.status === 400 && /of Sick leave left for 2031/.test(res.data.message))) &&
+    sick2031.pending <= 6 && sick2031.pending === together.filter((res) => res.status === 201).length * 4,
+    JSON.stringify({ together: together.map((res) => [res.status, res.data?.message]), sick2031 }));
+  for (const res of together.filter((r) => r.status === 201)) {
+    await call('DELETE', `/attendance/leave/${res.data.data.leaveRequestId}`, { token: oz.token });
+  }
 
   const single = await call('POST', '/attendance', { token: mia.token, body: { date: '2030-05-06', status: 'leave', leaveType: 'sick' } });
   await check('a single day of leave counts against the balance too', single.status === 201 && single.data.data.leaveRequestId);
@@ -477,6 +571,10 @@ test('missed check-outs and corrections', async (t) => {
     asked.status === 200 && asked.data.data.correctionRequest?.checkOutTime === fixTime.toISOString() && asked.data.data.correctionRequest.remarks === 'Forgot to check out', JSON.stringify(asked.data).slice(0, 300));
   await check('the leader is asked to apply it',
     (await notificationsOf(lee.token)).some((n) => n.type === 'attendance_correction_requested' && n.link === '/approvals' && n.data.attendanceId === missed));
+  const askedAgain = await correct({ checkOutTime: fixTime.toISOString(), remarks: 'Forgot to check out, left at six' });
+  await check('asking again replaces the request', askedAgain.status === 200 && askedAgain.data.data.correctionRequest.remarks === 'Forgot to check out, left at six');
+  await check('without telling the reviewers again',
+    (await notificationsOf(lee.token)).filter((n) => n.type === 'attendance_correction_requested' && n.data.attendanceId === missed).length === 1);
   await check('reviewers can list corrections and missed check-outs',
     (await call('GET', '/attendance?hasCorrection=true', { token: lee.token })).data.data.some((r) => r._id === missed) &&
     (await call('GET', '/attendance?missedCheckout=true', { token: lee.token })).data.data.some((r) => r._id === missed));
@@ -488,6 +586,19 @@ test('missed check-outs and corrections', async (t) => {
     applied.status === 200 && applied.data.data.workHours === 8 && applied.data.data.correctionRequest === null && applied.data.data.missedCheckout === false &&
     applied.data.data.approvalStatus === 'approved', JSON.stringify(applied.data).slice(0, 300));
   await check('and leaves who approved it alone', applied.data.data.approvedBy?._id === lee._id);
+  const rewrite = await call('PUT', `/attendance/${missed}`, { token: lee.token, body: { checkOutTime: new Date(checkInTime.getTime() + 10 * HOUR).toISOString() } });
+  await check('once settled, the leader cannot move the check-out time of the reviewed day again',
+    rewrite.status === 403 && rewrite.data.message === 'Only an admin can change a record that has already been reviewed' &&
+    (await recordById(missed)).workHours === 8, JSON.stringify(rewrite.data));
+  const reviewedDay = await insertRecord({
+    user: mia._id, team: alpha._id, day: dayFromNow(-10), approvalStatus: 'approved', approvedBy: new ObjectId(lee._id),
+    checkInTime: new Date(Date.now() - 10 * DAY), checkOutTime: new Date(Date.now() - 10 * DAY + 8 * HOUR), workHours: 8,
+  });
+  await check("nor the check-out time of a reviewed day nobody asked to correct",
+    (await call('PUT', `/attendance/${reviewedDay}`, { token: lee.token, body: { checkOutTime: new Date(Date.now() - 10 * DAY + 2 * HOUR).toISOString() } })).status === 403 &&
+    (await recordById(reviewedDay)).workHours === 8);
+  const adminFix = await call('PUT', `/attendance/${reviewedDay}`, { token: adminToken, body: { checkOutTime: new Date(Date.now() - 10 * DAY + 7 * HOUR).toISOString() } });
+  await check('an admin still can', adminFix.status === 200 && adminFix.data.data.workHours === 7, JSON.stringify(adminFix.data).slice(0, 200));
 
   const miaToday = (await call('GET', `/attendance?user=${mia._id}&startDate=${today()}&endDate=${today()}`, { token: mia.token })).data.data[0];
   await check('a reviewed day without a missed check-out cannot be corrected',
@@ -527,6 +638,7 @@ test('auto-absent', async (t) => {
   await insertRecord({ user: lee._id, team: alpha._id, day: workday, approvalStatus: 'approved' });
   const expected = (await db.collection('users').find({ role: { $in: ['team_member', 'team_leader'] }, isActive: true, deletedAt: null }).toArray())
     .filter((user) => String(user._id) !== lee._id).length;
+  const settingsSaved = (await call('GET', '/attendance/settings', { token: adminToken })).data.data.updatedAt;
   const run = await runJob('attendance-auto-absent', nowAfter(workday));
   await check('everyone in a team without a record that day is marked absent', run.data.data.day === workday && run.data.data.marked === expected && expected >= 4, JSON.stringify({ run: run.data, expected }));
   const miaAbsent = await db.collection('attendances').findOne({ user: new ObjectId(mia._id), day: workday });
@@ -536,7 +648,17 @@ test('auto-absent', async (t) => {
   await check('someone with a record keeps it', (await db.collection('attendances').findOne({ user: new ObjectId(lee._id), day: workday })).status === 'present');
   await check('people outside a team and admins are not marked',
     !(await db.collection('attendances').findOne({ day: workday, user: { $in: [new ObjectId(demo._id), new ObjectId(admin._id)] } })));
-  await check('a second pass adds nothing', (await runJob('attendance-auto-absent', nowAfter(workday))).data.data.marked === 0);
+  const second = await runJob('attendance-auto-absent', nowAfter(workday));
+  await check('a second pass knows the day is done', second.data.data.skipped === 'already done' && second.data.data.day === workday, JSON.stringify(second.data));
+  await check("the job's bookkeeping isn't a settings change",
+    (await call('GET', '/attendance/settings', { token: adminToken })).data.data.updatedAt === settingsSaved &&
+    !('autoAbsentDays' in (await call('GET', '/attendance/settings', { token: adminToken })).data.data));
+
+  // An admin deletes an absence (the person wasn't expected that day): it stays deleted
+  await check('an admin deletes an automatic absence', (await call('DELETE', `/attendance/${miaAbsent._id}`, { token: adminToken })).status === 200);
+  await runJob('attendance-auto-absent', nowAfter(workday));
+  await check('and a later pass of the same day does not bring it back',
+    !(await db.collection('attendances').findOne({ user: new ObjectId(mia._id), day: workday })));
   await call('PUT', '/attendance/settings', { token: adminToken, body: { autoAbsent: false } });
 });
 
@@ -697,4 +819,28 @@ test('a frozen team', async (t) => {
   await check("a frozen team's leave requests go to the admins",
     leave.status === 201 && (await notificationsOf(adminToken)).some((n) => n.type === 'leave_requested' && n.data.leaveRequestId === leave.data.data.leaveRequestId) &&
     !(await notificationsOf(kim.token)).some((n) => n.type === 'leave_requested' && n.data.leaveRequestId === leave.data.data.leaveRequestId));
+});
+
+test('requests that notify reviewers are limited per person', async (t) => {
+  const check = checker(t);
+  const { call } = server.api;
+  const { flo, mia } = people;
+
+  // Leave and correction requests share one limit of 30 an hour
+  const nowhere = String(new ObjectId());
+  const statuses = [];
+  for (let i = 0; i < 30; i += 1) {
+    statuses.push((await call('POST', `/attendance/${nowhere}/correction`, { token: flo.token, body: {} })).status);
+  }
+  await check('up to 30 an hour are answered as usual', statuses.every((status) => status === 404), JSON.stringify(statuses));
+  const limited = await call('POST', '/attendance/leave', { token: flo.token, body: { startDate: '2032-01-05', leaveType: 'casual' } });
+  await check('after that, leave requests are refused for a while',
+    limited.status === 429 && limited.data.message === 'Too many leave or correction requests. Please try again later.', JSON.stringify(limited.data));
+  await check('so are corrections', (await call('POST', `/attendance/${nowhere}/correction`, { token: flo.token, body: {} })).status === 429);
+  await check('and a day of leave through POST /attendance',
+    (await call('POST', '/attendance', { token: flo.token, body: { date: '2032-01-05', status: 'leave', leaveType: 'casual' } })).status === 429);
+  await check('other requests still work',
+    (await call('POST', '/attendance', { token: flo.token, body: { date: '2032-01-06', status: 'present' } })).status === 201);
+  await check('and other people are not affected',
+    (await call('POST', `/attendance/${nowhere}/correction`, { token: mia.token, body: {} })).status === 404);
 });

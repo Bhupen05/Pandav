@@ -120,6 +120,12 @@ What the settings do:
 - A record is reviewed **once**, from `pending`. Approving or rejecting a record that is already
   `approved` or `rejected` answers `409 This record was already approved` (or `rejected`). To
   change a decision, an admin edits the record with `PUT /attendance/:id`.
+- The decision is written only while the record is still `pending`, so when two reviews arrive at
+  the same moment (two reviewers, a bulk review and a single one, the team route and the
+  attendance route) only the first is applied, the owner is told once, and the others get that
+  `409`. The same goes for an edit of a pending record (`PUT /attendance/:id`) made at the moment it
+  is reviewed: it is refused (`409` for a reviewer, `403` for the owner) rather than undoing the
+  decision.
 - **Today's open check-in waits.** A record checked in today and not checked out yet can't be
   approved or rejected: `409 They haven't checked out yet`. A day before today without a check-out
   can be reviewed (see [missed check-outs](#missed-check-outs-and-corrections)).
@@ -150,7 +156,7 @@ about their own action.
 | `attendance_reviewed` | The owner | A record is approved or rejected (approve/reject routes, team routes, bulk review, or an admin changing `approvalStatus` with `PUT`), or a leave request is approved or rejected | `/attendance`, or `/attendance?tab=leave` for leave | For leave decisions |
 | `leave_requested` | The requester's reviewers: the active leaders of their team (if it isn't frozen) other than the requester; with none, the admins | Someone asks for leave (`POST /attendance/leave`, or a one-day `POST /attendance` with `status: "leave"`) | `/approvals` | No |
 | `attendance_missed_checkout` | The owner | The missed check-out job marks a record | `/attendance` | No |
-| `attendance_correction_requested` | The record's reviewers, found as for `leave_requested` from the record's team | The owner asks for a check-out correction | `/approvals` | No |
+| `attendance_correction_requested` | The record's reviewers, found as for `leave_requested` from the record's team | The owner asks for a check-out correction (not again when they replace a request still waiting) | `/approvals` | No |
 
 `data` holds `attendanceIds`, `leaveRequestId` and `approvalStatus` (`attendance_reviewed`),
 `leaveRequestId` and `userId` (`leave_requested`), `attendanceId` and `day`
@@ -162,7 +168,7 @@ about their own action.
 | Action | When | `details` |
 | --- | --- | --- |
 | `attendance_record_created` | An admin creates a record for someone else | `user`, `day`, `status`, `approvalStatus` |
-| `attendance_record_edited` | `PUT /attendance/:id` changes anything | `user`, `changes: { field: { from, to } }` |
+| `attendance_record_edited` | `PUT /attendance/:id` changes anything; or the owner checks in on a day whose request was rejected, which replaces that decision (see [Check in](#check-in)) | `user`, `changes: { field: { from, to } }`; for a check-in also `reason` |
 | `attendance_record_deleted` | An admin deletes a record | `user`, `day`, `status`, `approvalStatus` |
 | `attendance_settings_updated` | An admin saves settings | `changes`: the settings sent |
 | `holiday_created` | An admin adds a holiday | `day`, `name` |
@@ -172,17 +178,28 @@ about their own action.
 ## Background jobs
 
 Both run every hour and can be run by hand by an admin (see [Admin.md](Admin.md)). Running either
-again finds nothing more to do.
+again finds nothing more to do: the missed check-out job marks each record once, and auto-absent
+does each day once. The days auto-absent has done (the latest 60) are kept with the settings, so an
+automatic absence an admin deletes, for someone who wasn't expected that day, stays deleted. These
+days aren't a setting and don't change the settings' `updatedAt`.
 
 | Job | Does | Returns |
 | --- | --- | --- |
 | `attendance-missed-checkout` | Finds records with a check-in, no check-out, a `day` before today, and a check-in more than 20 hours ago (until then the owner can still check out, see [Check out](#check-out)). Sets `missedCheckout: true` once on each and sends the owner `attendance_missed_checkout`. Up to 500 records a pass | `{ marked }` |
-| `attendance-auto-absent` | Only when `autoAbsent` is on, and only for the previous day, if that was a workday and not a holiday. Every active, not deleted `team_member` or `team_leader` with no record that day, who had signed up by then, gets a record with `status: "absent"`, `approvalStatus: "approved"`, `autoMarked: true`, `remarks: "Marked absent: no check-in"` and `team` set to their team | `{ day, marked }`, or `{ skipped }` with the reason (`autoAbsent is off`, `not a workday`) |
+| `attendance-auto-absent` | Only when `autoAbsent` is on, and only for the previous day, if that was a workday and not a holiday, and only once for that day. Every active, not deleted `team_member` or `team_leader` with no record that day, who had signed up by then, gets a record with `status: "absent"`, `approvalStatus: "approved"`, `autoMarked: true`, `remarks: "Marked absent: no check-in"` and `team` set to their team | `{ day, marked }`, or `{ skipped }` with the reason (`autoAbsent is off`, `not a workday`, `already done`) |
 
 ## Endpoints
 
 All endpoints need a signed-in session. A malformed `:id` returns `400` with `Invalid _id`.
 Schema validation failures return `400` with the schema's message.
+
+**Requests that notify reviewers are limited.** `POST /attendance/leave`,
+`POST /attendance/:id/correction` and a non-admin's `POST /attendance` with `status: "leave"`
+share a limit of 30 an hour per person (counted by account, failed requests too), so nobody can
+flood their reviewers' notifications (every admin's, for someone without a team leader) by asking
+and withdrawing again and again. Over it they answer
+`429 Too many leave or correction requests. Please try again later.`, with `RateLimit` headers
+saying when it resets. Admins entering records and every other request are not limited by it.
 
 | Method | Path | Who may call |
 | --- | --- | --- |
@@ -387,8 +404,10 @@ them, or the one in `team`).
 - Everyone else (team leaders included) creates a request for themselves with
   `approvalStatus: "pending"`. Only `date`, `status`, `remarks` and, for `status: "leave"`,
   `leaveType` are read from the body. A day of leave this way is a one-day
-  [leave request](#leave): it gets a `leaveRequestId`, counts against the leave balance, and the
-  reviewers get `leave_requested`.
+  [leave request](#leave) with the same rules as `POST /attendance/leave`: it needs a
+  `leaveType`, the day must be a workday and not a holiday, and it counts against that type's
+  balance (checked again once saved, so two requests sent together can't both use the last day).
+  It gets a `leaveRequestId`, and the reviewers get `leave_requested`.
 
 **Body**
 
@@ -398,7 +417,7 @@ them, or the one in `team`).
 | `date` | All | Optional, defaults to now; sets `day` |
 | `status` | All | Optional, default `present` |
 | `remarks` | All | Optional |
-| `leaveType` | All | With `status: "leave"` (admins also with `half-day`); a key from the settings |
+| `leaveType` | All | With `status: "leave"` (admins also with `half-day`); a key from the settings. Required for a non-admin's `leave` |
 | `approvalStatus` | Admin | Optional, default `approved` |
 | `checkInTime`, `checkOutTime` | Admin | Optional; set `workHours` together |
 | `reviewRemarks` | Admin | Optional |
@@ -430,8 +449,11 @@ them, or the one in `team`).
 - `400` `That user doesn't exist or is no longer active`
 - `400` `Please provide a valid date`
 - `400` `Unknown leave type`
+- `400` `Please choose a leave type`: a non-admin's `leave` without a `leaveType`.
+- `400` `That day isn't a workday (or is a holiday), so it needs no leave`
 - `400` `You have <n> days of <leave type> left for <year>, and this request needs 1 day`
 - `400` `Attendance already recorded for this user on that day`
+- `429` `Too many leave or correction requests. Please try again later.`
 - `400` validation message, for example `Invalid status` or
   `Check-out time cannot be before check-in time`.
 
@@ -456,8 +478,10 @@ them, or the one in `team`).
   `reviewRemarks` and `leaveType` on any record, reviewed or not. This is how a decision is
   changed.
 - **A team leader who is a reviewer** of the record can set the same fields while it is
-  `pending`. Once it is reviewed they can still set `checkOutTime` (to fix a missed check-out) and
-  `reviewRemarks`; anything else answers `403`.
+  `pending`. Once it is reviewed they can still set `reviewRemarks`, decline a correction
+  (`correctionRequest: null`), and set `checkOutTime`, but only while the record has a
+  correction request or a missed check-out to settle. Anything else, including moving the
+  check-out time of a reviewed day nobody asked to correct, answers `403`.
 - **The owner**, when not a reviewer, can set only `remarks`, and only while the record is
   `pending`.
 
@@ -479,10 +503,13 @@ Returns `200` with the updated record.
 - `404` `Attendance record not found`
 - `403` `Not authorized to update this record`
 - `403` `Only an admin can change a record that has already been reviewed`: a leader changed a
-  field other than `checkOutTime` or `reviewRemarks` on a reviewed record.
+  field other than `reviewRemarks` or `correctionRequest` on a reviewed record, or its
+  `checkOutTime` without a correction or missed check-out to settle.
 - `403` `This record has already been reviewed and can no longer be edited`: the owner edited a
-  record that is no longer `pending`.
+  record that is no longer `pending` (also when it was reviewed while the edit was on its way).
 - `409` `They haven't checked out yet`: approving or rejecting today's open check-in.
+- `409` `This record was already approved` / `rejected`: a reviewer's edit of a pending record
+  arrived just after someone reviewed it.
 - `400` `Please provide a valid date`, `Unknown leave type`, `reviewRemarks must be text`
 - `400` `Attendance already recorded for this user on that day`: the new `date` falls on a day the
   user already has a record for.
@@ -521,7 +548,7 @@ When today already has a record:
 | Has a check-in time | `400 Already checked in today` |
 | A request for leave, absence or a half day, pending or approved | `400 You asked for leave today`, `400 You asked to be marked absent today` or `400 You asked for a half day today` |
 | A pending `present` or `late` request without a check-in time | The check-in time is filled in. `200` with the record |
-| A rejected request without a check-in time | It becomes today's check-in: `status` `present` or `late`, `pending`, with the leave type, leave request, remarks and review cleared. `200` with the record |
+| A rejected request without a check-in time (for example leave they didn't get) | It becomes today's check-in: `status` `present` or `late`, `pending`, with the leave type, leave request and review (`approvedBy`, `reviewedAt`, `reviewRemarks`) cleared. The owner's `remarks` stay. The decision it replaces is recorded in the audit log (`attendance_record_edited` with `reason` and the old values). `200` with the record |
 | Anything else (an approved `present` day an admin added) | `400 Already checked in today` |
 
 ```json
@@ -544,16 +571,24 @@ When today already has a record:
 
 **Who may call:** any signed-in user. No body.
 
-Sets `checkOutTime` to now and recalculates `workHours`. The record checked out is today's record,
-if it has a check-in and no check-out. Otherwise it is the latest record from an earlier day that
-has a check-in less than 20 hours ago and no check-out, so a shift that crosses midnight can be
-checked out the next morning. With `halfDayHours` set, a short day becomes a half day (see
-[Settings](#settings)). `missedCheckout` is cleared. `approvalStatus` is unchanged.
+Sets `checkOutTime` to now and recalculates `workHours`. The record checked out is:
+
+- today's record, when today has a check-in. Once it is checked out there is nothing more to check
+  out today: an earlier day's forgotten check-in is never checked out after today's (that is a
+  [missed check-out](#missed-check-outs-and-corrections)).
+- with no check-in today, the latest record from an earlier day that has a check-in less than 20
+  hours ago and no check-out, so a shift that crosses midnight can be checked out the next
+  morning.
+
+The record is written only while it is still open, so a double click checks out once. With
+`halfDayHours` set, a short day becomes a half day (see [Settings](#settings)). `missedCheckout`
+is cleared. `approvalStatus` is unchanged.
 
 **Errors**
 
 - `404` `No check-in record found for today`: nothing to check out.
-- `400` `Already checked out today`
+- `400` `Already checked out today`: today's check-in is already checked out (also for the second
+  of two check-outs sent together).
 - `400` `This day was rejected`: the record that would be checked out was rejected.
 
 ### Approve or reject a record
@@ -660,14 +695,17 @@ reviewer applies it.
 | `checkOutTime` | Yes | After the check-in, within 24 hours of it, and not in the future |
 | `remarks` | No | At most 500 characters |
 
-Stores `correctionRequest: { checkOutTime, remarks, requestedAt }` (a second request replaces the
-first) and sends the record's reviewers `attendance_correction_requested`. Returns `200` with the
-record and `"message": "Correction requested"`.
+Stores `correctionRequest: { checkOutTime, remarks, requestedAt }` and sends the record's
+reviewers `attendance_correction_requested`. A second request replaces the first without telling
+the reviewers again (the one waiting already brings them to the record). Returns `200` with the
+record and `"message": "Correction requested"`. Limited with the other
+[requests that notify reviewers](#endpoints).
 
 A reviewer applies it with `PUT /attendance/:id` and `checkOutTime`, which clears
-`correctionRequest` and `missedCheckout`; a team leader may do this on a reviewed record too. They
-can decline it with `PUT /attendance/:id` and `correctionRequest: null`. Reviewers find waiting
-corrections with `GET /attendance?hasCorrection=true`.
+`correctionRequest` and `missedCheckout`; a team leader may do this on a reviewed record too, but
+only while there is a correction or missed check-out to settle. They can decline it with
+`PUT /attendance/:id` and `correctionRequest: null`. Reviewers find waiting corrections with
+`GET /attendance?hasCorrection=true`.
 
 **Errors**
 
@@ -680,6 +718,7 @@ corrections with `GET /attendance?hasCorrection=true`.
 - `400` `Check-out time cannot be in the future`
 - `400` `Check-out time must be within 24 hours of check-in`
 - `400` `remarks must be text`, `Remarks can be at most 500 characters`
+- `429` `Too many leave or correction requests. Please try again later.`
 
 ### Read the settings
 
@@ -778,8 +817,8 @@ A leave request covers one or more days. It is stored as one record per day, all
 
 | Field | Required | Notes |
 | --- | --- | --- |
-| `startDate` | Yes | First day, converted like `day` |
-| `endDate` | No | Last day, default `startDate`. The range can be at most 60 calendar days |
+| `startDate` | Yes | First day, converted like `day`, in a four-digit year |
+| `endDate` | No | Last day, default `startDate`, in a four-digit year. The range can be at most 60 calendar days |
 | `leaveType` | Yes | A key from the settings |
 | `remarks` | No | Stored on every day |
 | `halfDay` | No | `true` for half a day; only for a single day |
@@ -791,7 +830,12 @@ is created.
 
 For a leave type with a `daysPerYear` limit, the request is refused if the days it needs (a half
 day counts as half) plus the days of that type already approved or pending in the same calendar
-year would go over the limit. A request across New Year is checked against each year.
+year would go over the limit. A request across New Year is checked against each year. The check is
+made again once the days are saved: if two requests sent at the same moment together go over the
+limit, the one that finds the other is taken back and refused with the same `400` (both can be, if
+each finds the other), so the allowance is never exceeded.
+
+Limited with the other [requests that notify reviewers](#endpoints).
 
 The reviewers get `leave_requested`. Returns `201` with the [leave request](#leave-request-object).
 
@@ -807,6 +851,7 @@ The reviewers get `leave_requested`. Returns `201` with the [leave request](#lea
 - `409` `You already have attendance on 2026-11-03, 2026-11-04`, with those days in `data.days`
 - `409` `You already have attendance on one of those days`: another request for one of the days
   was saved at the same moment.
+- `429` `Too many leave or correction requests. Please try again later.`
 
 #### Leave request object
 
@@ -896,8 +941,9 @@ request's records. Body: optional `reviewRemarks`, as for a single record.
 
 Reviews every day of the request that is still `pending`, sets `approvedBy`, `reviewedAt` and
 `reviewRemarks` on them, and tells the requester once (`attendance_reviewed`, emailed). Days
-already reviewed are left as they are. Returns the leave request object, with
-`"message": "Leave approved"` or `"Leave rejected"`.
+already reviewed are left as they are, also when another review of the request arrives at the same
+moment: only days still pending are written, and a review that finds none left answers `409`.
+Returns the leave request object, with `"message": "Leave approved"` or `"Leave rejected"`.
 
 **Errors**
 

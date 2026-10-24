@@ -26,6 +26,7 @@ import {
   isWorkday,
   notifyReviewed,
   oid,
+  pendingInDatabase,
   readReviewRemarks,
   reviewRecord,
   reviewableFilter,
@@ -39,13 +40,15 @@ import {
 // reviewer then approves or rejects.
 const ADMIN_EDITABLE_FIELDS = ['date', 'status', 'approvalStatus', 'checkInTime', 'checkOutTime', 'remarks', 'reviewRemarks', 'leaveType'];
 // What a team leader may still change once a record has been reviewed: the
-// check-out time (to fix a missed check-out) and their own note. Anything
-// else on a reviewed record is for admins.
+// check-out time, only while there is a correction request or a missed
+// check-out to settle, and their own note. Anything else on a reviewed record
+// is for admins.
 const AFTER_REVIEW_FIELDS = ['checkOutTime', 'reviewRemarks', 'correctionRequest', 'missedCheckout'];
 // Fields compared for the audit log of an edit
 const TRACKED_FIELDS = ['date', 'day', 'status', 'approvalStatus', 'checkInTime', 'checkOutTime', 'remarks', 'reviewRemarks', 'leaveType', 'correctionRequest', 'missedCheckout'];
 
 const DUPLICATE_DAY_MESSAGE = 'Attendance already recorded for this user on that day';
+const NOT_A_WORKDAY_MESSAGE = "That day isn't a workday (or is a holiday), so it needs no leave";
 const NOT_FOUND = { success: false, message: 'Attendance record not found' };
 // Requests that mean the person isn't coming in (or only for part of the day)
 const REQUEST_MESSAGES = {
@@ -230,22 +233,40 @@ export const createAttendance = async (req, res) => {
       delete data.leaveType;
     }
 
+    // An employee's day of leave is a one-day leave request, with the rules of
+    // POST /attendance/leave: it has a type, so it counts against that
+    // balance, and it is a workday
+    const leaveRequest = !isAdmin && data.status === 'leave';
+    const type = data.leaveType ? findLeaveType(settings, data.leaveType) : null;
+    const requested = { [data.day.slice(0, 4)]: 1 };
+    if (leaveRequest) {
+      if (!type) return fail(res, 400, 'Please choose a leave type');
+      if (!isWorkday(data.day, settings, await holidaysBetween(data.day, data.day))) {
+        return fail(res, 400, NOT_A_WORKDAY_MESSAGE);
+      }
+    }
+
     if (await Attendance.exists({ user: data.user, day: data.day })) {
       return fail(res, 400, DUPLICATE_DAY_MESSAGE);
     }
 
-    // An employee's day of leave is a one-day leave request: it counts
-    // against their balance and is reviewed like the longer ones
-    const type = data.leaveType ? findLeaveType(settings, data.leaveType) : null;
-    if (!isAdmin && data.status === 'leave') {
-      if (type) {
-        const problem = await balanceProblem(data.user, type, { [data.day.slice(0, 4)]: 1 });
-        if (problem) return fail(res, 400, problem);
-      }
+    if (leaveRequest) {
+      const problem = await balanceProblem(data.user, type, requested);
+      if (problem) return fail(res, 400, problem);
       data.leaveRequestId = new mongoose.Types.ObjectId();
     }
 
     const attendance = await Attendance.create(data);
+
+    if (leaveRequest) {
+      // Counted again with this day saved: another request sent at the same
+      // moment may have used up the balance
+      const problem = await balanceProblem(data.user, type, requested, { saved: true });
+      if (problem) {
+        await attendance.deleteOne();
+        return fail(res, 400, problem);
+      }
+    }
 
     if (isAdmin && idOf(data.user) !== idOf(req.user)) {
       await logAuditEventV2(req, {
@@ -259,7 +280,7 @@ export const createAttendance = async (req, res) => {
       await notify(req, await reviewerIdsFor(req.user._id, attendance.team), {
         type: 'leave_requested',
         title: `${req.user.name} asked for leave`,
-        body: [`${type ? type.label : 'Leave'} on ${formatDay(attendance.day)}.`, attendance.remarks].filter(Boolean).join(' '),
+        body: [`${type.label} on ${formatDay(attendance.day)}.`, attendance.remarks].filter(Boolean).join(' '),
         link: '/approvals',
         data: { leaveRequestId: String(attendance.leaveRequestId), userId: String(req.user._id) },
       });
@@ -300,6 +321,12 @@ export const updateAttendance = async (req, res) => {
       return TRACKED_FIELDS.filter((field) => now[field] !== before[field]);
     };
     const wasReviewed = attendance.approvalStatus !== 'pending';
+    // Whether there is a check-out to fix: a correction the owner asked for, or
+    // a check-out the missed check-out job found missing
+    const hadCheckoutToFix = Boolean(attendance.correctionRequest) || attendance.missedCheckout === true;
+    // A pending record is saved only if it is still pending, so an edit made
+    // at the same moment as a review can't undo or overwrite the decision
+    if (!wasReviewed) attendance.$where = { approvalStatus: pendingInDatabase(attendance) };
 
     if (isReviewer) {
       const updates = pick(req.body, ADMIN_EDITABLE_FIELDS);
@@ -325,7 +352,11 @@ export const updateAttendance = async (req, res) => {
       // correctionRequest: null turns the owner's correction request down
       if (req.body.correctionRequest === null) attendance.correctionRequest = null;
 
-      if (req.user.role !== 'admin' && wasReviewed && changed().some((field) => !AFTER_REVIEW_FIELDS.includes(field))) {
+      // On a reviewed record a leader may set a check-out time only to settle
+      // a correction or a missed check-out, never to rewrite a reviewed day
+      const allowedAfterReview = (field) => AFTER_REVIEW_FIELDS.includes(field) &&
+        (field !== 'checkOutTime' || (hadCheckoutToFix && Boolean(attendance.checkOutTime)));
+      if (req.user.role !== 'admin' && wasReviewed && changed().some((field) => !allowedAfterReview(field))) {
         return fail(res, 403, 'Only an admin can change a record that has already been reviewed');
       }
 
@@ -352,7 +383,17 @@ export const updateAttendance = async (req, res) => {
     const decided = fields.includes('approvalStatus') && attendance.approvalStatus !== 'pending';
 
     // save() rather than findByIdAndUpdate so `day` and `workHours` are recalculated
-    await attendance.save();
+    try {
+      await attendance.save();
+    } catch (error) {
+      // The $where above didn't match: it was reviewed (or deleted) meanwhile
+      if (error.name !== 'DocumentNotFoundError') throw error;
+      const current = await Attendance.findById(attendance._id).select('approvalStatus');
+      if (!current) return res.status(404).json(NOT_FOUND);
+      return isReviewer
+        ? fail(res, 409, `This record was already ${current.approvalStatus}`)
+        : fail(res, 403, 'This record has already been reviewed and can no longer be edited');
+    }
 
     if (fields.length > 0) {
       await logAuditEventV2(req, {
@@ -414,16 +455,33 @@ export const checkIn = async (req, res) => {
 
       let updated = null;
       if (existing.approvalStatus === 'rejected') {
-        // A request for today that was turned down: they came in after all,
-        // so today becomes an ordinary check-in waiting for review
+        // A request for today that was turned down (leave they didn't get):
+        // they came in after all, so today becomes an ordinary check-in
+        // waiting for review. The owner's remarks stay; the decision it
+        // replaces is kept in the audit log.
         updated = await Attendance.findOneAndUpdate(
           { _id: existing._id, checkInTime: null, approvalStatus: 'rejected' },
           {
             $set: { checkInTime: now, status, approvalStatus: 'pending', leaveType: null, leaveRequestId: null },
-            $unset: { approvedBy: 1, reviewedAt: 1, reviewRemarks: 1, remarks: 1 },
+            $unset: { approvedBy: 1, reviewedAt: 1, reviewRemarks: 1 },
           },
           { new: true }
         );
+        if (updated) {
+          const fields = ['status', 'approvalStatus', 'checkInTime', 'leaveType', 'leaveRequestId', 'approvedBy', 'reviewedAt', 'reviewRemarks'];
+          await logAuditEventV2(req, {
+            action: 'attendance_record_edited',
+            targetType: 'Attendance',
+            targetId: existing._id,
+            details: {
+              user: idOf(existing.user),
+              reason: 'Checked in on a day whose request was rejected',
+              changes: Object.fromEntries(fields
+                .map((field) => [field, { from: plain(existing.get(field)), to: plain(updated.get(field)) }])
+                .filter(([, { from, to }]) => JSON.stringify(from) !== JSON.stringify(to))),
+            },
+          });
+        }
       } else if (REQUEST_MESSAGES[existing.status]) {
         return fail(res, 400, REQUEST_MESSAGES[existing.status]);
       } else if (existing.approvalStatus === 'pending') {
@@ -465,8 +523,15 @@ export const checkOut = async (req, res) => {
     const day = toDayKey(now);
     const today = await Attendance.findOne({ user: req.user._id, day });
 
-    let attendance = today?.checkInTime && !today.checkOutTime ? today : null;
-    if (!attendance) {
+    let attendance;
+    if (today?.checkInTime) {
+      // Checked in today: that is the day to check out, and once it is closed
+      // there is nothing else to check out (an earlier day's forgotten
+      // check-in can't be a shift still running)
+      if (today.approvalStatus === 'rejected') return fail(res, 400, 'This day was rejected');
+      if (today.checkOutTime) return fail(res, 400, 'Already checked out today');
+      attendance = today;
+    } else {
       // A shift that crossed midnight: the latest check-in still open from
       // the last 20 hours
       attendance = await Attendance.findOne({
@@ -475,19 +540,24 @@ export const checkOut = async (req, res) => {
         checkInTime: { $gte: new Date(now.getTime() - OPEN_SHIFT_MS) },
         checkOutTime: null,
       }).sort('-checkInTime');
+      if (!attendance) {
+        if (today?.approvalStatus === 'rejected') return fail(res, 400, 'This day was rejected');
+        return fail(res, 404, 'No check-in record found for today');
+      }
+      if (attendance.approvalStatus === 'rejected') return fail(res, 400, 'This day was rejected');
     }
-
-    if (!attendance) {
-      if (today?.approvalStatus === 'rejected') return fail(res, 400, 'This day was rejected');
-      if (today?.checkOutTime) return fail(res, 400, 'Already checked out today');
-      return fail(res, 404, 'No check-in record found for today');
-    }
-    if (attendance.approvalStatus === 'rejected') return fail(res, 400, 'This day was rejected');
 
     attendance.checkOutTime = now;
     attendance.status = checkOutStatus(attendance, await getSettings());
     attendance.missedCheckout = false;
-    await attendance.save();
+    // Only while it is still open, so a double click checks out once
+    attendance.$where = { checkOutTime: null };
+    try {
+      await attendance.save();
+    } catch (error) {
+      if (error.name === 'DocumentNotFoundError') return fail(res, 400, 'Already checked out today');
+      throw error;
+    }
 
     res.json({ success: true, data: await populated(attendance._id) });
   } catch (error) {
@@ -593,16 +663,21 @@ export const requestCorrection = async (req, res) => {
     if (remarks !== undefined && remarks !== null && typeof remarks !== 'string') return fail(res, 400, 'remarks must be text');
     if (typeof remarks === 'string' && remarks.trim().length > 500) return fail(res, 400, 'Remarks can be at most 500 characters');
 
+    // A second request replaces the first without telling the reviewers again:
+    // the one waiting already brings them to the record
+    const alreadyAsked = Boolean(attendance.correctionRequest);
     attendance.correctionRequest = { checkOutTime: time, remarks: remarks?.trim() || undefined, requestedAt: new Date() };
     await attendance.save();
 
-    await notify(req, await reviewerIdsFor(attendance.user, attendance.team), {
-      type: 'attendance_correction_requested',
-      title: `${req.user.name} asked to correct their check-out on ${formatDay(attendance.day)}`,
-      body: [`Asked for ${formatLocalTime(time).slice(11)}.`, remarks?.trim()].filter(Boolean).join(' '),
-      link: '/approvals',
-      data: { attendanceId: String(attendance._id), userId: String(req.user._id) },
-    });
+    if (!alreadyAsked) {
+      await notify(req, await reviewerIdsFor(attendance.user, attendance.team), {
+        type: 'attendance_correction_requested',
+        title: `${req.user.name} asked to correct their check-out on ${formatDay(attendance.day)}`,
+        body: [`Asked for ${formatLocalTime(time).slice(11)}.`, remarks?.trim()].filter(Boolean).join(' '),
+        link: '/approvals',
+        data: { attendanceId: String(attendance._id), userId: String(req.user._id) },
+      });
+    }
 
     res.json({ success: true, message: 'Correction requested', data: await populated(attendance._id) });
   } catch (error) {

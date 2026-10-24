@@ -11,6 +11,7 @@ import {
   canReviewRecord,
   canSeeRecord,
   dayCount,
+  daysApart,
   daysBetween,
   findLeaveType,
   formatDays,
@@ -31,6 +32,7 @@ import {
 // reviewed and withdrawn together.
 
 const MAX_LEAVE_DAYS = 60;
+const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/;
 const NOT_FOUND = { success: false, message: 'Leave request not found' };
 
 const fail = (res, status, message, extra = {}) => res.status(status).json({ success: false, message, ...extra });
@@ -88,13 +90,17 @@ export const createLeaveRequest = async (req, res) => {
   try {
     const { startDate, endDate, leaveType, remarks, halfDay } = pick(req.body, ['startDate', 'endDate', 'leaveType', 'remarks', 'halfDay']);
 
+    // A day in a four-digit year: toDayKey gives '10000-01-01' for a date
+    // past the year 9999
     const start = startDate ? toDayKey(startDate) : null;
-    if (!start) return fail(res, 400, 'Please provide a valid startDate');
+    if (!start || !DAY_KEY.test(start)) return fail(res, 400, 'Please provide a valid startDate');
     const end = endDate ? toDayKey(endDate) : start;
-    if (!end) return fail(res, 400, 'Please provide a valid endDate');
+    if (!end || !DAY_KEY.test(end)) return fail(res, 400, 'Please provide a valid endDate');
     if (end < start) return fail(res, 400, 'endDate must be on or after startDate');
+    // Counted before the days are listed, so a range of thousands of years is
+    // refused at once
+    if (daysApart(start, end) + 1 > MAX_LEAVE_DAYS) return fail(res, 400, `A leave request can cover at most ${MAX_LEAVE_DAYS} days`);
     const span = daysBetween(start, end);
-    if (span.length > MAX_LEAVE_DAYS) return fail(res, 400, `A leave request can cover at most ${MAX_LEAVE_DAYS} days`);
 
     if (halfDay !== undefined && typeof halfDay !== 'boolean') return fail(res, 400, 'halfDay must be true or false');
     if (halfDay && start !== end) return fail(res, 400, 'A half day of leave can only be a single day');
@@ -141,6 +147,16 @@ export const createLeaveRequest = async (req, res) => {
       await Attendance.deleteMany({ leaveRequestId });
       if (error.code === 11000) return fail(res, 409, 'You already have attendance on one of those days');
       throw error;
+    }
+
+    // Counted again with these days saved: another request sent at the same
+    // moment passed the same check, and the two together may go over the
+    // allowance. Then this one is taken back (both may be, if each sees the
+    // other), so the balance is never exceeded.
+    const over = await balanceProblem(req.user._id, type, perYear, { saved: true });
+    if (over) {
+      await Attendance.deleteMany({ leaveRequestId });
+      return fail(res, 400, over);
     }
 
     await notify(req, await reviewerIdsFor(req.user._id, team), {
@@ -290,10 +306,19 @@ const reviewLeave = (approvalStatus) => async (req, res) => {
     const changes = { approvalStatus, approvedBy: req.user._id, reviewedAt };
     if (remarks.value !== undefined) changes.reviewRemarks = remarks.value;
     // Only days still pending, so a review at the same moment can't be overwritten
-    await Attendance.updateMany({ _id: { $in: pending.map((record) => record._id) }, approvalStatus: 'pending' }, { $set: changes });
+    const { modifiedCount } = await Attendance.updateMany(
+      { _id: { $in: pending.map((record) => record._id) }, approvalStatus: 'pending' },
+      { $set: changes }
+    );
 
     const settings = await getSettings();
     const updated = await loadRequest(req.params.leaveRequestId);
+    if (modifiedCount === 0) {
+      // Another reviewer got there first, or it was withdrawn meanwhile
+      if (updated.length === 0) return res.status(404).json(NOT_FOUND);
+      const state = toLeaveRequest(updated, settings).approvalStatus;
+      return fail(res, 409, `This leave request was already ${state === 'mixed' ? 'reviewed' : state}`);
+    }
     const decided = updated.filter((record) => record.reviewedAt?.getTime() === reviewedAt.getTime() && record.approvalStatus === approvalStatus);
     await notifyReviewed(req, decided, settings);
 

@@ -17,6 +17,8 @@ export const DEFAULT_LEAVE_TYPES = [
 
 export const SETTINGS_KEY = 'attendance';
 
+export const AUTO_ABSENT_DAYS_KEPT = 60;
+
 const leaveTypeSchema = new mongoose.Schema({
   key: { type: String, required: true, trim: true },
   label: { type: String, required: true, trim: true },
@@ -63,6 +65,13 @@ const attendanceSettingsSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     default: null,
+  },
+  // Not a setting (not read or changed through the API): the days the
+  // auto-absent job has already done, the latest AUTO_ABSENT_DAYS_KEPT, so a
+  // later pass doesn't bring back an absence an admin deleted
+  autoAbsentDays: {
+    type: [String],
+    default: () => [],
   },
 }, {
   timestamps: true,
