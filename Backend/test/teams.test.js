@@ -52,6 +52,8 @@ test('teams', async (t) => {
   await check('team pending list shows members\' check-ins', pendingIds.includes(miaDay._id), JSON.stringify(pending.data).slice(0, 200));
   await check('team pending list leaves out the leader\'s own', !pendingIds.includes(leeDay._id));
 
+  // Today's check-in can be reviewed once it is checked out
+  await call('POST', '/attendance/checkout', { token: mia.token });
   const approved = await call('PUT', `/teams/${team._id}/attendance/${miaDay._id}/approve`, { token: lee.token });
   await check('leader approves a member\'s attendance', approved.status === 200 && approved.data.data.approvalStatus === 'approved' && approved.data.data.status === 'present', JSON.stringify(approved.data).slice(0, 200));
   await check('leader cannot approve own attendance (team route)',

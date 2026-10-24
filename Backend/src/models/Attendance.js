@@ -67,14 +67,60 @@ const attendanceSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  // The employee's own note (why they were late, what the leave is for)
   remarks: {
     type: String,
     trim: true,
+    maxlength: [1000, 'Remarks can be at most 1000 characters'],
   },
-  // Admin who last reviewed the record
+  // The reviewer's note on their decision, kept apart so it never replaces
+  // what the employee wrote
+  reviewRemarks: {
+    type: String,
+    trim: true,
+    maxlength: [1000, 'Review remarks can be at most 1000 characters'],
+  },
+  // Who last approved or rejected the record (or the admin who created it
+  // approved), and when. Only a change of approvalStatus updates them.
   approvedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
+  },
+  reviewedAt: {
+    type: Date,
+  },
+  // For leave: one of the leave types in AttendanceSettings (casual, sick...)
+  leaveType: {
+    type: String,
+    trim: true,
+    maxlength: 30,
+    default: null,
+  },
+  // The days of one leave request share this id, so they are reviewed and
+  // withdrawn together
+  leaveRequestId: {
+    type: mongoose.Schema.Types.ObjectId,
+    default: null,
+  },
+  // Set by the missed check-out job: checked in, never checked out, and the
+  // day is over
+  missedCheckout: {
+    type: Boolean,
+    default: false,
+  },
+  // The owner's request to fix the check-out time, until a reviewer applies it
+  correctionRequest: {
+    type: new mongoose.Schema({
+      checkOutTime: { type: Date, required: true },
+      remarks: { type: String, trim: true, maxlength: 500 },
+      requestedAt: { type: Date, required: true },
+    }, { _id: false }),
+    default: null,
+  },
+  // Created by the auto-absent job rather than by a person
+  autoMarked: {
+    type: Boolean,
+    default: false,
   },
 }, {
   timestamps: true,
@@ -87,6 +133,8 @@ attendanceSchema.index(
   { unique: true, partialFilterExpression: { day: { $type: 'string' } } }
 );
 attendanceSchema.index({ approvalStatus: 1, date: -1 });
+attendanceSchema.index({ team: 1, day: -1 });
+attendanceSchema.index({ leaveRequestId: 1 }, { partialFilterExpression: { leaveRequestId: { $type: 'objectId' } } });
 
 // A record that hasn't been migrated yet is converted as soon as it's loaded,
 // so reads show the new shape and the next save stores it

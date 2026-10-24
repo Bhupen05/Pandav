@@ -89,6 +89,8 @@ test('owner decisions', async (t) => {
   const waiting = (await call('POST', '/tasks', { token: pat.token, body: { title: 'Waiting', description: 'd', assignedTo: [ann._id], ...DATES } })).data.data;
   await call('POST', `/tasks/${waiting._id}/request-completion`, { token: ann.token });
   const annDay = (await call('POST', '/attendance/checkin', { token: ann.token })).data.data;
+  // Today's check-in can be reviewed once it is checked out
+  await call('POST', '/attendance/checkout', { token: ann.token });
   await call('POST', `/chat/teams/${team._id}/send`, { token: ann.token, body: { message: 'before the freeze' } });
 
   const frozen = await call('PUT', `/teams/${team._id}`, { token: adminToken, body: { isActive: false } });
