@@ -305,11 +305,12 @@ app.use('/api', (req, res, next) => {
 });
 app.use('/api', rejectForeignOrigin(isAllowedOrigin));
 // Bodies are at most 1 MB (the largest is a profile image, ~200 KB), except
-// file uploads (POST .../attachments), which carry a file of up to 2 MB as base64
+// file uploads (POST .../attachments, POST /api/v2/social/images), which
+// carry a file of up to 2 MB as base64
 const jsonBody = express.json({ limit: '1mb' });
 const uploadBody = express.json({ limit: '3mb' });
-app.use((req, res, next) =>
-  (req.method === 'POST' && /\/attachments\/?$/.test(req.path) ? uploadBody : jsonBody)(req, res, next));
+const isUpload = (req) => req.method === 'POST' && /\/(attachments|social\/images)\/?$/.test(req.path);
+app.use((req, res, next) => (isUpload(req) ? uploadBody : jsonBody)(req, res, next));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use(cookieParser());
 app.use(sanitizeInput);

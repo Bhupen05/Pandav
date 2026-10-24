@@ -45,7 +45,7 @@ the timers off; the jobs can then still be run by hand.
 
 | Job | Runs | Does |
 |---|---|---|
-| `social-publish` | Every minute | Puts publish jobs stuck in `processing` back in the queue (or fails them), then publishes queued posts that are due ([SocialHub.md](SocialHub.md)) |
+| `social-publish` | Every minute | Puts publish jobs stuck in `processing` back in the queue (or fails them), then publishes queued posts that are due, scheduled LinkedIn posts among them, and removes images uploaded over a day ago that are in no post ([SocialHub.md](SocialHub.md)) |
 | `task-reminders` | Every 15 minutes | Due-soon and overdue reminders for open tasks ([Tasks.md](Tasks.md)) |
 | `task-recurrence` | Every 30 minutes | Creates the next occurrence of repeating tasks ([Tasks.md](Tasks.md)) |
 | `attendance-missed-checkout` | Every hour | Marks days left without a check-out and tells their owner ([Attendance.md](Attendance.md)) |

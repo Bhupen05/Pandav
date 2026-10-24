@@ -5,11 +5,20 @@
 // completing a personal task only offers to share it, and the API lives under
 // /api/v2 alone
 import { after, before, test } from 'node:test';
-import { ADMIN, checker, startServer } from './helpers.js';
+import mongoose from 'mongoose';
+import { ADMIN, checker, connectDatabase, startServer } from './helpers.js';
 
 let server;
-before(async () => { server = await startServer('decisions'); });
-after(() => server?.stop());
+let db;
+// LinkedIn is never reached: nothing listens there, so a publish fails at once
+before(async () => {
+  server = await startServer('decisions', { LINKEDIN_API_BASE: 'http://127.0.0.1:9' });
+  db = await connectDatabase('decisions');
+});
+after(async () => {
+  await db?.close();
+  await server?.stop();
+});
 
 const DATES = { startDate: '2026-10-01', dueDate: '2026-10-20' };
 
@@ -192,6 +201,14 @@ test('owner decisions', async (t) => {
     JSON.stringify(done.data.autoShare));
   await check('and posts nothing yet', (await call('GET', '/social/posts/me', { token: ann.token })).data.data.length === 0);
 
+  const unlinked = await call('POST', `/social/personal-tasks/${shared._id}/share`, { token: ann.token, body: { content: 'Shipped it!', linkedin: true } });
+  await check('sharing on LinkedIn needs a connected LinkedIn account', unlinked.status === 400 && /Connect your LinkedIn/.test(unlinked.data.message),
+    JSON.stringify(unlinked.data));
+  // A linked account as an older version stored it (a plain token)
+  await db.collection('socialintegrationv2').insertOne({
+    user: new mongoose.Types.ObjectId(ann._id), provider: 'linkedin', providerUserId: 'ann-li', accountHandle: 'Ann',
+    isConnected: true, needsRelink: false, scopes: [], accessToken: 'ann-li-token', refreshToken: null, tokenExpiresAt: null, metadata: {},
+  });
   const posted = await call('POST', `/social/personal-tasks/${shared._id}/share`, { token: ann.token, body: { content: 'Shipped it!', linkedin: true } });
   await check('the owner posts the reviewed text', posted.status === 201, JSON.stringify(posted.data).slice(0, 200));
   await check("a member's LinkedIn share waits for approval", posted.data.data?.pendingApproval === true);

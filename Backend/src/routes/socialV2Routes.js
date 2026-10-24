@@ -57,12 +57,17 @@ import {
   getProviderOAuthStart,
   completeProviderOAuth,
   createPublishJobs,
+  schedulePost,
+  unschedulePost,
   getPublishJobs,
   processPublishJob,
   retryPublishJob,
   processDuePublishJobs,
   getModerationPosts,
   moderatePost,
+  uploadImage,
+  getImage,
+  deleteImage,
 } from '../controllers/socialV2Controller.js';
 
 const router = express.Router();
@@ -84,6 +89,12 @@ router.post('/posts/:postId/publish', socialWriteRateLimiter, validatePublishReq
 router.patch('/posts/:postId/approve', socialWriteRateLimiter, authorize('admin', 'team_leader'), approvePost);
 
 router.post('/posts/:postId/publish/jobs', socialWriteRateLimiter, validateCreatePublishJobs, createPublishJobs);
+router.put('/posts/:postId/schedule', socialWriteRateLimiter, schedulePost);
+router.delete('/posts/:postId/schedule', socialWriteRateLimiter, unschedulePost);
+
+router.post('/images', socialWriteRateLimiter, uploadImage);
+router.get('/images/:imageId', getImage);
+router.delete('/images/:imageId', socialWriteRateLimiter, deleteImage);
 router.get('/publish-jobs', getPublishJobs);
 router.post('/publish-jobs/:jobId/process', socialWriteRateLimiter, processPublishJob);
 router.post('/publish-jobs/:jobId/retry', socialWriteRateLimiter, retryPublishJob);

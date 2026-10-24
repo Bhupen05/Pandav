@@ -57,7 +57,7 @@ All of them are described in [`.env.example`](.env.example).
 | `ORIGIN_SECRET` | Production | Shared with the frontend's `/api` proxy; requests that skip the proxy are refused and rate limits count each visitor |
 | `API_V2_PREFIX` | No | Where the API is served (default `/api/v2`); the frontend proxy and tests assume the default |
 | `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `SEED_USER_EMAIL`, `SEED_USER_PASSWORD` | No | Accounts `create-users.js` creates (random passwords if unset) |
-| `GITHUB_*`, `LINKEDIN_*` | For the Social Hub's linked accounts | OAuth client ids, secrets, redirect URIs and scopes (LinkedIn's also refresh expired tokens) |
+| `GITHUB_*`, `LINKEDIN_*` | For the Social Hub's linked accounts | OAuth client ids, secrets, redirect URIs (`<app>/integrations/<provider>/callback`) and scopes (LinkedIn's also refresh expired tokens); `LINKEDIN_API_VERSION` picks the version of LinkedIn's posting API (default `202610`) |
 | `GITHUB_DEFAULT_REPO` | No | Repository (`owner/repo`) to publish to when a request names none |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | For email | Password reset links, address verification, security notices, emailed notifications and contact replies. Without `SMTP_HOST` nothing is emailed and those features say so |
 | `APP_URL` | No | The frontend's address for links in emails (default: the first `CLIENT_URL`) |

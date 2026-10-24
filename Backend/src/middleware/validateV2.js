@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { ALT_TEXT_MAX_LENGTH, MAX_IMAGES_PER_POST } from '../models/SocialImageV2.js';
 
 const validatorError = (res, message) => res.status(400).json({ success: false, message });
 
@@ -60,20 +61,45 @@ const postFieldProblem = ({ title, visibility, mediaUrls, tags }) => {
   return null;
 };
 
+// A new post's images: [{ id, altText }], each an uploaded image, at most
+// MAX_IMAGES_PER_POST (models/SocialImageV2.js)
+const postImagesProblem = (images) => {
+  if (images === undefined) return null;
+  if (!Array.isArray(images) || images.length > MAX_IMAGES_PER_POST) {
+    return `images must be a list of at most ${MAX_IMAGES_PER_POST} images`;
+  }
+  const ids = new Set();
+  for (const image of images) {
+    if (!image || typeof image !== 'object' || !mongoose.isObjectIdOrHexString(image.id)) return 'Each image needs the id of an uploaded image';
+    if (image.altText !== undefined && image.altText !== null && typeof image.altText !== 'string') return 'altText must be text';
+    if (typeof image.altText === 'string' && image.altText.trim().length > ALT_TEXT_MAX_LENGTH) {
+      return `An image description can be at most ${ALT_TEXT_MAX_LENGTH} characters`;
+    }
+    ids.add(String(image.id));
+  }
+  return ids.size === images.length ? null : 'The same image is in the list twice';
+};
+
 export const validateCreatePost = (req, res, next) => {
-  const { content, targets, sourceTask } = req.body;
+  const { content, targets, sourceTask, images, autoPublish, publishAt } = req.body;
   if (!isNonEmptyString(content)) {
     return validatorError(res, 'Post content is required');
   }
   if (targets && !hasAtLeastOneTarget(targets)) {
     return validatorError(res, 'Select at least one target: pandav, linkedin, or github');
   }
-  const problem = postFieldProblem(req.body);
+  const problem = postFieldProblem(req.body) || postImagesProblem(images);
   if (problem) {
     return validatorError(res, problem);
   }
   if (sourceTask !== undefined && sourceTask !== null && !mongoose.isObjectIdOrHexString(sourceTask)) {
     return validatorError(res, 'Invalid sourceTask');
+  }
+  if (autoPublish !== undefined && typeof autoPublish !== 'boolean') {
+    return validatorError(res, 'autoPublish must be true or false');
+  }
+  if (publishAt !== undefined && publishAt !== null && !autoPublish) {
+    return validatorError(res, 'publishAt needs autoPublish');
   }
   next();
 };
