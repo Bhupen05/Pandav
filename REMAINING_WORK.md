@@ -80,6 +80,39 @@ These happen on GitHub, Render and Vercel, outside the code.
 - [ ] Admins freeze and unfreeze a team with the new **Freeze** button on Teams. A team made
       inactive before this version shows as **Frozen**.
 
+**Social Hub: posting to LinkedIn (branch `p9/fe-social`)**
+
+Posting from Pandav to each person's own LinkedIn profile needs a LinkedIn app. Until it exists,
+"Connect LinkedIn" answers "LinkedIn isn't set up on this server".
+- [ ] On https://www.linkedin.com/developers/apps, create an app (it must be linked to a LinkedIn
+      company page; Pandav's own is fine).
+- [ ] Products tab: add **Sign In with LinkedIn using OpenID Connect** and **Share on LinkedIn**.
+      Both are self-serve. Together they grant `openid profile email w_member_social`, the default
+      `LINKEDIN_OAUTH_SCOPE`.
+- [ ] Auth tab → Authorized redirect URLs: add
+      `https://pandav-nine.vercel.app/integrations/linkedin/callback` (and
+      `http://localhost:5173/integrations/linkedin/callback` for local work).
+- [ ] On Render, set `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` (from the Auth tab) and
+      `LINKEDIN_REDIRECT_URI=https://pandav-nine.vercel.app/integrations/linkedin/callback`.
+      `LINKEDIN_API_VERSION` is optional (default `202610`).
+- [ ] Optional, the same for GitHub: an OAuth app with callback
+      `https://pandav-nine.vercel.app/integrations/github/callback`, and `GITHUB_CLIENT_ID`,
+      `GITHUB_CLIENT_SECRET`, `GITHUB_REDIRECT_URI` on Render.
+- [ ] Deploy the backend and frontend together. No migration.
+- [ ] After the deploy: connect your own LinkedIn from the Social Hub, post something with an
+      image, and check it on LinkedIn ("View on LinkedIn" on the post).
+- [ ] What users will notice:
+  - "Connect LinkedIn" in the composer and under **Linked accounts**; no more pasting tokens
+    (still possible under "Use an access token instead").
+  - Ticking LinkedIn posts it there **now** (or once approved, for users and members) or at a
+    chosen time; each post shows where it stands on LinkedIn, with "Post now", "Change time",
+    "Cancel schedule" or "Try again now".
+  - Sharing a completed to-do with LinkedIn now needs LinkedIn connected, and goes there by itself
+    once approved.
+  - The title and tags are part of the LinkedIn post (tags as hashtags); posts for LinkedIn are
+    limited to 3000 characters with them.
+  - The Integrations card's "Preview" (raw JSON) is gone.
+
 **Earlier phases (skip any you have already done)**
 - [ ] Run `npm run migrate` in `Backend/` against the production database (Phase 3) and act on its
       "Needs attention" list.
@@ -279,3 +312,17 @@ Accepted for now; listed so nobody mistakes them for bugs.
   Redis) and the Socket.io Redis adapter.
 - **Local setup:** a `Frontend/.env` that still sets `VITE_API_URL` can drop it; the app uses
   `VITE_BACKEND_URL` (default `http://localhost:5000`).
+- **LinkedIn sign-ins last about 60 days.** LinkedIn gives most apps no refresh token, so people
+  connect LinkedIn again every two months; the composer warns when a scheduled post is due after
+  the sign-in ends, and such a post fails with "has to be linked again" (and `publish_failed`).
+- **Posts go to your personal LinkedIn profile only.** Posting as a company page needs LinkedIn's
+  Community Management API (`w_organization_social`), which LinkedIn grants after a review.
+- **"Post now" waits for LinkedIn during the request.** Usually a second or two; with four images up
+  to nine LinkedIn calls. If the browser gives up first (30 seconds), the post is saved and its job
+  carries on: reload to see where it stands.
+- **Post images are stored in MongoDB** (2 MB each, up to 4 per post), like task attachments. Watch
+  the database size on a small Atlas plan.
+- **Cancelling a schedule at the very moment its time comes** can still post it: the job may
+  already be running. The post then shows as on LinkedIn.
+- **LinkedIn API versions retire after about a year.** `LINKEDIN_API_VERSION` (default `202610`)
+  has to move on before LinkedIn retires it, or posting stops with a version error.
