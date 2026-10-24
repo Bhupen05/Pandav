@@ -8,15 +8,28 @@ import { escapeRegex } from './http.js';
 // the cookie first-party.
 export const SESSION_COOKIE = 'pandav_session';
 
-// Session tokens and socket tickets are both signed with JWT_SECRET. The
-// audience keeps one from being accepted as the other, or as an OAuth state.
+// Session tokens, socket tickets and two-step sign-in tickets are all signed
+// with JWT_SECRET. The audience keeps one from being accepted as another, or
+// as an OAuth state.
 export const SESSION_AUDIENCE = 'session';
 export const SOCKET_AUDIENCE = 'socket';
+export const TWO_FACTOR_AUDIENCE = 'two_factor';
 
 // Without "remember me" the cookie ends with the browser session, and the
 // token inside stops working after a day even if the browser restores it
 const SHORT_SESSION = '1d';
 const SOCKET_TICKET_LIFETIME = '1m';
+const TWO_FACTOR_TICKET_LIFETIME = '5m';
+
+// Every token carries the account's token version (claim `tv`, see
+// User.tokenVersion). The caller must have loaded it: a missing version
+// would quietly issue a token that doesn't work.
+const versionOf = (user) => {
+  if (typeof user?.tokenVersion !== 'number') {
+    throw new Error('Load the user with +tokenVersion before issuing a token');
+  }
+  return user.tokenVersion;
+};
 
 const cookieOptions = (req) => ({
   httpOnly: true,
@@ -26,12 +39,16 @@ const cookieOptions = (req) => ({
   path: '/api',
 });
 
-// Signs the user in on this response. `remember` keeps the cookie across
-// browser restarts for JWT_EXPIRE (default 30 days).
+// Signs the user in on this response. `user` needs its tokenVersion.
+// `remember` keeps the cookie across browser restarts for JWT_EXPIRE
+// (default 30 days).
 // Each session gets an id (claim `sid`), carried over into its socket
 // tickets, so signing out of one browser can close that browser's sockets.
-export const setSessionCookie = (req, res, userId, remember) => {
-  const token = jwt.sign({ id: userId, remember, sid: crypto.randomUUID() }, process.env.JWT_SECRET, {
+// Pass `sid` to keep the id when re-issuing this browser's cookie (after a
+// password change), so its open sockets still count as this session's.
+export const setSessionCookie = (req, res, user, remember, { sid = crypto.randomUUID() } = {}) => {
+  const claims = { id: String(user._id), tv: versionOf(user), remember, sid };
+  const token = jwt.sign(claims, process.env.JWT_SECRET, {
     audience: SESSION_AUDIENCE,
     expiresIn: remember ? process.env.JWT_EXPIRE || '30d' : SHORT_SESSION,
   });
@@ -44,13 +61,44 @@ export const clearSessionCookie = (req, res) => {
   res.clearCookie(SESSION_COOKIE, cookieOptions(req));
 };
 
+// The claims of a session cookie whose signature is valid, even if it has
+// expired (for signing out), or null
+export const readSessionCookie = (req) => {
+  const token = req.cookies?.[SESSION_COOKIE];
+  if (!token) return null;
+  try {
+    return jwt.verify(token, process.env.JWT_SECRET, { audience: SESSION_AUDIENCE, ignoreExpiration: true });
+  } catch {
+    return null;
+  }
+};
+
 // Short-lived proof of identity for opening a socket. The socket server is
-// reached directly (Vercel can't proxy WebSockets), so it never sees the cookie.
-export const signSocketTicket = (userId, sid) =>
-  jwt.sign({ id: userId, sid }, process.env.JWT_SECRET, {
+// reached directly (Vercel can't proxy WebSockets), so it never sees the
+// cookie. It carries the session's id and token version.
+export const signSocketTicket = (userId, sid, tv = 0) =>
+  jwt.sign({ id: String(userId), sid, tv }, process.env.JWT_SECRET, {
     audience: SOCKET_AUDIENCE,
     expiresIn: SOCKET_TICKET_LIFETIME,
   });
+
+// Proof that the password was right, for the second step of signing in with
+// two-step sign-in on. It is not a session: only POST /auth/2fa/verify takes it.
+export const signTwoFactorTicket = (user, remember) =>
+  jwt.sign({ id: String(user._id), tv: versionOf(user), remember }, process.env.JWT_SECRET, {
+    audience: TWO_FACTOR_AUDIENCE,
+    expiresIn: TWO_FACTOR_TICKET_LIFETIME,
+  });
+
+// The claims of a valid, unexpired two-step ticket, or null
+export const readTwoFactorTicket = (ticket) => {
+  if (typeof ticket !== 'string' || !ticket) return null;
+  try {
+    return jwt.verify(ticket, process.env.JWT_SECRET, { audience: TWO_FACTOR_AUDIENCE });
+  } catch {
+    return null;
+  }
+};
 
 const digest = (value) => crypto.createHash('sha256').update(String(value)).digest();
 

@@ -10,6 +10,7 @@ import dotenv from 'dotenv';
 import Attendance, { fromLegacyStatus } from '../src/models/Attendance.js';
 import Task, { initialProgress } from '../src/models/Task.js';
 import User, { MAX_PROFILE_IMAGE_LENGTH } from '../src/models/User.js';
+import AuthToken from '../src/models/AuthToken.js';
 import Chat from '../src/models/Chat.js';
 import SocialIntegration from '../src/models/SocialIntegrationV2.js';
 import SocialPost from '../src/models/SocialPostV2.js';
@@ -73,6 +74,24 @@ async function migrateTasks() {
   console.log(`Tasks: added assignee progress to ${ops.length} task(s)`);
 }
 
+// Accounts from before email verification, session versions, deletion by
+// anonymising and two-step sign-in. Their addresses count as confirmed: they
+// were in use before confirming existed, and EMAIL_VERIFICATION_REQUIRED
+// would otherwise lock everyone out.
+async function migrateAccounts() {
+  const set = async (filter, values) => (await User.collection.updateMany(filter, { $set: values })).modifiedCount;
+  const verified = await set({ emailVerified: { $exists: false } }, { emailVerified: true });
+  const versions = await set({ tokenVersion: { $exists: false } }, { tokenVersion: 0 });
+  const deletedAt = await set({ deletedAt: { $exists: false } }, { deletedAt: null });
+  // No twoFactor at all (or not an object), then an object without `enabled`
+  const twoFactor = await set({ twoFactor: { $not: { $type: 'object' } } }, { twoFactor: { enabled: false } }) +
+    await set({ 'twoFactor.enabled': { $exists: false } }, { 'twoFactor.enabled': false });
+  console.log(
+    `Users: marked ${verified} email address(es) as confirmed, set the session version of ${versions}, ` +
+    `deletedAt of ${deletedAt} and two-step sign-in of ${twoFactor} account(s)`
+  );
+}
+
 async function updateIndexes(duplicateCount) {
   // Replaced by the user+day index; it included the time of day, so it never blocked anything
   const existing = await Attendance.collection.indexes();
@@ -82,7 +101,7 @@ async function updateIndexes(duplicateCount) {
   }
 
   let allCreated = true;
-  for (const model of [Attendance, Task, Chat, User]) {
+  for (const model of [Attendance, Task, Chat, User, AuthToken]) {
     try {
       await model.createIndexes();
     } catch (error) {
@@ -202,6 +221,7 @@ async function main() {
   await migrateAttendance();
   const duplicateCount = await reportDuplicateDays();
   await migrateTasks();
+  await migrateAccounts();
   await updateIndexes(duplicateCount);
   await handleOrphans();
   await handleSocialOrphans();

@@ -5,16 +5,21 @@ import {
   getUser,
   updateUser,
   deleteUser,
+  deleteOwnAccount,
   toggleUserActive,
   resetUserPassword,
+  resetUserTwoFactor,
   getChatUsers,
 } from '../controllers/userController.js';
 import { protect, authorize } from '../middleware/auth.js';
+import { accountSecurityLimiter, passwordCheckLimiter, userSearchLimiter } from '../middleware/rateLimit.js';
 
 const router = express.Router();
 
-router.get('/search', protect, searchUsers);
+router.get('/search', protect, userSearchLimiter, searchUsers);
 router.get('/chat-list', protect, getChatUsers);
+// Before /:id, which would take "me" as an id
+router.delete('/me', protect, accountSecurityLimiter, deleteOwnAccount);
 
 router
   .route('/')
@@ -23,7 +28,8 @@ router
 router
   .route('/:id')
   .get(protect, getUser)
-  .put(protect, updateUser)
+  // Changing your own email is confirmed with currentPassword
+  .put(protect, passwordCheckLimiter, updateUser)
   .delete(protect, authorize('admin'), deleteUser);
 
 router
@@ -31,5 +37,6 @@ router
   .put(protect, authorize('admin'), toggleUserActive);
 
 router.put('/:id/reset-password', protect, authorize('admin'), resetUserPassword);
+router.post('/:id/2fa/reset', protect, authorize('admin'), resetUserTwoFactor);
 
 export default router;
