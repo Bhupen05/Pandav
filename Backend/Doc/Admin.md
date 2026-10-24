@@ -215,7 +215,8 @@ correctly), comma-separated, one header row. A cell that starts with `=`, `+`, `
 leading `'`, so it can't run as a formula. The response is sent as a download
 (`Content-Disposition: attachment`), named for today's date, for example
 `pandav-users-2026-10-24.csv`. Dates are days (`2026-10-24`); times are `2026-10-24 14:35` in the
-app's timezone.
+app's timezone, as its clocks showed them, so they are right on the days a timezone with summer
+time moves its clocks too.
 
 Each export is recorded in the audit log as `admin_export`, with `targetType` `Export`, `targetId`
 the export's name and `details` `{ export, rows }` (plus `filters` for tasks).
@@ -253,7 +254,8 @@ Tasks, newest first. Query parameters, all optional:
 | Completed | When it was approved as completed; empty unless it is `completed` |
 | Approved by | Who approved it; empty unless it is `completed` |
 
-A deleted account appears as `Deleted user`.
+A deleted account appears as `Deleted user` in Assignees, Created by and Approved by. That
+includes an account removed outright before deleted accounts were kept, which has no record left.
 
 ## Audit actions recorded here
 

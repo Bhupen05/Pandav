@@ -63,6 +63,8 @@ const contactSchema = new mongoose.Schema({
   },
   status: {
     type: String,
+    // Required as well: the enum alone lets null through
+    required: true,
     enum: CONTACT_STATUSES,
     default: 'new',
   },

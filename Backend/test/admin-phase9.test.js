@@ -32,10 +32,14 @@ const idAt = (date) => oid(`${Math.floor(date.getTime() / 1000).toString(16).pad
 const stamp = (date = new Date()) => ({ createdAt: date, updatedAt: date });
 
 // A minimal SMTP server, so replies are really sent. A recipient containing
-// "bounce" is refused, to see a failed send.
+// "bounce" is refused, to see a failed send. A recipient containing "slow"
+// waits SLOW_SMTP_MS before the message is accepted, and so does every
+// message while `delayMs` is set, to see what waits for the mail server.
+const SLOW_SMTP_MS = 1500;
 const startSmtp = () => new Promise((resolve) => {
   const received = [];
   const sockets = new Set();
+  const control = { delayMs: 0 };
   const server = net.createServer((socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
@@ -53,9 +57,13 @@ const startSmtp = () => new Promise((resolve) => {
         if (inData) {
           if (line === '.') {
             inData = false;
-            received.push(current);
+            const message = current;
             current = { to: [], data: '' };
-            socket.write('250 OK\r\n');
+            const wait = message.to.some((to) => /slow/i.test(to)) ? SLOW_SMTP_MS : control.delayMs;
+            setTimeout(() => {
+              received.push(message);
+              socket.write('250 OK\r\n');
+            }, wait);
           } else {
             current.data += `${line}\n`;
           }
@@ -74,6 +82,7 @@ const startSmtp = () => new Promise((resolve) => {
   server.listen(0, '127.0.0.1', () => resolve({
     port: server.address().port,
     received,
+    control,
     close: () => new Promise((done) => {
       for (const socket of sockets) socket.destroy();
       server.close(done);
@@ -120,11 +129,14 @@ before(async () => {
   fs.rmSync(MAIL_OUTBOX, { force: true });
   smtp = await startSmtp();
   server = await startServer('admin-phase9', { MAIL_OUTBOX: OUTBOX });
+  // With email set up, and in a timezone that moves its clocks (the
+  // replies don't depend on the timezone)
   mailServer = await startServer('admin-phase9-mail', {
     MAIL_OUTBOX,
     SMTP_HOST: '127.0.0.1',
     SMTP_PORT: String(smtp.port),
     MAIL_FROM: 'pandav@test.local',
+    APP_TIMEZONE: 'Europe/London',
   });
   db = await connectDatabase('admin-phase9');
   mailDb = await connectDatabase('admin-phase9-mail');
@@ -231,8 +243,8 @@ after(async () => {
 });
 
 // A CSV download: { status, type, disposition, csv }
-const download = async (urlPath, token) => {
-  const res = await fetch(`${server.base}/api/v2${urlPath}`, { headers: token ? { Cookie: `${SESSION_COOKIE}=${token}` } : {} });
+const download = async (urlPath, token, from = server) => {
+  const res = await fetch(`${from.base}/api/v2${urlPath}`, { headers: token ? { Cookie: `${SESSION_COOKIE}=${token}` } : {} });
   const body = await res.text();
   return {
     status: res.status,
@@ -490,11 +502,14 @@ test('the contact form', async (t) => {
   }
 
   const bot = await call('POST', '/contact', {
-    body: { name: 'Bot', email: 'bot@spam.test', subject: 'Honeypot subject', message: 'Buy now', website: 'http://spam.test' },
+    body: { name: 'Bot', email: 'bot@spam.test', phone: '555', subject: 'Honeypot subject', message: 'Buy now', website: 'http://spam.test' },
   });
   await check('a filled-in honeypot answers as normal', bot.status === 201 && bot.data.success === true &&
     bot.data.message === 'Your message has been sent successfully' && bot.data.data?.status === 'new', JSON.stringify(bot.data));
   await check('but nothing is stored', (await contacts.countDocuments({ subject: 'Honeypot subject' })) === 0);
+  const badBot = await call('POST', '/contact', { body: { name: 'Bot', email: 'not-an-email', message: 'Buy now', website: 'http://spam.test' } });
+  await check('a honeypot message is checked like a real one: what a real one is refused for is still a 400', badBot.status === 400 &&
+    badBot.data.message.includes('Please provide a valid email') && badBot.data.message.includes('Subject is required'), JSON.stringify(badBot.data));
 
   const longest = {
     name: 'V'.repeat(100), email: 'visitor@admin9.test', phone: '+'.padEnd(30, '9'), subject: 'Pricing '.padEnd(200, 'x'),
@@ -503,6 +518,9 @@ test('the contact form', async (t) => {
   const sent = await call('POST', '/contact', { body: longest });
   await check('values at their limits are accepted', sent.status === 201 && sent.data.data._id, JSON.stringify(sent.data).slice(0, 300));
   await check('and stored', (await contacts.countDocuments({ email: 'visitor@admin9.test' })) === 1);
+  await check('the honeypot answer has the fields of a stored message, in the same order',
+    JSON.stringify(Object.keys(bot.data.data)) === JSON.stringify(Object.keys(sent.data.data)) && bot.data.data.__v === 0,
+    `${Object.keys(bot.data.data)} / ${Object.keys(sent.data.data)}`);
   await sleep(300);
 
   const inbox = await call('GET', '/notifications', { token: adminToken });
@@ -538,6 +556,11 @@ test('the contact inbox: search, sort, counts and status', async (t) => {
   const byName = await call('GET', '/contact?sort=name', { token: adminToken });
   await check('?sort=name', byName.data.data[0].name === 'Amy Early' && byName.data.data[1].name === 'Bea Middle');
   await check('an unknown sort is a 400', (await call('GET', '/contact?sort=random', { token: adminToken })).status === 400);
+  for (const inherited of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    const res = await call('GET', `/contact?sort=${inherited}`, { token: adminToken });
+    await check(`?sort=${inherited} is not a way to sort either`, res.status === 400 && res.data.message === 'Invalid sort',
+      `${res.status} ${JSON.stringify(res.data).slice(0, 200)}`);
+  }
 
   const pricing = await call('GET', '/contact?q=pricing', { token: adminToken });
   await check('?q= searches subject and message, any case', pricing.data.count === 2 &&
@@ -574,6 +597,13 @@ test('the contact inbox: search, sort, counts and status', async (t) => {
   await check('no status is a 400', (await call('PUT', `/contact/${visitor._id}`, { token: adminToken, body: {} })).status === 400);
   const invalid = await call('PUT', `/contact/${visitor._id}`, { token: adminToken, body: { status: 'spam' } });
   await check('an unknown status is refused', invalid.status === 400 && invalid.data.message === 'Invalid status', JSON.stringify(invalid.data));
+  for (const status of [null, '', ['resolved'], 7]) {
+    const res = await call('PUT', `/contact/${visitor._id}`, { token: adminToken, body: { status } });
+    await check(`a status of ${JSON.stringify(status)} is refused`, res.status === 400 && res.data.message === 'Invalid status',
+      JSON.stringify(res.data));
+  }
+  const untouched = await contacts.findOne({ _id: oid(visitor._id) });
+  await check('and leaves the message as it was', untouched.status === 'in-progress', JSON.stringify(untouched.status));
   await check('an unknown message is a 404',
     (await call('PUT', `/contact/${new mongoose.Types.ObjectId()}`, { token: adminToken, body: { status: 'closed' } })).status === 404);
   const { insertedId: legacyId } = await contacts.insertOne(message(30, {
@@ -646,4 +676,123 @@ test('replying to a contact message by email', async (t) => {
 
   const later = await call('POST', `/contact/${resolvedId}/reply`, { token, body: { message: 'You are welcome.' } });
   await check('replying to a resolved message keeps it resolved', later.status === 201 && later.data.data.status === 'resolved');
+});
+
+test('a reply does not undo what happens to the message while it is being emailed', async (t) => {
+  const check = checker(t);
+  const { call, login } = mailServer.api;
+  const token = await login(ADMIN);
+  const contacts = mailDb.collection('contacts');
+  // "slow" addresses: the mail server takes SLOW_SMTP_MS to accept the reply
+  const { insertedIds } = await contacts.insertMany([
+    { name: 'Slow', email: 'slow-1@admin9.test', subject: 'Race', message: 'Hi', status: 'new', replies: [], ...stamp() },
+    { name: 'Slow', email: 'slow-2@admin9.test', subject: 'Gone', message: 'Hi', status: 'new', replies: [], ...stamp() },
+  ]);
+  const [raceId, goneId] = Object.values(insertedIds).map(String);
+
+  const replying = call('POST', `/contact/${raceId}/reply`, { token, body: { message: 'Looking into it' } });
+  await sleep(SLOW_SMTP_MS / 3); // the email is on its way
+  const resolved = await call('PUT', `/contact/${raceId}`, { token, body: { status: 'resolved' } });
+  await check('the message is resolved meanwhile', resolved.status === 200 && resolved.data.data.status === 'resolved');
+  const reply = await replying;
+  const replied = reply.data?.data;
+  await check('the reply is sent and kept', reply.status === 201 && replied?.replies?.length === 1 && replied.replies[0].sent === true,
+    JSON.stringify(reply.data).slice(0, 300));
+  await check('and the message stays resolved, by who resolved it', replied?.status === 'resolved' &&
+    replied.resolvedBy?.name === 'Admin User' && Boolean(replied.resolvedAt), JSON.stringify(replied).slice(0, 300));
+  const stored = await contacts.findOne({ _id: oid(raceId) });
+  await check('in the database too', stored.status === 'resolved' && Boolean(stored.resolvedBy) && Boolean(stored.resolvedAt) &&
+    stored.replies.length === 1, JSON.stringify(stored).slice(0, 300));
+
+  const replyingToGone = call('POST', `/contact/${goneId}/reply`, { token, body: { message: 'Hello' } });
+  await sleep(SLOW_SMTP_MS / 3);
+  await check('the message is deleted meanwhile', (await call('DELETE', `/contact/${goneId}`, { token })).status === 200);
+  const gone = await replyingToGone;
+  await check('the reply then has nothing to be kept on: 404', gone.status === 404 && gone.data?.message === 'Contact message not found',
+    `${gone.status} ${JSON.stringify(gone.data).slice(0, 200)}`);
+  await check('and the message does not come back', (await contacts.countDocuments({ _id: oid(goneId) })) === 0);
+});
+
+test('the contact form answers without waiting for the mail server', async (t) => {
+  const check = checker(t);
+  const { call, login } = mailServer.api;
+  smtp.control.delayMs = 2000;
+  try {
+    const started = Date.now();
+    const sent = await call('POST', '/contact', {
+      body: { name: 'Quick', email: 'quick@admin9.test', subject: 'Fast answer', message: 'Hello' },
+    });
+    const took = Date.now() - started;
+    await check('the visitor has their answer before the admins are emailed', sent.status === 201 && took < 1000,
+      `${sent.status} in ${took} ms`);
+
+    // The admins are still told, and emailed, afterwards
+    let mail;
+    for (let i = 0; i < 60 && !mail; i++) {
+      mail = smtp.received.find((m) => m.data.includes('New message from Quick'));
+      if (!mail) await sleep(100);
+    }
+    await check('the admins are still emailed', Boolean(mail) && mail.to.some((to) => to.includes(ADMIN.email)),
+      JSON.stringify(smtp.received.map((m) => m.to)));
+    const notices = (await call('GET', '/notifications', { token: await login(ADMIN) })).data?.data || [];
+    await check('and notified', notices.some((n) => n.type === 'contact_message' && n.data?.contactId === sent.data?.data?._id));
+  } finally {
+    smtp.control.delayMs = 0;
+  }
+});
+
+test('export times are the clock time on the days the clocks change', async (t) => {
+  const check = checker(t);
+  const token = await mailServer.api.login(ADMIN);
+  // Europe/London moves its clocks at 01:00 UTC: forward on 2026-03-29, back on 2026-10-25
+  await mailDb.collection('users').insertMany([
+    { name: 'Spring Login', email: 'spring@admin9.test', password: 'x', role: 'user', isActive: true,
+      lastLoginAt: new Date('2026-03-29T12:00:00.000Z'), ...stamp() },
+    { name: 'Autumn Login', email: 'autumn@admin9.test', password: 'x', role: 'user', isActive: true,
+      lastLoginAt: new Date('2026-10-25T12:00:00.000Z'), ...stamp() },
+    { name: 'Summer Login', email: 'summer@admin9.test', password: 'x', role: 'user', isActive: true,
+      lastLoginAt: new Date('2026-07-01T23:30:00.000Z'), ...stamp() },
+  ]);
+  const users = await download('/admin/export/users', token, mailServer);
+  const row = (email) => users.csv?.records.find((r) => r.Email === email);
+  await check('the day the clocks go forward: summer time after the change', row('spring@admin9.test')?.['Last login'] === '2026-03-29 13:00',
+    JSON.stringify(row('spring@admin9.test')));
+  await check('the day they go back: winter time after the change', row('autumn@admin9.test')?.['Last login'] === '2026-10-25 12:00',
+    JSON.stringify(row('autumn@admin9.test')));
+  await check('an ordinary summer day, just after midnight there', row('summer@admin9.test')?.['Last login'] === '2026-07-02 00:30',
+    JSON.stringify(row('summer@admin9.test')));
+});
+
+test('accounts with no record left show as Deleted user', async (t) => {
+  const check = checker(t);
+  const { call, login, me } = mailServer.api;
+  const token = await login(ADMIN);
+  const admin = await me(token);
+  // Removed outright, before deleted accounts were kept
+  const gone = new mongoose.Types.ObjectId();
+
+  await mailDb.collection('tasks').insertOne({
+    title: 'Made by someone gone', description: 'd', status: 'completed', priority: 'low', estimatedDays: 1, tags: [], assigneeProgress: [],
+    team: null, assignedTo: [gone, oid(admin._id)], createdBy: gone, approvedBy: gone, approvedAt: new Date('2026-10-25T12:00:00.000Z'),
+    startDate: new Date('2026-10-20T00:00:00.000Z'), dueDate: new Date('2026-10-26T00:00:00.000Z'),
+    completedDate: new Date('2026-10-25T12:00:00.000Z'), ...stamp(),
+  });
+  const tasks = await download('/admin/export/tasks', token, mailServer);
+  const task = tasks.csv?.records.find((r) => r.Title === 'Made by someone gone');
+  await check('in the tasks export', task?.['Created by'] === 'Deleted user' && task['Approved by'] === 'Deleted user' &&
+    task.Assignees === 'Deleted user; Admin User', JSON.stringify(task));
+  await check('with the completion on the clock there', task?.Completed === '2026-10-25 12:00', JSON.stringify(task));
+
+  const { insertedId } = await mailDb.collection('contacts').insertOne({
+    name: 'Visitor', email: 'old@admin9.test', subject: 'Old one', message: 'Hi', status: 'resolved', resolvedBy: gone, resolvedAt: new Date(),
+    replies: [{ _id: new mongoose.Types.ObjectId(), by: gone, message: 'Sorted', at: new Date(), sent: true }], ...stamp(),
+  });
+  const shown = (await call('GET', `/contact/${insertedId}`, { token })).data?.data;
+  await check('in the inbox: who resolved it', shown?.resolvedBy?.name === 'Deleted user' && shown.resolvedBy.email === null &&
+    String(shown.resolvedBy._id) === String(gone), JSON.stringify(shown?.resolvedBy));
+  await check('and who replied', shown?.replies?.[0]?.by?.name === 'Deleted user' && String(shown.replies[0].by._id) === String(gone),
+    JSON.stringify(shown?.replies));
+  const listed = (await call('GET', '/contact?q=Old%20one', { token })).data?.data?.[0];
+  await check('in the list too', listed?.resolvedBy?.name === 'Deleted user' && listed.replies[0].by?.name === 'Deleted user',
+    JSON.stringify(listed).slice(0, 300));
 });

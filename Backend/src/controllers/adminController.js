@@ -37,10 +37,14 @@ const badRequest = (res, message) => res.status(400).json({ success: false, mess
 const countsFor = (keys, rows) => {
   const counts = Object.fromEntries(keys.map((key) => [key, 0]));
   for (const { _id, count } of rows) {
-    if (_id in counts) counts[_id] = count;
+    if (typeof _id === 'string' && Object.hasOwn(counts, _id)) counts[_id] = count;
   }
   return counts;
 };
+
+// How an account that is gone shows: kept accounts are anonymised to this
+// name, and one removed before accounts were kept has no record left
+const DELETED_NAME = 'Deleted user';
 
 // ── Days in the app timezone ──────────────────────────────────────────────────
 
@@ -95,16 +99,25 @@ const readPeriod = (query) => {
   return period;
 };
 
-// A timestamp as 'YYYY-MM-DD HH:mm' in the app timezone, for spreadsheets
+// The clock in the app timezone, read the way utils/dates.js reads it
+// (APP_TIMEZONE, India by default), as 'HH:mm'
+const clocks = new Map();
+const clockIn = (timeZone) => {
+  if (!clocks.has(timeZone)) {
+    clocks.set(timeZone, new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }));
+  }
+  return clocks.get(timeZone);
+};
+
+// A timestamp as 'YYYY-MM-DD HH:mm' in the app timezone, for spreadsheets.
+// The time is what the clock there showed, so it is right on the days a
+// timezone moves its clocks (time since midnight would be an hour off).
 const localTime = (value) => {
   if (!value) return '';
   const date = new Date(value);
   const day = toDayKey(date);
   if (!day) return '';
-  const minutes = Math.floor((date - startOfDay(day)) / MINUTE_MS);
-  const hh = String(Math.floor(minutes / 60)).padStart(2, '0');
-  const mm = String(minutes % 60).padStart(2, '0');
-  return `${day} ${hh}:${mm}`;
+  return `${day} ${clockIn(process.env.APP_TIMEZONE || 'Asia/Kolkata').format(date)}`;
 };
 
 // A date-only value (a task's start or due date) as its day
@@ -184,7 +197,7 @@ const actorsById = async (ids) => {
     role: user.role,
     deleted: Boolean(user.deletedAt),
   }]));
-  return (id) => byId.get(String(id)) || { _id: id, name: 'Deleted user', email: null, role: null, deleted: true };
+  return (id) => byId.get(String(id)) || { _id: id, name: DELETED_NAME, email: null, role: null, deleted: true };
 };
 
 // @desc    The audit log, newest first, a page at a time. Filters: actor
@@ -450,7 +463,15 @@ export const getOverviewReport = async (req, res) => {
 // ── Exports ───────────────────────────────────────────────────────────────────
 
 const yesNo = (value) => (value ? 'Yes' : 'No');
-const nameOf = (person) => person?.name || '';
+
+// Names for user ids, for the exports: '' where there is no id, and
+// "Deleted user" for an account with no record left
+const namesById = async (ids) => {
+  const unique = [...new Set(ids.filter(Boolean).map(String))];
+  const users = unique.length > 0 ? await User.find({ _id: { $in: unique } }).select('name').lean() : [];
+  const byId = new Map(users.map((user) => [String(user._id), user.name]));
+  return (id) => (id ? byId.get(String(id)) ?? DELETED_NAME : '');
+};
 
 // @desc    Every account (deleted ones left out) as a CSV file
 // @route   GET /api/v2/admin/export/users
@@ -518,18 +539,18 @@ export const exportTasks = async (req, res) => {
     const tasks = await Task.find(filter)
       .select('title status priority team assignedTo createdBy approvedBy startDate dueDate completedDate createdAt')
       .populate('team', 'name')
-      .populate('assignedTo', 'name')
-      .populate('createdBy', 'name')
-      .populate('approvedBy', 'name')
       .sort({ createdAt: -1, _id: -1 })
       .lean();
+    // Looked up rather than populated: populate leaves no trace of an
+    // account that has no record left
+    const nameOf = await namesById(tasks.flatMap((task) => [task.createdBy, task.approvedBy, ...(task.assignedTo || [])]));
 
     const csv = toCsv(tasks, [
       { header: 'Title', value: (task) => task.title },
       { header: 'Status', value: (task) => task.status },
       { header: 'Priority', value: (task) => task.priority },
-      { header: 'Team', value: (task) => nameOf(task.team) },
-      { header: 'Assignees', value: (task) => task.assignedTo.filter(Boolean).map(nameOf).join('; ') },
+      { header: 'Team', value: (task) => task.team?.name || '' },
+      { header: 'Assignees', value: (task) => (task.assignedTo || []).filter(Boolean).map(nameOf).join('; ') },
       { header: 'Created by', value: (task) => nameOf(task.createdBy) },
       { header: 'Created', value: (task) => (task.createdAt ? toDayKey(task.createdAt) : '') },
       { header: 'Start', value: (task) => isoDay(task.startDate) },

@@ -25,7 +25,9 @@ Paths on this page are under `/api/v2`.
 | `replies` | array | The admins' replies, oldest first: `{ _id, by, message, at, sent }`, with `by` populated as `{ _id, name, email }`. `sent` says whether the email went out |
 | `createdAt`, `updatedAt` | date | |
 
-A deleted admin account shows as `Deleted user` in `resolvedBy` and `replies[].by`.
+A deleted admin account shows as `Deleted user` in `resolvedBy` and `replies[].by`. A kept
+(anonymised) account has that name. An account removed outright, before deleted accounts were
+kept, has no record left; it shows as `{ "_id": <its id>, "name": "Deleted user", "email": null }`.
 
 The length limits apply to new messages. Messages sent before them keep their text in full, and
 their status can still be changed and they can still be replied to.
@@ -67,7 +69,9 @@ other field, such as `status`, `resolvedBy` or `replies`, is ignored. Returns `2
 }
 ```
 
-Every active admin then gets a `contact_message` notification (see below), also by email.
+Every active admin then gets a `contact_message` notification (see below), also by email. This
+happens after the answer has gone out, so a slow or unreachable mail server never holds up the
+form.
 
 Errors (several are joined with `; `):
 
@@ -82,10 +86,17 @@ Errors (several are joined with `; `):
 ### The honeypot
 
 The form has a hidden field, `website`, that people never see and so leave empty. Bots that fill
-in every field fill it in too. A message with a non-empty `website` gets the same `201` answer as
-a real one, so the bot learns nothing, but nothing is stored and nobody is told. The frontend
-must send `website` empty (or not at all), and keep the field out of sight and out of the tab
-order.
+in every field fill it in too. A message with a non-empty `website` gets the answer a real one
+would, so the bot can't tell it was caught, but nothing is stored and nobody is told:
+
+- It is checked the same way, so a field a real message is refused for is still a `400` with the
+  same message.
+- If it passes, the answer is the same `201` body, with the same fields (`_id`, the timestamps,
+  `__v`) as a stored message.
+- Neither answer waits for email.
+
+The frontend must send `website` empty (or not at all), and keep the field out of sight and out of
+the tab order.
 
 ## The inbox
 
@@ -130,7 +141,8 @@ Admin. Body: `{ "status": "resolved" }`; other fields are ignored. Returns `{ su
   state.
 - Sending the status it already has changes nothing.
 
-Errors: `400 Choose a status` (no `status`), `400 Invalid status`, `404 Contact message not found`.
+Errors: `400 Choose a status` (no `status`), `400 Invalid status` (anything but the four statuses,
+`null` and `""` included), `404 Contact message not found`.
 
 ### `POST /contact/:id/reply`
 
@@ -142,7 +154,11 @@ trimming. Emails the sender:
 - with the reply, then the sender's own message quoted below it
 
 The reply is added to `replies` as `{ by: <the caller>, message, at, sent }`. A message still `new`
-moves to `in-progress`; any other status stays as it is. Returns `201`:
+moves to `in-progress`; any other status stays as it is. Sending can take a few seconds. If
+another admin changes the message meanwhile, their change stands: the reply is added to the message
+as it is when the email has gone, and only a message that is still `new` by then moves to
+`in-progress`. A message resolved meanwhile stays `resolved`, with its `resolvedBy` and
+`resolvedAt`. Returns `201`:
 
 ```json
 {
@@ -175,7 +191,9 @@ Errors:
 - `400 A reply can be at most 5000 characters`
 - `400 Email isn't set up on this server`: `SMTP_HOST` isn't set (see `Backend/.env.example`).
   Nothing is stored.
-- `404 Contact message not found`
+- `404 Contact message not found`. Also when the message is deleted while the email is being
+  sent: the email has been tried and the attempt is in the audit log, but there is no message left
+  to keep the reply on.
 - `502` as above
 
 ### `DELETE /contact/:id`
