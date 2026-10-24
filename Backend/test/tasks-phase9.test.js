@@ -185,6 +185,21 @@ test('the review queue matches who can review', async (t) => {
   await check('the assignee hears it was approved', (await notifiedAbout(max, 'task_approved', solo._id)).length === 1);
   const again = await api('PUT', `/tasks/${solo._id}/approve`, { token: adminToken });
   await check('approving a completed task conflicts', again.status === 409, JSON.stringify(again.data));
+
+  // Taking off the one person still working sends the task for review, and
+  // the reviewers hear it again, as when the last assignee finishes
+  const { nora, mia } = people;
+  const pair = await teamTask(teams.gamma, nora, { title: 'Pair work', assignedTo: [oscar._id, mia._id] });
+  await requestDone(pair, oscar);
+  const firstCall = await notifiedAbout(nora, 'task_completion_requested', pair._id);
+  await check('the leader hears about the first request', firstCall.length === 1, JSON.stringify(firstCall));
+  const narrowed = await api('PUT', `/tasks/${pair._id}`, { token: adminToken, body: { assignedTo: [oscar._id] } });
+  await check('taking off the one still working sends it for review',
+    narrowed.status === 200 && narrowed.data.data.status === 'completion-requested' &&
+    narrowed.data.data.history.at(-1).action === 'completion_requested', JSON.stringify(narrowed.data).slice(0, 300));
+  const secondCall = await notifiedAbout(nora, 'task_completion_requested', pair._id);
+  await check('and the leader hears that everyone left has finished',
+    secondCall.length === 2 && secondCall.some((n) => n.body.startsWith('Everyone left on the task has finished')), JSON.stringify(secondCall));
 });
 
 test('assignees are real, active people', async (t) => {
@@ -196,6 +211,8 @@ test('assignees are real, active people', async (t) => {
   await db.collection('users').updateOne({ _id: oid(dee._id) }, { $set: { deletedAt: new Date(), isActive: false, name: 'Deleted user' } });
 
   const create = (assignedTo, token = adminToken) => call('POST', '/tasks', { token, body: { title: 'Who', description: 'd', ...DATES, assignedTo } });
+  const teamCreate = (team, leader, assignedTo) =>
+    call('POST', `/teams/${team._id}/tasks`, { token: leader.token, body: { title: 'Who', description: 'd', ...DATES, assignedTo } });
   await check('a malformed id is a 400', (await create(['nope'])).status === 400);
   const unknown = await create([String(new mongoose.Types.ObjectId())]);
   await check("an unknown user is a 400 saying so", unknown.status === 400 && /doesn't exist/.test(unknown.data.message), unknown.data.message);
@@ -203,12 +220,47 @@ test('assignees are real, active people', async (t) => {
   await check('a deactivated user is named', inactive.status === 400 && inactive.data.message.includes('Ivy Idle'), inactive.data.message);
   const deleted = await create([dee._id]);
   await check('a deleted account is refused', deleted.status === 400 && /deleted/.test(deleted.data.message), deleted.data.message);
-  await check('also on the team route',
-    (await call('POST', `/teams/${teams.alpha._id}/tasks`, { token: lena.token, body: { title: 'x', description: 'd', ...DATES, assignedTo: [ivy._id] } })).status === 400);
+
+  // A leader learns nothing about accounts outside their team: everyone there
+  // gets the same answer, whatever their account's state
+  const outside = await Promise.all([String(new mongoose.Types.ObjectId()), ivy._id, dee._id].map((id) => create([id], lena.token)));
+  await check("a leader can't tell an unknown, deleted or deactivated account from anyone else outside the team",
+    outside.every((response) => response.status === 403 && response.data.message === 'You can only assign tasks to members of your team'),
+  JSON.stringify(outside.map((response) => response.data.message)));
+  const outsideTeam = await teamCreate(teams.alpha, lena, [ivy._id]);
+  await check('also on the team route', outsideTeam.status === 400 && outsideTeam.data.message === 'All assignees must be members of the team',
+    outsideTeam.data.message);
+
+  // Someone in the leader's own team is named
+  const { nora, mia } = people;
+  const keptPeople = await adminTask({ title: 'Kept people', assignedTo: [mia._id, oscar._id] });
+  const closedWithMia = await adminTask({ title: 'Closed with Mia', assignedTo: [mia._id], status: 'completed' });
+  await call('PUT', `/users/${mia._id}/toggle-active`, { token: adminToken });
+  const teamMember = await create([mia._id], nora.token);
+  await check("a leader is told their own member's account is deactivated", teamMember.status === 400 && teamMember.data.message.includes('Mia Member'),
+    teamMember.data.message);
+  const teamRouteMember = await teamCreate(teams.gamma, nora, [mia._id]);
+  await check('on the team route too', teamRouteMember.status === 400 && teamRouteMember.data.message.includes('Mia Member'), teamRouteMember.data.message);
+
+  // Someone deactivated after joining a task never blocks an edit that keeps them
+  const keep = await call('PUT', `/tasks/${keptPeople._id}`, { token: adminToken, body: { assignedTo: [mia._id, oscar._id], notes: 'still here' } });
+  await check('an edit that resends a deactivated assignee goes through', keep.status === 200 && keep.data.data.notes === 'still here',
+    JSON.stringify(keep.data).slice(0, 200));
+  const fewer = await call('PUT', `/tasks/${keptPeople._id}`, { token: adminToken, body: { assignedTo: [mia._id] } });
+  await check('so does taking someone else off', fewer.status === 200 && fewer.data.data.assignedTo.length === 1, JSON.stringify(fewer.data).slice(0, 200));
+  const addIvy = await call('PUT', `/tasks/${keptPeople._id}`, { token: adminToken, body: { assignedTo: [mia._id, ivy._id] } });
+  await check('but someone deactivated is still not added', addIvy.status === 400 && addIvy.data.message.includes('Ivy Idle'), addIvy.data.message);
+  const closedEdit = await call('PUT', `/tasks/${closedWithMia._id}`, { token: adminToken, body: { assignedTo: [mia._id], title: 'Closed with Mia (v2)' } });
+  await check('and a completed task with a deactivated assignee can still be edited',
+    closedEdit.status === 200 && closedEdit.data.data.title === 'Closed with Mia (v2)', JSON.stringify(closedEdit.data).slice(0, 200));
+  await call('PUT', `/users/${mia._id}/toggle-active`, { token: adminToken });
 
   const task = await teamTask(teams.alpha, lena, { title: 'Team only', assignedTo: [max._id] });
   await check('a leader cannot hand it to someone outside the team',
     (await call('PUT', `/tasks/${task._id}`, { token: lena.token, body: { assignedTo: [oscar._id] } })).status === 403);
+  const probe = await call('PUT', `/tasks/${task._id}`, { token: lena.token, body: { assignedTo: [max._id, String(new mongoose.Types.ObjectId())] } });
+  await check('nor learn whether an id outside it exists', probe.status === 403 && probe.data.message === 'You can only assign tasks to members of your team',
+    probe.data.message);
   await check('or put themselves on it',
     (await call('PUT', `/tasks/${task._id}`, { token: lena.token, body: { assignedTo: [max._id, lena._id] } })).status === 403);
   await check('an edit with a deactivated user is refused',
@@ -246,11 +298,24 @@ test('status changes keep progress consistent', async (t) => {
   await check('the assignees hear', (await notifiedAbout(oscar, 'task_approved', task._id)).length === 1);
   const overridden = await audits('task_status_overridden');
   await check('the override is audited', overridden.some((event) => event.targetId === task._id && event.details.to === 'completed'));
+  const approvedHistory = (await getTask(task._id)).history.slice(-2);
+  await check('the history has the override and the approval it amounts to',
+    approvedHistory[0].action === 'status_changed' && approvedHistory[0].details.to === 'completed' && approvedHistory[1].action === 'approved',
+  JSON.stringify(approvedHistory));
+  const cancelDone = await call('PUT', `/tasks/${task._id}`, { token: adminToken, body: { status: 'cancelled' } });
+  await check("an admin's 'cancelled' on a completed task is refused, as with POST /cancel",
+    cancelDone.status === 409 && cancelDone.data.message === "A completed task can't be cancelled. Reopen it first.", JSON.stringify(cancelDone.data));
+  const stillDone = await getTask(task._id);
+  await check('so it stays completed and approved', stillDone.status === 'completed' && stillDone.approvedBy?.name === admin.name && !stillDone.cancelledBy);
 
   const pending = await call('PUT', `/tasks/${task._id}`, { token: adminToken, body: { status: 'pending' } });
   await check("'pending' starts everyone over", pending.data.data.status === 'pending' && pending.data.data.assigneeProgress.every((p) => p.status === 'not-started'));
   await check('and clears the completion', !pending.data.data.completedDate && !pending.data.data.approvedBy && !pending.data.data.approvedAt);
   await check('they hear it was reopened', (await notifiedAbout(max, 'task_reopened', task._id)).length === 1);
+  const reopenedHistory = pending.data.data.history.slice(-2);
+  await check('the history has the override and the reopening',
+    reopenedHistory[0].action === 'status_changed' && reopenedHistory[1].action === 'reopened' &&
+    reopenedHistory[1].details.status === 'pending' && reopenedHistory[1].details.from === 'completed', JSON.stringify(reopenedHistory));
   const requested = await call('PUT', `/tasks/${task._id}`, { token: adminToken, body: { status: 'completion-requested' } });
   await check("'completion-requested' can't be set directly", requested.status === 400, JSON.stringify(requested.data));
 
@@ -377,6 +442,15 @@ test('comments', async (t) => {
     page2.data[0].text === 'Comment deleted' && page2.data[1].text === 'Answer' && page2.data[6].text === 'c4',
   JSON.stringify(page2.data.map((c) => c.text)));
   await check('a malformed cursor is a 400', (await call('GET', `/tasks/${task._id}/comments?before=nope`, { token: max.token })).status === 400);
+
+  // Deleting one comment several times at once counts it once
+  const twice = await teamTask(teams.alpha, lena, { title: 'Discuss twice', assignedTo: [max._id] });
+  const doomed = (await call('POST', `/tasks/${twice._id}/comments`, { token: max.token, body: { text: 'Delete me' } })).data.data;
+  await call('POST', `/tasks/${twice._id}/comments`, { token: max.token, body: { text: 'Keep me' } });
+  const deletes = await Promise.all(Array.from({ length: 4 }, () => call('DELETE', `/tasks/${twice._id}/comments/${doomed._id}`, { token: max.token })));
+  await check('parallel deletes of one comment: one succeeds', deletes.filter((response) => response.status === 200).length === 1 &&
+    deletes.every((response) => response.status === 200 || response.status === 409), JSON.stringify(deletes.map((response) => response.status)));
+  await check('and the count drops once', (await getTask(twice._id)).commentCount === 1);
 });
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('not really an image')]);
@@ -421,6 +495,9 @@ test('attachments', async (t) => {
   await check('HTML is refused', (await refused({ name: 'a.html', type: 'text/html', data: text })) === 400);
   await check('a page named .html is refused whatever its type', (await refused({ name: 'page.html', type: 'text/plain', data: text })) === 400);
   await check('a program is refused', (await refused({ name: 'setup.exe', type: 'application/zip', data: text })) === 400);
+  await check('a trailing dot does not hide a page', (await refused({ name: 'page.html.', type: 'text/plain', data: text })) === 400);
+  await check('nor dots and spaces a program', (await refused({ name: 'setup.exe. .', type: 'application/zip', data: text })) === 400);
+  await check('a type must be one of the allowed ones, not any name', (await refused({ name: 'a.txt', type: 'constructor', data: text })) === 400);
   await check("an image whose contents aren't an image is refused", (await refused({ name: 'fake.png', type: 'image/png', data: text })) === 400);
   await check('so is a fake PDF', (await refused({ name: 'fake.pdf', type: 'application/pdf', data: text })) === 400);
   await check('data that is not base64 is refused', (await refused({ name: 'a.txt', type: 'text/plain', data: '***' })) === 400);
@@ -441,10 +518,24 @@ test('attachments', async (t) => {
     after.history.filter((entry) => entry.action === 'attachment_removed').length === 2);
   await check('a missing file is a 404', (await call('DELETE', `/tasks/${task._id}/attachments/${png.data.data._id}`, { token: lena.token })).status === 404);
 
+  // Deleting one file several times at once gives back one place, so the
+  // limit of 10 still holds
+  const note = (await call('GET', `/tasks/${task._id}/attachments`, { token: max.token })).data.data.find((a) => a.name === 'note0.txt');
+  const deletes = await Promise.all(Array.from({ length: 4 }, () => call('DELETE', `/tasks/${task._id}/attachments/${note._id}`, { token: max.token })));
+  await check('parallel deletes of one file: one succeeds', deletes.filter((response) => response.status === 200).length === 1 &&
+    deletes.every((response) => response.status === 200 || response.status === 404), JSON.stringify(deletes.map((response) => response.status)));
+  const files = await db.collection('taskattachments').countDocuments({ task: oid(task._id) });
+  await check('and the count matches the files', files === 7 && (await getTask(task._id)).attachmentCount === 7, `${files}`);
+  for (let i = 0; i < 3; i += 1) await attach(task, max, { name: `refill${i}.txt`, type: 'text/plain', data: text });
+  await check('the limit still holds after it', (await attach(task, max, { name: 'over.txt', type: 'text/plain', data: text })).status === 409 &&
+    (await db.collection('taskattachments').countDocuments({ task: oid(task._id) })) === 10);
+
   const stopped = await adminTask({ title: 'Cancelled files', assignedTo: [max._id] });
   await call('POST', `/tasks/${stopped._id}/cancel`, { token: adminToken });
   await check('no files on a cancelled task', (await attach(stopped, max, { name: 'a.txt', type: 'text/plain', data: text })).status === 409);
-  await check('except from an admin', (await attach(stopped, { token: adminToken }, { name: 'a.txt', type: 'text/plain', data: text })).status === 201);
+  const byAdmin = await attach(stopped, { token: adminToken }, { name: 'a.txt. ', type: 'text/plain', data: text });
+  await check('except from an admin', byAdmin.status === 201);
+  await check('a name loses its trailing dots and spaces', byAdmin.data.data?.name === 'a.txt', JSON.stringify(byAdmin.data));
 
   // Deleting a task takes its comments and files with it
   await call('POST', `/tasks/${task._id}/comments`, { token: max.token, body: { text: 'bye' } });
@@ -560,7 +651,38 @@ test('repeating tasks', async (t) => {
   await check('a deactivated assignee is left off the next one', rota && rota.assignedTo.length === 1 && rota.assignedTo[0]._id === oscar._id, JSON.stringify(rota?.assignedTo));
 
   const monthly = await adminTask({ title: 'Month end', startDate: '2027-01-31', dueDate: '2027-01-31', assignedTo: [oscar._id], recurrence: { frequency: 'monthly' } });
-  await check('a month keeps the day, or the shorter month\'s last day', monthly.recurrence?.nextOccurrenceAt === '2027-02-28T00:00:00.000Z', JSON.stringify(monthly.recurrence));
+  await check('a month keeps the day, or the shorter month\'s last day', monthly.recurrence?.nextOccurrenceAt === '2027-02-28T00:00:00.000Z' &&
+    monthly.recurrence.anchorDate === '2027-01-31T00:00:00.000Z', JSON.stringify(monthly.recurrence));
+
+  // A series whose next task can't be saved (here: copied data from before
+  // descriptions were required) stops, and says why
+  const brokenId = new mongoose.Types.ObjectId();
+  await db.collection('tasks').insertOne({
+    _id: brokenId, title: 'Broken series', description: '', assignedTo: [oid(oscar._id)], createdBy: oid(admin._id), team: null,
+    status: 'pending', priority: 'medium', startDate: new Date(day(0)), dueDate: new Date(day(0)), tags: [], checklist: [], history: [],
+    assigneeProgress: [{ _id: new mongoose.Types.ObjectId(), user: oid(oscar._id), status: 'not-started' }],
+    recurrence: { frequency: 'daily', interval: 1, until: null, anchorDate: new Date(day(0)), seriesId: brokenId, nextOccurrenceAt: new Date(day(1)) },
+    createdAt: new Date(), updatedAt: new Date(),
+  });
+
+  const monthEnd = async () => (await call('GET', '/tasks?q=Month%20end&sort=dueDate', { token: adminToken })).data.data;
+  const february = await runJob('task-recurrence', '2027-02-28T01:00:00Z');
+  const afterFebruary = await monthEnd();
+  await check('the job creates the February task on the 28th', afterFebruary.length === 2 && afterFebruary[1].startDate === '2027-02-28T00:00:00.000Z',
+    JSON.stringify(afterFebruary.map((task) => task.startDate)));
+  await check('and schedules the next for the 31st again, not the 28th', afterFebruary[1]?.recurrence.nextOccurrenceAt === '2027-03-31T00:00:00.000Z' &&
+    afterFebruary[1].recurrence.anchorDate === '2027-01-31T00:00:00.000Z', JSON.stringify(afterFebruary[1]?.recurrence));
+  await runJob('task-recurrence', '2027-03-31T01:00:00Z');
+  const afterMarch = await monthEnd();
+  await check('March is on the 31st, and April on its last day', afterMarch.length === 3 && afterMarch[2].startDate === '2027-03-31T00:00:00.000Z' &&
+    afterMarch[2].recurrence.nextOccurrenceAt === '2027-04-30T00:00:00.000Z',
+  JSON.stringify(afterMarch.map((task) => [task.startDate, task.recurrence?.nextOccurrenceAt])));
+
+  await check('a next task that fails to save is counted', february.data?.failed === 1, JSON.stringify(february));
+  const broken = await getTask(brokenId);
+  const stopped = broken.history.at(-1);
+  await check('its series stops, and the history says why', broken.recurrence.nextOccurrenceAt === null &&
+    stopped?.action === 'recurrence_stopped' && /description/i.test(stopped.details.reason), JSON.stringify(broken.history));
 });
 
 test('reminders and due days', async (t) => {
@@ -757,6 +879,7 @@ test('frozen team tasks', async (t) => {
   await check("a member can open a teammate's team task", (await call('GET', `/tasks/${leaders._id}`, { token: uma.token })).status === 200);
   await check('and comment on it', (await call('POST', `/tasks/${leaders._id}/comments`, { token: uma.token, body: { text: 'Need help?' } })).status === 201);
   await check('someone outside the team cannot open it', (await call('GET', `/tasks/${leaders._id}`, { token: oscar.token })).status === 403);
+  const earlier = (await call('POST', `/tasks/${work._id}/comments`, { token: uma.token, body: { text: 'Started on it' } })).data.data;
 
   await call('PUT', `/teams/${teams.beta._id}`, { token: adminToken, body: { isActive: false } });
   await check('the assignee still starts work', (await call('PUT', `/tasks/${work._id}`, { token: uma.token, body: { status: 'in-progress' } })).status === 200);
@@ -766,8 +889,15 @@ test('frozen team tasks', async (t) => {
   const isFrozen = (response) => response.status === 400 && /frozen/.test(response.data?.message);
   await check('but cannot comment', isFrozen(await call('POST', `/tasks/${work._id}/comments`, { token: uma.token, body: { text: 'hello?' } })));
   await check('or attach files', isFrozen(await call('POST', `/tasks/${work._id}/attachments`, { token: uma.token, body: { name: 'a.txt', type: 'text/plain', data: 'aGk=' } })));
+  const adminFile = await call('POST', `/tasks/${work._id}/attachments`, { token: adminToken, body: { name: 'a.txt', type: 'text/plain', data: 'aGk=' } });
   await check('an admin can do both', (await call('POST', `/tasks/${work._id}/comments`, { token: adminToken, body: { text: 'Noted' } })).status === 201 &&
-    (await call('POST', `/tasks/${work._id}/attachments`, { token: adminToken, body: { name: 'a.txt', type: 'text/plain', data: 'aGk=' } })).status === 201);
+    adminFile.status === 201);
+  const leaderFile = await call('POST', `/tasks/${work._id}/attachments`, { token: ken.token, body: { name: 'a.txt', type: 'text/plain', data: 'aGk=' } });
+  await check('the leader is told the team is frozen when adding a file', isFrozen(leaderFile), JSON.stringify(leaderFile.data));
+  const leaderRemove = await call('DELETE', `/tasks/${work._id}/attachments/${adminFile.data.data._id}`, { token: ken.token });
+  await check('or removing one', isFrozen(leaderRemove), JSON.stringify(leaderRemove.data));
+  const leaderUncomment = await call('DELETE', `/tasks/${work._id}/comments/${earlier._id}`, { token: ken.token });
+  await check("or deleting a member's comment", isFrozen(leaderUncomment), JSON.stringify(leaderUncomment.data));
 
   const edit = await call('PUT', `/tasks/${work._id}`, { token: ken.token, body: { title: 'Thawed?' } });
   await check('the leader cannot edit, and is told why', edit.status === 403 && /frozen/.test(edit.data.message), JSON.stringify(edit.data));

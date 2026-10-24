@@ -1,12 +1,12 @@
 // Background jobs for the task module, registered with utils/scheduler.js
 // (see jobs/index.js). Each job's run(now) must be safe to repeat.
-import Task, { OPEN_TASK_STATUSES, dayStart, dueDayOf } from '../models/Task.js';
+import { activeTeamLeaders, idOf, notifyAssigned, short, taskLink } from '../controllers/taskController.js';
+import Task, { OPEN_TASK_STATUSES, dayStart, dueDayOf, periodsBetween, shiftDate } from '../models/Task.js';
 import Team from '../models/Team.js';
 import User from '../models/User.js';
 import { toDayKey } from '../utils/dates.js';
 import { notify } from '../utils/notify.js';
 import { registerJob } from '../utils/scheduler.js';
-import { activeTeamLeaders, idOf, notifyAssigned, shiftDate, short, taskLink } from '../utils/tasks.js';
 import { teamUserIds } from '../utils/teams.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -79,10 +79,26 @@ export const sendTaskReminders = async (now) => {
   return result;
 };
 
+// Gives a claimed series its schedule back after the next task couldn't be
+// saved, so the next run tries again (unless the task stopped repeating, or
+// got a new schedule, meanwhile)
+const releaseClaim = async (taskId, nextOccurrenceAt) => {
+  try {
+    await Task.updateOne(
+      { _id: taskId, 'recurrence.frequency': { $exists: true }, 'recurrence.nextOccurrenceAt': null },
+      { $set: { 'recurrence.nextOccurrenceAt': nextOccurrenceAt } }
+    );
+  } catch (error) {
+    console.error(`Repeating task ${taskId} could not get its schedule back:`, error.message);
+  }
+};
+
 // 'task-recurrence': creates the next task of each repeating series whose
 // time has come. The task that schedules it hands the schedule on to the new
 // task. Occurrences missed (while the server was down, or the team frozen)
-// are skipped: the new task is the latest one due by now.
+// are skipped: the new task is the latest one due by now. Periods count from
+// the series' anchorDate, so a monthly series started on the 31st comes back
+// to the 31st after February.
 export const createNextOccurrences = async (now) => {
   const result = { created: 0, waiting: 0, ended: 0, failed: 0 };
   const due = await Task.find({ 'recurrence.nextOccurrenceAt': { $ne: null, $lte: now } }).select('-history');
@@ -107,12 +123,14 @@ export const createNextOccurrences = async (now) => {
     ).select('_id');
     if (!claimed) continue;
 
-    // The latest occurrence due by now, and not after the series' end
-    const inRange = (date) => date <= now && (!recurrence.until || date <= recurrence.until);
-    let count = 0;
-    while (inRange(shiftDate(base, recurrence, count + 1)) && count < 10000) count += 1;
-    const start = shiftDate(base, recurrence, count);
-    const following = shiftDate(base, recurrence, count + 1);
+    // The latest occurrence due by now, and not after the series' end,
+    // counted from the anchor (a series scheduled before anchors were kept
+    // counts from this occurrence)
+    const anchor = recurrence.anchorDate || base;
+    const last = recurrence.until && recurrence.until < now ? recurrence.until : now;
+    const count = Math.max(periodsBetween(anchor, base, recurrence), periodsBetween(anchor, last, recurrence), 0);
+    const start = shiftDate(anchor, recurrence, count);
+    const following = shiftDate(anchor, recurrence, count + 1);
     if (recurrence.until && start > recurrence.until) {
       result.ended += 1;
       continue;
@@ -145,6 +163,7 @@ export const createNextOccurrences = async (now) => {
         frequency: recurrence.frequency,
         interval: recurrence.interval,
         until: recurrence.until,
+        anchorDate: anchor,
         seriesId: recurrence.seriesId || task._id,
         nextOccurrenceAt: recurrence.until && following > recurrence.until ? null : following,
       },
@@ -155,6 +174,15 @@ export const createNextOccurrences = async (now) => {
     } catch (error) {
       console.error(`Repeating task ${task._id} could not create its next occurrence:`, error.message);
       result.failed += 1;
+      if (error.name === 'ValidationError') {
+        // Copied data a new task can't have: trying again would fail the same
+        // way, so the series stops and its history says why
+        await Task.addHistory(task._id, null, 'recurrence_stopped', {
+          reason: short(`The next task could not be created: ${error.message}`, 500),
+        });
+      } else {
+        await releaseClaim(task._id, base);
+      }
       continue;
     }
 

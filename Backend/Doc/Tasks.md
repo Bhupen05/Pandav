@@ -119,7 +119,8 @@ itself, and never once it is `completed` or `cancelled`. A task waiting for revi
    goes through review again.
 7. **Admin status change.** Admins can also set `status` with `PUT /tasks/:id`, with the same
    effects: `completed` approves (recording the admin in `approvedBy`/`approvedAt`), `cancelled`
-   cancels, and `pending` or `in-progress` reopen as above (on an open task too: `pending` starts
+   cancels an open task (a completed one has to be reopened first, as with `POST /cancel`: `409`),
+   and `pending` or `in-progress` reopen as above (on an open task too: `pending` starts
    everyone over and clears `completedDate`). `completion-requested` can't be set: it comes from
    the assignees. Team leaders' `status` in an edit is ignored.
 
@@ -149,8 +150,9 @@ another leader, and a frozen team's reviews go to admins.
 **Frozen teams.** Nothing changes on a frozen team's tasks except that assignees can still start
 work, request completion and tick checklist items. Leaders get `403` with the frozen message
 (`This team is frozen. An admin has to unfreeze it before anything can change.`) when they try to
-edit, cancel, reopen or review; comments and files answer `400` with the same message. Admins can
-do everything. See [Teams.md](Teams.md#frozen-teams).
+edit, cancel, reopen or review; comments and files answer `400` with the same message (the freeze
+is checked first, so the team's leaders get it too, not a "not allowed"). Admins can do
+everything. See [Teams.md](Teams.md#frozen-teams).
 
 ## Activity history
 
@@ -164,17 +166,17 @@ people named in `details.users` come back as `{ _id, name }` (`Deleted user` for
 | `edited` | A manager changed details | `{ fields: [...] }`: `title`, `description`, `priority`, `startDate`, `dueDate`, `estimatedDays`, `tags`, `notes`, `recurrence` |
 | `assigned` / `unassigned` | People were added or taken off (also when someone leaves the team) | `{ users }` |
 | `checklist_updated` | A manager set the items, or someone ticked one | `{ items }` (how many), or `{ item, done }` |
-| `status_changed` | An admin set the status with `PUT` | `{ from, to }` |
+| `status_changed` | An admin set the status with `PUT`. Followed by the `approved`, `cancelled` or `reopened` entry it amounts to (none for a change between open statuses) | `{ from, to }` |
 | `started` | An assignee started their part | |
 | `part_done` | An assignee marked their part done | `{ note }` if they left one |
-| `completion_requested` | Everyone has finished: the task went for review | |
+| `completion_requested` | Everyone has finished: the task went for review. Also when a manager's edit took off the people still working | |
 | `approved` | A reviewer approved it | |
 | `rejected` | A reviewer sent it back | `{ reason }` |
 | `cancelled` | A manager cancelled it | `{ reason }` if given |
 | `reopened` | A manager reopened it | `{ status, from }` |
 | `comment_added` | Someone commented | `{ commentId }` |
 | `attachment_added` / `attachment_removed` | A file was added or removed | `{ name }` |
-| `recurrence_stopped` | The repeat job could not create the next task: nobody on it can take it | `{ reason }` |
+| `recurrence_stopped` | The repeat job could not create the next task: nobody on it can take it, or the copied task isn't valid | `{ reason }` |
 
 ## Notifications
 
@@ -184,7 +186,7 @@ their own action. `link` is where the app opens.
 | Type | Sent to | When | Link | Emailed |
 | --- | --- | --- | --- | --- |
 | `task_assigned` | The new assignees | A task is created for them, they are added to one, or a repeating task's next occurrence is created | `/tasks?task=<id>` | Yes |
-| `task_completion_requested` | The task's team's leaders who aren't on it (while the team is active); otherwise the admin who created it; otherwise every admin | The task becomes reviewable (the first request since it was last sent back), and again once everyone has finished. Also when taking someone off leaves only finished people | `/approvals` | No |
+| `task_completion_requested` | The task's team's leaders who aren't on it (while the team is active); otherwise the admin who created it; otherwise every admin | The task becomes reviewable (the first request since it was last sent back), and again once everyone has finished, also when a manager takes off the people still working so that everyone left has finished | `/approvals` | No |
 | `task_approved` | The assignees | Approved, or an admin set it `completed` | `/tasks?task=<id>` | No |
 | `task_rejected` | The assignees | Sent back, with the reason | `/tasks?task=<id>` | Yes |
 | `task_cancelled` | The assignees | Cancelled, with the reason if given | `/tasks?task=<id>` | No |
@@ -350,7 +352,9 @@ is set to that team. Tasks created by admins here have `team: null` (use
   `<name>'s account is deactivated, so they can't be given tasks`,
   `A task can have at most 50 assignees`.
 - `403` `You can only assign tasks to members of your team`: a team leader listed someone outside
-  their team, or leads no team.
+  their team, or leads no team. This is checked before the accounts, so a leader gets the same
+  answer for anyone outside their team, whether the account exists, was deleted or is deactivated;
+  the account messages above are only for people in their team.
 - `400` `This team is frozen. An admin has to unfreeze it before anything can change.`
 - `400` checklist and repeat problems (see [Checklists](#checklists) and
   [Repeating tasks](#repeating-tasks)).
@@ -444,11 +448,14 @@ is set to that team. Tasks created by admins here have `team: null` (use
   `in-progress`. Other body fields are ignored. An admin who is on the task starts their part the
   same way.
 
-**Assignees.** A new `assignedTo` follows the same checks as on create. A team leader can only
-give the task to people in the task's team (for a task with no team, an active team they lead),
-and not to themselves. Who is on a completed or cancelled task can't change until it is reopened
-(an admin's edit that also sets `status` to `pending` or `in-progress` does both). Sending the same
-people again is not a change. New assignees get a `task_assigned` notification.
+**Assignees.** A new `assignedTo` follows the same checks as on create, but only the people being
+added are checked against their accounts: someone already on the task (deactivated since, for
+example) never blocks an edit that keeps them, so the edit form can always send the list back. A
+team leader can only give the task to people in the task's team (for a task with no team, an
+active team they lead), and not to themselves; as on create, that is checked before the accounts.
+Who is on a completed or cancelled task can't change until it is reopened (an admin's edit that
+also sets `status` to `pending` or `in-progress` does both). Sending the same people again is not
+a change. New assignees get a `task_assigned` notification.
 
 **Other changes.** A new `dueDate` clears the reminders, so the new date gets its own. An edit that
 changes anything sets `editedBy` to the caller and `editedAt` to now and adds history entries.
@@ -459,6 +466,8 @@ Returns `200` with the updated task (same shape as [Get a task](#get-a-task)) an
 - `404` `Task not found`
 - `400` the assignee messages from [Create a task](#create-a-task).
 - `400` `Reopen this task before changing who it's assigned to`
+- `409` `A completed task can't be cancelled. Reopen it first.`: an admin's `status: "cancelled"`
+  on a completed task.
 - `400` `A task goes for review when its assignees mark their parts done, so that status can't be set directly`
 - `400` `Invalid status`
 - `403` `You can only assign tasks to members of your team`
@@ -748,7 +757,8 @@ Errors: `404` `Comment not found`; `403` `Only its author can edit a comment`; `
 
 **Who may call:** its author, the task's managers and admins; not on a frozen team's task except
 admins. Returns `200` with `message: "Comment deleted"` and the comment as it now shows. The task's
-`commentCount` goes down.
+`commentCount` goes down, once: of two deletes of the same comment at the same time, one succeeds
+and the other gets `409`.
 
 Errors: `404` `Comment not found`; `403` `Only its author or the task's managers can delete a
 comment`; `409` `This comment was already deleted`; `400` the frozen message.
@@ -767,7 +777,9 @@ the app. Each is `{ _id, task, uploadedBy: { _id, name }, name, type, size, crea
 - Images and PDFs must start the way their type does.
 - Never SVG or HTML, and no file whose name ends in a web-page, script or program extension
   (`.html`, `.svg`, `.xml`, `.js`, `.exe`, `.bat`, `.ps1`, `.jar` and the like), whatever its type.
-- The name loses any folder part and control characters; at most 200 characters.
+- The name loses any folder part, control characters, and dots and spaces at its end (Windows
+  drops those when it saves a download, so `page.html.` would land as `page.html`); at most 200
+  characters. The extension is checked after that.
 
 #### Add a file
 
@@ -813,8 +825,10 @@ are JSON as usual: `404` `File not found`, `403` `Not authorized to view this ta
 `DELETE /api/v2/tasks/:id/attachments/:attachmentId`
 
 **Who may call:** whoever added it, the task's managers and admins; not on a frozen team's task
-except admins. Returns `200` with `message: "File removed"`. Errors: `404` `File not found`;
-`403` `Only whoever added a file or the task's managers can remove it`; `400` the frozen message.
+except admins. Returns `200` with `message: "File removed"`. The task's `attachmentCount` goes
+down once: of two deletes of the same file at the same time, one succeeds and the other gets `404`.
+Errors: `404` `File not found`; `403` `Only whoever added a file or the task's managers can remove
+it`; `400` the frozen message.
 
 ### Leaderboard
 
@@ -865,20 +879,26 @@ A manager makes a task repeat with `recurrence` on [create](#create-a-task) or
 | `interval` | No | Every 1 to 12 days, weeks or months; default `1` |
 | `until` | No | Last day a new task may start (a date); not before the start date |
 
-The task's `recurrence` then also has `seriesId` (the first task's id, shared by the whole series)
-and `nextOccurrenceAt`, when the next task is created. Only the newest task of a series has
-`nextOccurrenceAt` set. Setting `recurrence` on a task makes it the newest: its next occurrence is
+The task's `recurrence` then also has `seriesId` (the first task's id, shared by the whole
+series), `anchorDate` (the start the periods are counted from: the start date of the task that was
+given these settings) and `nextOccurrenceAt`, when the next task is created. Only the newest task
+of a series has `nextOccurrenceAt` set. Setting `recurrence` on a task makes it the newest: its next occurrence is
 one period after its start, and never on or before a start the series already has. Moving the
 newest task's start date moves the next occurrence too. `recurrence: null` stops the whole series.
 
 The `task-recurrence` job (every 30 minutes) creates each due occurrence: the same title,
 description, priority, tags, notes, estimate, team and creator; the checklist items, not done; the
 start and due dates moved on by the period; and the assignees who are still active and, for a team
-task, still in the team. The new task takes over the schedule. A month keeps the day of the month,
-or the shorter month's last day. Occurrences missed (while the server was down, or the team was
-frozen) are skipped: the job creates the latest one due by then, never one after `until`. A frozen
+task, still in the team. The new task takes over the schedule. Periods count from `anchorDate`,
+so a month keeps the anchor's day of the month, or the shorter month's last day: a series that
+starts on 31 January runs on 28 February, 31 March, 30 April. Occurrences missed (while the server
+was down, or the team was frozen) are skipped: the job creates the latest one due by then, never
+one after `until`. A frozen
 team's series waits until it is unfrozen. If nobody on the task can take the next one, the series
-stops (`recurrence_stopped` in the history). The new assignees get `task_assigned`.
+stops (`recurrence_stopped` in the history). If the next task can't be saved, the job counts it as
+`failed`: when the copied task isn't valid (old data the rules no longer allow), the series stops
+with `recurrence_stopped` and the reason; after any other error the schedule is handed back, so the
+next run tries again. The new assignees get `task_assigned`.
 
 Errors: `400` `A task repeats daily, weekly or monthly`,
 `A task repeats every 1 to 12 days, weeks or months`, `Invalid repeat end date`,
@@ -894,7 +914,7 @@ atomic update first, so nothing is sent or created twice.
 | Job | Every | Does |
 | --- | --- | --- |
 | `task-reminders` | 15 minutes | `task_due_soon` for open tasks due today or tomorrow; `task_overdue` for open tasks whose due day has passed. Once per due date each. A task already more than 7 days overdue when the job first sees it (an old task, after an upgrade) is marked without a reminder. Returns `{ dueSoon, overdue, markedWithoutReminder }` |
-| `task-recurrence` | 30 minutes | Creates repeating tasks' next occurrences (see [Repeating tasks](#repeating-tasks)). Returns `{ created, waiting, ended, failed }` |
+| `task-recurrence` | 30 minutes | Creates repeating tasks' next occurrences (see [Repeating tasks](#repeating-tasks)). Returns `{ created, waiting, ended, failed }`; `failed` counts next tasks that couldn't be saved |
 
 ## Team task endpoints
 
@@ -930,9 +950,10 @@ The body of [Create a task](#create-a-task) without `status` (the task starts `p
 assignee must be a leader or member of this team; the task's `team` is this team. Returns `201`
 with the task in the usual shape (`team` as an id).
 
-Errors: `400` `Assign the task to at least one team member`; the assignee messages from
-[Create a task](#create-a-task); `400` `All assignees must be members of the team`; `400` the
-frozen message; schema messages.
+Errors: `400` `Assign the task to at least one team member`; `400` `All assignees must be
+members of the team`, checked before the accounts (so it is the answer for anyone outside the team,
+whatever their account's state); the assignee messages from [Create a task](#create-a-task) for
+people in the team; `400` the frozen message; schema messages.
 
 ### Team tasks awaiting approval
 

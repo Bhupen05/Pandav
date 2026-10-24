@@ -15,14 +15,15 @@ import {
   getPendingApprovalTasks,
   getLeaderboard,
   toggleChecklistItem,
-} from '../controllers/taskController.js';
-import { addComment, deleteComment, editComment, getComments } from '../controllers/taskCommentController.js';
-import {
-  addAttachment,
-  deleteAttachment,
-  downloadAttachment,
+  getComments,
+  addComment,
+  editComment,
+  deleteComment,
   listAttachments,
-} from '../controllers/taskAttachmentController.js';
+  addAttachment,
+  downloadAttachment,
+  deleteAttachment,
+} from '../controllers/taskController.js';
 import { protect, adminOrLeader } from '../middleware/auth.js';
 
 const router = express.Router();

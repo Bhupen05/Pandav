@@ -50,6 +50,11 @@ const recurrenceSchema = new mongoose.Schema({
     max: [12, 'A task repeats every 1 to 12 days, weeks or months'],
   },
   until: { type: Date, default: null },
+  // The start the periods are counted from: the start date of the task that
+  // was given these settings. Counting from it (not from the last
+  // occurrence) keeps a monthly series on its day of the month after a
+  // shorter month: Jan 31, Feb 28, Mar 31.
+  anchorDate: { type: Date, default: null },
   nextOccurrenceAt: { type: Date, default: null },
   seriesId: { type: mongoose.Schema.Types.ObjectId, default: null },
 }, { _id: false });
@@ -252,6 +257,45 @@ export const dueDayOf = (date) => (date ? new Date(date).toISOString().slice(0, 
 // Midnight UTC of a 'YYYY-MM-DD' day: compared with dueDate, `dueDate <
 // dayStart(today)` means "due before today"
 export const dayStart = (day) => new Date(`${day}T00:00:00Z`);
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// `date` moved on by `count` periods of a recurrence. A month keeps the day
+// of the month, or the month's last day when it is shorter.
+export const shiftDate = (date, { frequency, interval = 1 }, count = 1) => {
+  const from = new Date(date);
+  const steps = interval * count;
+  if (frequency === 'daily') return new Date(from.getTime() + steps * DAY_MS);
+  if (frequency === 'weekly') return new Date(from.getTime() + steps * 7 * DAY_MS);
+
+  const target = new Date(from);
+  target.setUTCDate(1);
+  target.setUTCMonth(target.getUTCMonth() + steps);
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(from.getUTCDate(), lastDay));
+  return target;
+};
+
+// How many whole periods from `anchor` fit by `date`: the largest count
+// whose shiftDate(anchor, recurrence, count) is not after `date`, or -1 when
+// `date` is before `anchor`
+export const periodsBetween = (anchor, date, recurrence) => {
+  const from = new Date(anchor);
+  const to = new Date(date);
+  if (to < from) return -1;
+  const interval = recurrence.interval || 1;
+  if (recurrence.frequency === 'daily' || recurrence.frequency === 'weekly') {
+    const period = interval * (recurrence.frequency === 'weekly' ? 7 : 1) * DAY_MS;
+    return Math.floor((to - from) / period);
+  }
+  const months = (to.getUTCFullYear() - from.getUTCFullYear()) * 12 + (to.getUTCMonth() - from.getUTCMonth());
+  const count = Math.floor(months / interval);
+  return shiftDate(from, recurrence, count) > to ? count - 1 : count;
+};
+
+// The first start of the series after `after`, counting periods from `anchor`
+export const nextStartAfter = (anchor, recurrence, after) =>
+  shiftDate(anchor, recurrence, Math.max(periodsBetween(anchor, after, recurrence) + 1, 1));
 
 // This assignee's progress entry, created if missing: with `initial`, or as
 // initialProgress (for tasks from before progress was tracked)
