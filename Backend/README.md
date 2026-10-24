@@ -57,8 +57,12 @@ All of them are described in [`.env.example`](.env.example).
 | `ORIGIN_SECRET` | Production | Shared with the frontend's `/api` proxy; requests that skip the proxy are refused and rate limits count each visitor |
 | `API_V2_PREFIX` | No | Where the API is served (default `/api/v2`); the frontend proxy and tests assume the default |
 | `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `SEED_USER_EMAIL`, `SEED_USER_PASSWORD` | No | Accounts `create-users.js` creates (random passwords if unset) |
-| `GITHUB_*`, `LINKEDIN_*` | For the Social Hub's linked accounts | OAuth client ids, secrets, redirect URIs and scopes |
+| `GITHUB_*`, `LINKEDIN_*` | For the Social Hub's linked accounts | OAuth client ids, secrets, redirect URIs and scopes (LinkedIn's also refresh expired tokens) |
 | `GITHUB_DEFAULT_REPO` | No | Repository (`owner/repo`) to publish to when a request names none |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | For email | Password reset links, address verification, security notices, emailed notifications and contact replies. Without `SMTP_HOST` nothing is emailed and those features say so |
+| `APP_URL` | No | The frontend's address for links in emails (default: the first `CLIENT_URL`) |
+| `EMAIL_VERIFICATION_REQUIRED` | No | `true` (with email set up) refuses sign-in until the address is confirmed. Run `npm run migrate` first |
+| `DISABLE_SCHEDULER` | No | `true` turns off the background jobs (publishing queued posts, task reminders and repeats, attendance upkeep); admins can still run them by hand |
 
 ## Layout
 
@@ -69,8 +73,10 @@ src/
   controllers/     Request handlers, one per module
   models/          Mongoose schemas (Social Hub models end in V2)
   middleware/      Sessions and roles, rate limits, input sanitising, V2 validation
-  utils/           Sessions, HTTP helpers, team rules, dates, token encryption, audit log
-scripts/           migrate-data.js
+  utils/           Sessions, HTTP helpers, team rules, dates, token encryption, audit log,
+                   notifications, email, background job scheduler, CSV, blocks, two-step sign-in
+  jobs/            Background jobs per module (registered with utils/scheduler.js)
+scripts/           migrate-data.js, seed.js
 test/              API test suites, shared helpers, the browser tests' backend (e2e-server.js)
 Doc/               API reference
 ```

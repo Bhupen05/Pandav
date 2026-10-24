@@ -169,6 +169,10 @@ npm run preview
 | `CLIENT_URL` | Deployed frontend origin(s), comma-separated (required in production). Browsers on other origins can't call the API or post with the session cookie | `https://your-app.vercel.app` |
 | `ORIGIN_SECRET` | Shared with Vercel (same name and value there). When set, the API only answers requests that come through the frontend's `/api` proxy, and rate limits count each visitor's real IP | output of `openssl rand -hex 32` |
 | `APP_TIMEZONE` | Timezone that decides an attendance record's day | `Asia/Kolkata` |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Email for password resets, address verification, notifications and contact replies. Without `SMTP_HOST` nothing is emailed ("Forgot password" then tells people to ask an admin) | `smtp.example.com` |
+| `APP_URL` | The frontend's address for links in emails (defaults to the first `CLIENT_URL`) | `https://your-app.vercel.app` |
+| `EMAIL_VERIFICATION_REQUIRED` | `true` refuses sign-in until the address is confirmed (needs email; run the migration first) | `false` |
+| `DISABLE_SCHEDULER` | `true` turns off the background jobs (queued posts, task reminders and repeats, attendance upkeep) | `false` |
 
 ### Frontend (`Frontend/.env`, or the host's environment settings)
 | Variable | Description | Example |
@@ -304,7 +308,8 @@ npm run migrate
 ```
 
 It fills in new fields on existing records (attendance `day` and `approvalStatus`, per-assignee
-task progress), replaces outdated indexes, encrypts LinkedIn/GitHub tokens linked before they
+task progress; for accounts, a confirmed address, the session version and two-step sign-in being
+off), replaces outdated indexes, encrypts LinkedIn/GitHub tokens linked before they
 were encrypted at rest (needs the production `JWT_SECRET`), and lists anything that needs a
 decision:
 
