@@ -167,10 +167,10 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [userId, loading, markTeamMessagesAsRead]);
 
   const sendMessage = useCallback(async (receiverId: string, message: string) => {
-    const { data } = await api.post<Message>('/chat/send', { receiverId, message });
+    const { data } = await api.post<{ data: Message }>('/chat/send', { receiverId, message });
     // The receiver gets it over the socket; add the sender's own copy here
     if (receiverId === openChatUserIdRef.current) {
-      setMessages((prev) => mergeMessages(prev, data));
+      setMessages((prev) => mergeMessages(prev, data.data));
     }
   }, []);
 

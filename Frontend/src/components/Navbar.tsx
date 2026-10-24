@@ -16,7 +16,7 @@ function Navbar() {
   const { notify } = useFeedback()
 
   const isPublicRoute = useMemo(() => {
-    const publicPaths = ['/', '/about', '/service', '/pricing', '/login', '/register', '/contact']
+    const publicPaths = ['/', '/about', '/service', '/pricing', '/login', '/register', '/contact', '/forgot-password', '/reset-password', '/verify-email']
     return publicPaths.includes(location.pathname)
   }, [location.pathname])
 
