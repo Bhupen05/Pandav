@@ -9,9 +9,10 @@ Reference for the backend's HTTP API and its real-time events. Each module has i
 | [Attendance.md](Attendance.md) | Check-in/out, one record per person per day, approval |
 | [Teams.md](Teams.md) | Teams, invites, membership rules, team tasks and attendance |
 | [Chat.md](Chat.md) | Direct and team chat, read receipts, Socket.io events |
-| [SocialHub.md](SocialHub.md) | Feed, posts, publishing to LinkedIn/GitHub, connections, personal tasks, contact form |
+| [SocialHub.md](SocialHub.md) | Feed, posts, publishing to LinkedIn/GitHub, connections, personal tasks |
+| [Contact.md](Contact.md) | The public contact form (field limits, honeypot) and the admin inbox: search, statuses, replies by email |
 | [Notifications.md](Notifications.md) | Notifications: stored, live over the socket, optionally emailed |
-| [Admin.md](Admin.md) | Admin-only endpoints: background jobs |
+| [Admin.md](Admin.md) | Admin-only endpoints: background jobs, the audit log, dashboard figures, reports per team, CSV exports |
 
 This page covers what every endpoint has in common.
 
@@ -113,6 +114,7 @@ Most responses are JSON with a `success` flag. Errors look like this:
 | `413` | Request body over 1 MB (3 MB for file uploads, `POST .../attachments`) |
 | `429` | Rate limited; `Retry-After` says when to try again |
 | `500` | Server error. The message is `Server error` in production; in development it is the error's own message |
+| `502` | Another service refused what the request needed, for example the mail server refusing a contact reply (see [Contact.md](Contact.md)) |
 
 Responses are sent with `Cache-Control: no-store`.
 
@@ -141,6 +143,10 @@ Chat conversations, team chats and the Social Hub feed page differently, 50 at a
 page is the latest 50, `?before=<date of the oldest item shown>` loads the 50 before that, and
 `hasMore` says whether there are older ones. Within a page, chat messages are oldest first and
 feed posts newest first.
+
+Notifications and the admins' audit log page by id instead: newest first, `?before=<_id of the
+oldest item shown>` loads the page before it, and `hasMore` says whether there is one. See
+[Notifications.md](Notifications.md) and [Admin.md](Admin.md#audit-log).
 
 ## Rate limits
 
