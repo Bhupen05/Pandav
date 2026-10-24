@@ -30,7 +30,8 @@ const BLOCKED = "You can't message this person";
 // Returns null when the message may be sent, or { status, message } saying why not.
 export const directMessageProblem = async (sender, recipientId) => {
   if (!mongoose.isObjectIdOrHexString(recipientId)) return { status: 400, message: 'Invalid receiver' };
-  if (String(recipientId) === String(sender._id)) return { status: 400, message: 'You cannot message yourself' };
+  // Compared in lower case: an id may come spelt in capitals
+  if (String(recipientId).toLowerCase() === String(sender._id)) return { status: 400, message: 'You cannot message yourself' };
   if (!(await User.exists({ _id: recipientId, isActive: true }))) return { status: 404, message: 'Recipient not found' };
 
   if (sender.role === 'admin') return null;
@@ -65,4 +66,19 @@ export const messageableUserIds = async (user) => {
   ids.delete(String(user._id));
   blocked.forEach((id) => ids.delete(id));
   return [...ids];
+};
+
+// Code that changes whom someone may message, other than through the socket
+// (a block, an unblock), calls contactsChanged with the people concerned. The
+// socket handler in server.js listens: it looks up again whom each of their
+// open sockets is shown online, and whom it may send typing indicators to.
+const contactsListeners = new Set();
+
+export const onContactsChanged = (listener) => {
+  contactsListeners.add(listener);
+};
+
+export const contactsChanged = (userIds) => {
+  const ids = [...new Set([].concat(userIds || []).map((id) => String(id).toLowerCase()))];
+  contactsListeners.forEach((listener) => listener(ids));
 };
