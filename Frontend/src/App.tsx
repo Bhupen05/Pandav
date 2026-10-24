@@ -29,6 +29,7 @@ const TeamDashboard = lazy(() => import('./pages/TeamDashboard'))
 const TeamManagement = lazy(() => import('./pages/TeamManagement'))
 const TeamMemberDashboard = lazy(() => import('./pages/TeamMemberDashboard'))
 const SocialHub = lazy(() => import('./pages/SocialHub'))
+const OAuthCallback = lazy(() => import('./pages/OAuthCallback'))
 const DashboardRedirect = lazy(() => import('./pages/DashboardRedirect'))
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'))
 const ResetPassword = lazy(() => import('./pages/ResetPassword'))
@@ -85,6 +86,8 @@ function AppRoutes() {
               <Route path="/todo" element={<SocialHub />} />
               <Route path="/network" element={<SocialHub />} />
               <Route path="/integrations" element={<SocialHub />} />
+              {/* LinkedIn and GitHub send the browser back here after their consent page */}
+              <Route path="/integrations/:provider/callback" element={<OAuthCallback />} />
               <Route path="/publish-jobs" element={<SocialHub />} />
               <Route path="/notifications" element={<Notifications />} />
               {/* Team leaders and admins: tasks, attendance, leave and posts waiting for review */}

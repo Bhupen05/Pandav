@@ -1,4 +1,4 @@
-import api from './axios'
+import api, { apiBaseUrl } from './axios'
 
 type TargetPayload = {
   pandav?: boolean
@@ -15,6 +15,11 @@ type PostPayload = {
   tags?: string[]
   mediaUrls?: string[]
   targets?: TargetPayload
+  // Uploaded images (uploadImage), in the order they show
+  images?: Array<{ id: string; altText?: string }>
+  // Post it to LinkedIn without pressing publish: at publishAt (ISO), or now
+  autoPublish?: boolean
+  publishAt?: string | null
 }
 
 // Only the fields sent change; `title: null` removes the title
@@ -57,6 +62,14 @@ export const socialV2API = {
     (await api.post(`/social/posts/${postId}/comments`, { text })).data,
   deleteComment: async (postId: string, commentId: string) =>
     (await api.delete(`/social/posts/${postId}/comments/${commentId}`)).data,
+  // An image for a post that isn't created yet: PNG, JPEG or GIF, base64
+  uploadImage: async (payload: { type: string; data: string; altText?: string }) =>
+    (await api.post('/social/images', payload)).data,
+  deleteImage: async (imageId: string) => (await api.delete(`/social/images/${imageId}`)).data,
+  // Sends the post to LinkedIn at publishAt, or now when it is null; or stops that
+  schedulePost: async (postId: string, publishAt: string | null) =>
+    (await api.put(`/social/posts/${postId}/schedule`, { publishAt })).data,
+  unschedulePost: async (postId: string) => (await api.delete(`/social/posts/${postId}/schedule`)).data,
   publishPost: async (postId: string, payload: { targets?: TargetPayload; githubRepo?: string | null }) =>
     (await api.post(`/social/posts/${postId}/publish`, payload)).data,
   approvePost: async (postId: string, action: 'approved' | 'rejected') =>
@@ -130,3 +143,6 @@ export const socialV2API = {
   deleteTeamMessage: async (teamId: string, messageId: string) =>
     (await api.delete(`/chat/teams/${teamId}/messages/${messageId}`)).data,
 }
+
+// Where the browser loads a post's image from (with the session cookie)
+export const socialImageUrl = (imageId: string) => `${apiBaseUrl}/social/images/${imageId}`

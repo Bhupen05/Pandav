@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
   ArrowUpRight,
   CheckCheck,
@@ -17,6 +17,11 @@ import {
 } from 'lucide-react'
 import { socialV2API } from '../api/socialV2API'
 import ShareTaskDialog, { type ShareOffer } from '../components/ShareTaskDialog'
+import ConnectedAccountCard from '../components/social/ConnectedAccountCard'
+import { PostImages } from '../components/social/ImageGrid'
+import LinkedInStatus, { type LinkedInState } from '../components/social/LinkedInStatus'
+import PostComposer from '../components/social/PostComposer'
+import type { Integration, PostImage, PostViewer, QueuedJob } from '../components/social/types'
 import { useAuth } from '../context/useAuth'
 
 type Role = 'admin' | 'team_leader' | 'team_member' | 'user'
@@ -63,6 +68,11 @@ type SocialPost = {
     linkedin?: { status: PublishStatus; message?: string | null; externalId?: string | null }
     github?: { status: PublishStatus; message?: string | null; externalId?: string | null }
   }
+  images?: PostImage[]
+  autoPublish?: boolean
+  publishAt?: string | null
+  queuedJobs?: Partial<Record<'linkedin' | 'github', QueuedJob>>
+  viewer?: PostViewer
 }
 
 type PersonalTask = {
@@ -90,16 +100,6 @@ type ConnectionState = {
   connected: Connection[]
 }
 
-type Integration = {
-  _id: string
-  provider: 'linkedin' | 'github'
-  accountHandle: string
-  isConnected: boolean
-  scopes: string[]
-  connectedAt: string
-  metadata?: Record<string, unknown>
-}
-
 type PublishJob = {
   _id: string
   provider: 'linkedin' | 'github'
@@ -122,25 +122,10 @@ type PublishJob = {
   }
 }
 
-type ProviderPreview = {
-  profile?: Record<string, unknown> | null
-  posts?: unknown[]
-}
-
 const defaultConnections: ConnectionState = {
   pendingSent: [],
   pendingReceived: [],
   connected: [],
-}
-
-const initialComposer = {
-  title: '',
-  content: '',
-  visibility: 'public' as Visibility,
-  pandav: true,
-  linkedin: false,
-  github: false,
-  tags: '',
 }
 
 const initialTaskForm = {
@@ -149,11 +134,6 @@ const initialTaskForm = {
   priority: 'medium' as 'low' | 'medium' | 'high',
   dueDate: '',
   autoGenerateLinkedInPost: false,
-}
-
-const initialTokenForm = {
-  linkedin: '',
-  github: '',
 }
 
 const providerMeta = {
@@ -241,6 +221,7 @@ function SectionCard({
 
 export default function SocialHub() {
   const navigate = useNavigate()
+  const location = useLocation()
   const { isAuthenticated, user, isAdmin, isTeamLeader } = useAuth()
 
   const [isLoading, setIsLoading] = useState(true)
@@ -256,18 +237,11 @@ export default function SocialHub() {
   const [discoverResults, setDiscoverResults] = useState<UserLite[]>([])
   const [discoverLoading, setDiscoverLoading] = useState(false)
   const [integrations, setIntegrations] = useState<Integration[]>([])
-  const [providerPreview, setProviderPreview] = useState<Record<'linkedin' | 'github', ProviderPreview>>({
-    linkedin: {},
-    github: {},
-  })
   const [publishJobs, setPublishJobs] = useState<PublishJob[]>([])
   const [moderationPosts, setModerationPosts] = useState<SocialPost[]>([])
-  const [composer, setComposer] = useState(initialComposer)
   const [taskForm, setTaskForm] = useState(initialTaskForm)
-  const [tokenForm, setTokenForm] = useState(initialTokenForm)
   const [githubRepoByPost, setGithubRepoByPost] = useState<Record<string, string>>({})
   const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({})
-  const [submittingPost, setSubmittingPost] = useState(false)
   const [submittingTask, setSubmittingTask] = useState(false)
   const [busyMap, setBusyMap] = useState<Record<string, boolean>>({})
   // A completed task's share draft, waiting for the owner to confirm it
@@ -281,6 +255,15 @@ export default function SocialHub() {
     void loadDashboard()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, navigate])
+
+  // /integrations opens on the linked accounts
+  useEffect(() => {
+    if (!isLoading && location.pathname === '/integrations') {
+      document.getElementById('integrations')?.scrollIntoView({ block: 'start' })
+    }
+  }, [isLoading, location.pathname])
+
+  const linkedInIntegration = integrations.find((item) => item.provider === 'linkedin') ?? null
 
   const connectedUserIds = useMemo(() => {
     const ids = new Set<string>()
@@ -380,37 +363,18 @@ export default function SocialHub() {
     setBusyMap((current) => ({ ...current, [key]: value }))
   }
 
-  async function handleCreatePost(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    setSubmittingPost(true)
-    setNotice('')
-
+  async function refreshIntegrations() {
     try {
-      const response = await socialV2API.createPost({
-        title: composer.title.trim() || undefined,
-        content: composer.content.trim(),
-        visibility: composer.visibility,
-        tags: composer.tags
-          .split(',')
-          .map((tag) => tag.trim())
-          .filter(Boolean),
-        targets: {
-          pandav: composer.pandav,
-          linkedin: composer.linkedin,
-          github: composer.github,
-        },
-      })
-
-      if (response?.data) {
-        setFeed((current) => [response.data as SocialPost, ...current])
-      }
-      setComposer(initialComposer)
-      setNotice('Post published to your Pandav workspace and queued for any selected approvals.')
-    } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : 'Unable to create post')
-    } finally {
-      setSubmittingPost(false)
+      const response = await socialV2API.getIntegrations()
+      setIntegrations(Array.isArray(response?.data) ? response.data : [])
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Unable to load linked accounts')
     }
+  }
+
+  // A post's LinkedIn state after posting it, scheduling it or cancelling that
+  function handleLinkedInChange(postId: string, state: LinkedInState) {
+    setFeed((current) => current.map((post) => (post._id === postId ? ({ ...post, ...state } as SocialPost) : post)))
   }
 
   async function handleToggleLike(postId: string) {
@@ -540,43 +504,6 @@ export default function SocialHub() {
     }
   }
 
-  async function handleLinkProvider(provider: 'linkedin' | 'github') {
-    const accessToken = tokenForm[provider].trim()
-    if (!accessToken) return
-
-    withBusy(`link-${provider}`, true)
-    try {
-      await socialV2API.linkProvider(provider, { accessToken })
-      setTokenForm((current) => ({ ...current, [provider]: '' }))
-      await loadDashboard(true)
-    } catch (linkError) {
-      setError(linkError instanceof Error ? linkError.message : `Unable to link ${provider}`)
-    } finally {
-      withBusy(`link-${provider}`, false)
-    }
-  }
-
-  async function handleLoadProviderPreview(provider: 'linkedin' | 'github') {
-    withBusy(`preview-${provider}`, true)
-    try {
-      const [profileResponse, postsResponse] = await Promise.all([
-        socialV2API.getProviderProfile(provider),
-        socialV2API.getProviderPosts(provider),
-      ])
-      setProviderPreview((current) => ({
-        ...current,
-        [provider]: {
-          profile: profileResponse?.data ?? null,
-          posts: Array.isArray(postsResponse?.data) ? postsResponse.data : [],
-        },
-      }))
-    } catch (previewError) {
-      setError(previewError instanceof Error ? previewError.message : `Unable to fetch ${provider} preview`)
-    } finally {
-      withBusy(`preview-${provider}`, false)
-    }
-  }
-
   async function handleApprovePost(postId: string, action: 'approved' | 'rejected') {
     withBusy(`approval-${postId}-${action}`, true)
     try {
@@ -596,11 +523,9 @@ export default function SocialHub() {
   async function handleCreatePublishJob(post: SocialPost) {
     withBusy(`job-${post._id}`, true)
     try {
+      // LinkedIn has its own controls (LinkedInStatus); this queues GitHub
       await socialV2API.createPublishJobs(post._id, {
-        targets: {
-          linkedin: post.targets.linkedin,
-          github: post.targets.github,
-        },
+        targets: { github: true },
         githubRepo: githubRepoByPost[post._id]?.trim() || null,
       })
       await loadDashboard(true)
@@ -738,41 +663,12 @@ export default function SocialHub() {
 
         <div className="mt-6 grid gap-6 xl:grid-cols-[1.45fr_0.95fr]">
           <div className="space-y-6">
-            <SectionCard title="Compose update" description="Create a Pandav post and optionally target LinkedIn or GitHub using the V2 publishing flow.">
-              <form className="space-y-4" onSubmit={handleCreatePost}>
-                <div className="grid gap-4 md:grid-cols-2">
-                  <input value={composer.title} onChange={(event) => setComposer((current) => ({ ...current, title: event.target.value }))} placeholder="Optional title" className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-400 focus:bg-white" />
-                  <select value={composer.visibility} onChange={(event) => setComposer((current) => ({ ...current, visibility: event.target.value as Visibility }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-400 focus:bg-white">
-                    <option value="public">Public</option>
-                    <option value="team">Team only</option>
-                    <option value="connections">Connections</option>
-                  </select>
-                </div>
-
-                <textarea value={composer.content} onChange={(event) => setComposer((current) => ({ ...current, content: event.target.value }))} placeholder="Share progress, celebrate a milestone, or draft an external-ready update..." rows={5} className="w-full rounded-[24px] border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-400 focus:bg-white" />
-                <input value={composer.tags} onChange={(event) => setComposer((current) => ({ ...current, tags: event.target.value }))} placeholder="Tags, separated by commas" className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-400 focus:bg-white" />
-
-                <div className="flex flex-wrap gap-2">
-                  {([
-                    ['pandav', 'Pandav feed'],
-                    ['linkedin', 'LinkedIn'],
-                    ['github', 'GitHub'],
-                  ] as const).map(([key, label]) => (
-                    <label key={key} className={`inline-flex cursor-pointer items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition ${composer[key] ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-600'}`}>
-                      <input type="checkbox" checked={composer[key]} onChange={(event) => setComposer((current) => ({ ...current, [key]: event.target.checked }))} className="hidden" />
-                      {label}
-                    </label>
-                  ))}
-                </div>
-
-                <div className="flex justify-end">
-                  <button type="submit" disabled={submittingPost} className="inline-flex items-center gap-2 rounded-2xl bg-sky-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-70">
-                    {submittingPost ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                    Create post
-                  </button>
-                </div>
-              </form>
-            </SectionCard>
+            <PostComposer
+              needsApproval={user.role === 'user' || user.role === 'team_member'}
+              linkedin={linkedInIntegration}
+              // The page keeps its older type for the same post
+              onCreated={(post) => setFeed((current) => [post as unknown as SocialPost, ...current])}
+            />
 
             <SectionCard
               title="Social feed"
@@ -787,7 +683,8 @@ export default function SocialHub() {
                   const canApprove = post.approvalStatus === 'pending' && (isAdmin || isTeamLeader)
                   // Same rules as the server: the author, an admin, or the author's team leader
                   const leadsAuthor = isTeamLeader && !!user.teamId && post.author.teamId === user.teamId
-                  const canQueueJobs = (post.author._id === user._id || isAdmin || leadsAuthor) && (post.targets.linkedin || post.targets.github) && post.approvalStatus !== 'pending' && post.approvalStatus !== 'rejected' && post.moderationStatus !== 'hidden' && post.moderationStatus !== 'removed'
+                  const isPublisher = post.author._id === user._id || isAdmin || leadsAuthor
+                  const canQueueJobs = isPublisher && post.targets.github && post.publishResults?.github?.status !== 'published' && post.approvalStatus !== 'pending' && post.approvalStatus !== 'rejected' && post.moderationStatus !== 'hidden' && post.moderationStatus !== 'removed'
 
                   return (
                     <article key={post._id} className="rounded-[26px] border border-slate-200 bg-[linear-gradient(180deg,#ffffff_0%,#f8fbff_100%)] p-5">
@@ -805,6 +702,7 @@ export default function SocialHub() {
 
                       {post.title ? <h4 className="mt-4 text-lg font-extrabold text-slate-950">{post.title}</h4> : null}
                       <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-700">{post.content}</p>
+                      <PostImages images={post.images} />
 
                       <div className="mt-4 flex flex-wrap gap-2">
                         <span className="rounded-full bg-sky-50 px-3 py-1 text-xs font-semibold text-sky-700">{post.visibility}</span>
@@ -813,19 +711,13 @@ export default function SocialHub() {
                         {post.targets.github ? <span className="rounded-full bg-slate-200 px-3 py-1 text-xs font-semibold text-slate-700">GitHub</span> : null}
                       </div>
 
-                      {post.publishResults ? (
-                        <div className="mt-4 grid gap-2 md:grid-cols-3">
-                          {(['pandav', 'linkedin', 'github'] as const).map((target) => {
-                            const item = post.publishResults?.[target]
-                            if (!item) return null
-                            return (
-                              <div key={`${post._id}-${target}`} className="rounded-2xl bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                                <div className="font-bold uppercase tracking-wide text-slate-500">{target}</div>
-                                <div className="mt-1">{item.status}</div>
-                                {item.message ? <div className="mt-1 line-clamp-2">{item.message}</div> : null}
-                              </div>
-                            )
-                          })}
+                      <LinkedInStatus post={post} canPublish={post.viewer?.canPublish ?? isPublisher} onChange={handleLinkedInChange} />
+
+                      {post.targets.github && post.publishResults?.github ? (
+                        <div className="mt-4 rounded-2xl bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                          <div className="font-bold uppercase tracking-wide text-slate-500">GitHub</div>
+                          <div className="mt-1">{post.publishResults.github.status === 'published' ? 'Published' : post.publishResults.github.status === 'failed' ? 'Failed' : 'Not published yet'}</div>
+                          {post.publishResults.github.message ? <div className="mt-1 line-clamp-2">{post.publishResults.github.message}</div> : null}
                         </div>
                       ) : null}
 
@@ -841,9 +733,9 @@ export default function SocialHub() {
                           {needsGithubRepo ? (
                             <input value={githubRepoByPost[post._id] || ''} onChange={(event) => setGithubRepoByPost((current) => ({ ...current, [post._id]: event.target.value }))} placeholder="GitHub repo (owner/repo) if needed" className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none focus:border-sky-400 focus:bg-white" />
                           ) : (
-                            <div className="flex items-center rounded-2xl bg-slate-50 px-4 text-sm text-slate-500">Ready to create publish jobs for external targets.</div>
+                            <div className="flex items-center rounded-2xl bg-slate-50 px-4 text-sm text-slate-500">Ready to open it as a GitHub issue.</div>
                           )}
-                          <button onClick={() => void handleCreatePublishJob(post)} disabled={busyMap[`job-${post._id}`]} className="rounded-2xl bg-slate-900 px-4 py-3 text-sm font-bold text-white">Queue publish job</button>
+                          <button onClick={() => void handleCreatePublishJob(post)} disabled={busyMap[`job-${post._id}`]} className="rounded-2xl bg-slate-900 px-4 py-3 text-sm font-bold text-white">Publish to GitHub</button>
                         </div>
                       ) : null}
 
@@ -988,53 +880,20 @@ export default function SocialHub() {
                 </div>
               ) : null}
             </SectionCard>
-            <SectionCard title="Integrations" description="Link LinkedIn or GitHub tokens, then preview profile and recent provider content.">
-              <div className="space-y-4">
-                {(['linkedin', 'github'] as const).map((provider) => {
-                  const meta = providerMeta[provider]
-                  const Icon = meta.icon
-                  const linked = integrations.find((item) => item.provider === provider)
-                  const preview = providerPreview[provider]
-
-                  return (
-                    <div key={provider} className={`rounded-[24px] border ${meta.border} ${meta.soft} p-4`}>
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex items-center gap-3">
-                          <div className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br ${meta.accent} text-white shadow-lg`}>
-                            <Icon className="h-5 w-5" />
-                          </div>
-                          <div>
-                            <h3 className="font-bold text-slate-900">{meta.label}</h3>
-                            <p className="text-sm text-slate-600">{linked ? `Connected as ${linked.accountHandle}` : 'Not connected'}</p>
-                          </div>
-                        </div>
-                        {linked?.isConnected ? <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700">Connected</span> : null}
-                      </div>
-
-                      <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto_auto]">
-                        <input value={tokenForm[provider]} onChange={(event) => setTokenForm((current) => ({ ...current, [provider]: event.target.value }))} placeholder={`${meta.label} access token`} className="w-full rounded-2xl border border-white/70 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-sky-400" />
-                        <button onClick={() => void handleLinkProvider(provider)} disabled={busyMap[`link-${provider}`]} className="rounded-2xl bg-slate-900 px-4 py-3 text-sm font-bold text-white">Link</button>
-                        <button onClick={() => void handleLoadProviderPreview(provider)} disabled={!linked || busyMap[`preview-${provider}`]} className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-bold text-slate-700 disabled:cursor-not-allowed disabled:opacity-60">Preview</button>
-                      </div>
-
-                      {preview.profile ? (
-                        <div className="mt-4 rounded-2xl bg-white/80 p-4 text-sm text-slate-700">
-                          <div className="font-bold text-slate-900">Profile snapshot</div>
-                          <pre className="mt-2 overflow-auto whitespace-pre-wrap text-xs text-slate-600">{JSON.stringify(preview.profile, null, 2)}</pre>
-                        </div>
-                      ) : null}
-
-                      {preview.posts?.length ? (
-                        <div className="mt-4 rounded-2xl bg-white/80 p-4">
-                          <div className="font-bold text-slate-900">Recent provider items</div>
-                          <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap text-xs text-slate-600">{JSON.stringify(preview.posts.slice(0, 3), null, 2)}</pre>
-                        </div>
-                      ) : null}
-                    </div>
-                  )
-                })}
-              </div>
-            </SectionCard>
+            <div id="integrations" className="scroll-mt-24">
+              <SectionCard title="Linked accounts" description="Connect LinkedIn to post there from Pandav, and GitHub to open posts as issues.">
+                <div className="space-y-4">
+                  {(['linkedin', 'github'] as const).map((provider) => (
+                    <ConnectedAccountCard
+                      key={provider}
+                      provider={provider}
+                      integration={integrations.find((item) => item.provider === provider) ?? null}
+                      onChanged={() => void refreshIntegrations()}
+                    />
+                  ))}
+                </div>
+              </SectionCard>
+            </div>
 
             <SectionCard
               title="Publish jobs"

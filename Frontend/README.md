@@ -59,6 +59,7 @@ Routes are defined in `src/App.tsx`. Each page is loaded the first time it is op
 | `/chat` | `ChatPage` | Signed in |
 | `/profile` | `Profile` | Signed in |
 | `/social`, `/todo`, `/network`, `/integrations`, `/publish-jobs` | `SocialHub` | Signed in |
+| `/integrations/:provider/callback` | `OAuthCallback` (LinkedIn or GitHub sends the browser back here after "Connect") | Signed in |
 | `/admin` | `AdminDashboard` (also user management and password resets) | Admins (home for admins) |
 | `/admin/attendance` | `Attendance-Admin` | Admins |
 | `/admin/users`, `/admin/userview` | `Userview` | Admins |

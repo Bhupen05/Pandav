@@ -45,12 +45,33 @@ export type PostViewer = {
 
 export type Targets = { pandav: boolean; linkedin: boolean; github: boolean }
 
+// An uploaded image; its bytes are at socialImageUrl(_id)
+export type PostImage = {
+  _id: string
+  type: string
+  width: number
+  height: number
+  altText?: string
+  size?: number
+}
+
+// A publish job a post still has to run, by provider
+export type QueuedJob = {
+  _id: string
+  status: 'queued' | 'processing'
+  attempts: number
+  maxAttempts: number
+  nextRetryAt?: string | null
+  lastError?: string | null
+}
+
 export type SocialPost = {
   _id: string
   title?: string | null
   content: string
   tags?: string[]
   mediaUrls?: string[]
+  images?: PostImage[]
   visibility: Visibility
   moderationStatus: ModerationStatus
   moderationReason?: string | null
@@ -66,6 +87,10 @@ export type SocialPost = {
   sourceTask?: { _id: string; title: string; status: string; completedAt?: string | null } | null
   targets: Targets
   publishResults?: Partial<Record<'pandav' | Provider, PublishResult>>
+  // Goes to LinkedIn by itself: at publishAt, or as soon as it may
+  autoPublish?: boolean
+  publishAt?: string | null
+  queuedJobs?: Partial<Record<Provider, QueuedJob>>
   viewer?: PostViewer
 }
 
