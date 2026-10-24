@@ -156,8 +156,8 @@ test('team membership rules', async (t) => {
     (await call('DELETE', `/teams/${gamma._id}/members/${dan._id}`, { token: ann.token })).status === 404);
 
   // ---------- One team per user ----------
-  await check('admins cannot be invited',
-    (await call('POST', `/teams/${gamma._id}/invite`, { token: ann.token, body: { userId: admin._id } })).status === 400);
+  await check('admins cannot be invited (to a leader, an admin looks like nobody)',
+    (await call('POST', `/teams/${gamma._id}/invite`, { token: ann.token, body: { userId: admin._id } })).status === 404);
   await check('team leaders cannot be invited',
     (await call('POST', `/teams/${gamma._id}/invite`, { token: ann.token, body: { userId: ben._id } })).status === 400);
   await check('members of another team cannot be invited',
