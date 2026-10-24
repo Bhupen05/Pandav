@@ -7,9 +7,8 @@ import helmet from 'helmet';
 import dotenv from 'dotenv';
 import connectDB from './config/database.js';
 import { getUserFromToken } from './middleware/auth.js';
-import User from './models/User.js';
 import { sanitizeInput } from './middleware/sanitize.js';
-import { directMessageProblem } from './utils/messaging.js';
+import { handleChatSocket } from './utils/presence.js';
 import { SOCKET_AUDIENCE, originMatcher, rejectForeignOrigin, requireProxy } from './utils/session.js';
 import { setIo } from './utils/realtime.js';
 import { startScheduler } from './utils/scheduler.js';
@@ -79,50 +78,9 @@ io.use(async (socket, next) => {
   }
 });
 
-// userId -> number of open sockets, so closing one tab doesn't mark the user offline
-const onlineUsers = new Map();
-const broadcastOnlineUsers = () => {
-  io.emit('update_active_users', Array.from(onlineUsers.keys()));
-};
-
-io.on('connection', (socket) => {
-  const { userId } = socket.data;
-  socket.join(userId);
-  onlineUsers.set(userId, (onlineUsers.get(userId) || 0) + 1);
-  broadcastOnlineUsers();
-
-  // Typing indicators for direct chats. Who is typing comes from the verified
-  // token; the client only says to whom, and only someone this user may
-  // message (checked once per recipient) is told.
-  const recipients = new Set();
-  const relayTyping = async (recipientId, event, payload) => {
-    if (typeof recipientId !== 'string' || recipientId === userId) return;
-    if (!recipients.has(recipientId)) {
-      const sender = await User.findById(userId).select('role');
-      if (!sender || (await directMessageProblem(sender, recipientId))) return;
-      recipients.add(recipientId);
-    }
-    socket.to(recipientId).emit(event, payload);
-  };
-  // The payload is whatever the client sent (null, a number, ...): read it
-  // defensively, because an exception in a socket handler stops the server
-  socket.on('typing', (data) => {
-    relayTyping(data?.recipientId, 'user_typing', { userId, userName: socket.data.userName }).catch(() => {});
-  });
-  socket.on('stopped_typing', (data) => {
-    relayTyping(data?.recipientId, 'user_stopped_typing', { userId }).catch(() => {});
-  });
-
-  socket.on('disconnect', () => {
-    const remaining = (onlineUsers.get(userId) || 1) - 1;
-    if (remaining > 0) {
-      onlineUsers.set(userId, remaining);
-    } else {
-      onlineUsers.delete(userId);
-    }
-    broadcastOnlineUsers();
-  });
-});
+// Each socket's room, who it is told is online (only the people its user may
+// message) and typing indicators: see utils/presence.js
+io.on('connection', handleChatSocket);
 
 // Connect to MongoDB
 connectDB();

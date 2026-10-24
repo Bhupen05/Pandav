@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { reportFields } from './MessageReport.js';
 
 const teamChatMessageSchema = new mongoose.Schema({
   team: {
@@ -13,17 +14,24 @@ const teamChatMessageSchema = new mongoose.Schema({
     required: true,
     index: true,
   },
+  // Emptied when the message is deleted
   message: {
     type: String,
-    required: true,
+    required: function () { return !this.deletedAt; },
     trim: true,
-    maxlength: 3000,
+    maxlength: 2000,
   },
   isEdited: {
     type: Boolean,
     default: false,
   },
   editedAt: {
+    type: Date,
+    default: null,
+  },
+  // Set when the sender, a leader or an admin deletes it: it stays in the
+  // chat, shown as deleted, with no text
+  deletedAt: {
     type: Date,
     default: null,
   },
@@ -38,9 +46,12 @@ const teamChatMessageSchema = new mongoose.Schema({
       default: Date.now,
     },
   }],
+  // Reports by people in the team, for admins only
+  ...reportFields,
 }, { timestamps: true });
 
 teamChatMessageSchema.index({ team: 1, createdAt: -1 });
 teamChatMessageSchema.index({ team: 1, 'readBy.user': 1 });
+teamChatMessageSchema.index({ lastReportedAt: -1 }, { sparse: true });
 
 export default mongoose.model('TeamChatMessage', teamChatMessageSchema);
