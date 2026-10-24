@@ -31,6 +31,8 @@ export interface ChatContextType {
   activeUsers: string[];
   loadingMessages: boolean;
   unreadCounts: Record<string, number>;
+  // All unread direct and team messages, for the navigation badge
+  totalUnread: number;
   // People typing to the current user in a direct chat
   typingUsers: TypingStatus[];
   clearUnread: (userId: string) => void;

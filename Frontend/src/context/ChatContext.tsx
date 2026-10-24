@@ -261,6 +261,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setHasMoreMessages(false);
   }, []);
 
+  // Everything unread, for the badge in the navigation
+  const totalUnread = Object.values(unreadCounts).reduce((sum, count) => sum + count, 0);
+
   return (
     <ChatContext.Provider
       value={{
@@ -269,6 +272,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         activeUsers,
         loadingMessages,
         unreadCounts,
+        totalUnread,
         typingUsers,
         clearUnread,
         sendMessage,
