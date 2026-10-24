@@ -8,7 +8,8 @@ import {
   rejectTeamTask,
 } from '../controllers/teamTaskController.js';
 
-// Mounted at /teams/:teamId/tasks
+// Mounted at /teams/:teamId/tasks. Everything else about a team task (edits,
+// comments, files, cancel, reopen) goes through /tasks/:id.
 const router = express.Router({ mergeParams: true });
 
 router.get('/pending-approval', protect, adminOrLeader, getTeamPendingApprovalTasks);
