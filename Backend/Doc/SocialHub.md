@@ -55,6 +55,12 @@ Social Hub routes have their own per-user limits on top of those in the README:
   `409`, `5xx`, for example a message the [messaging rule](Chat.md#who-can-message-whom) refuses)
   gives its place back once its answer is sent, so mistakes don't use up the limit. A request that
   is answered `200`/`201` counts, including a publish whose target failed and a job run that failed.
+- A linked-account request that got as far as asking LinkedIn or GitHub counts even when it then
+  fails: a token the provider refused when linking (`400`), and an OAuth code it refused or a
+  provider failure in the callback (`502`). Otherwise failed provider calls would be unlimited (a
+  free way to test tokens, or to flood the providers with this server's OAuth credentials). Refusals
+  before that point (missing `accessToken`, OAuth not set up, a bad `state`) still give their place
+  back.
 - `GET` routes other than OAuth start are not limited.
 - Over the limit: `429`, a `Retry-After` header in seconds, and
   `Too many requests. Try again in <n> seconds.`
@@ -79,7 +85,7 @@ Fields as clients send and receive them. "Server-set" fields are ignored if sent
 | `approvalStatus` | string | Server-set: `none`, `pending`, `approved` or `rejected` |
 | `approvedBy`, `approvedAt` | id, date | Server-set when the post is approved or rejected; cleared when an edit sends it back for approval |
 | `moderationStatus` | string | Server-set: `clean` (default), `flagged`, `hidden` or `removed`. See [Moderation](#moderation) |
-| `moderationReason`, `moderatedBy`, `moderatedAt` | string, id, date | Server-set by moderation |
+| `moderationReason`, `moderatedBy`, `moderatedAt` | string, id, date | Server-set by moderation. `moderationReason` is trimmed, at most 500 characters |
 | `publishResults` | object | Server-set. One entry per target, `{ status, message, publishedAt }`, plus `externalId` and `publishingAt` for `linkedin` and `github`. `status` is `none`, `published` or `failed`. `publishingAt` is set while a request or job is publishing there (see [Publishing](#publishing)) |
 | `editedAt` | date or `null` | Server-set when the author edits the post |
 | `likes` | id[] | Users who like the post |
@@ -103,8 +109,8 @@ Fields as clients send and receive them. "Server-set" fields are ignored if sent
 | `payload` | object | `{ githubRepo }` as given when the job was queued, or `null` |
 | `result` | object or `null` | After a successful run: `{ externalId, raw }`, where `raw` is the provider's response body; or `{ externalId, alreadyPublished: true }` when the post had been published there another way meanwhile |
 | `lastError` | string or `null` | Why the last run failed |
-| `startedAt`, `completedAt` | date or `null` | |
-| `lockedAt` | date or `null` | Set while a run has the job (`processing`) |
+| `startedAt`, `completedAt` | date or `null` | When the last run claimed the job, and when the job completed or failed for good. Always the time it happened, also for runs of the background job |
+| `lockedAt` | date or `null` | Set while a run has the job (`processing`), to the time the run claimed it |
 | `createdAt`, `updatedAt` | date | |
 
 ### Linked account (`SocialIntegrationV2`)
@@ -129,7 +135,7 @@ Fields as clients send and receive them. "Server-set" fields are ignored if sent
 | Field | Type | Notes |
 |---|---|---|
 | `_id` | id | |
-| `requester`, `recipient` | id or user | Populated as `{ _id, name, email, role, profileImage }` in `GET /connections`. At most one record per pair of users |
+| `requester`, `recipient` | id or user | Populated in `GET /connections` as `{ _id, name, role, profileImage }` for pending requests, and with `email` too once the connection is accepted. At most one record per pair of users |
 | `status` | string | `pending`, `accepted` or `rejected` |
 | `respondedAt` | date or `null` | When the recipient answered; cleared when the request is sent again |
 | `createdAt`, `updatedAt` | date | |
@@ -197,7 +203,7 @@ edit and approve carries `viewer`, worked out for the caller with the same rules
 | `canApprove` | The post is `pending`, not removed, and the caller is an approver of it |
 | `canPublish` | The caller is a publisher of the post; it isn't hidden or removed; its approval is `none` or `approved`; and at least one of its LinkedIn/GitHub targets isn't published yet |
 | `canEdit` | The caller is the author and the post isn't removed |
-| `canDelete` | The caller is the author or an admin |
+| `canDelete` | The caller is an admin, or the author and the post isn't removed |
 
 ```json
 "viewer": { "canApprove": false, "canPublish": true, "canEdit": true, "canDelete": true }
@@ -245,7 +251,9 @@ jobs are deleted and the approvers are asked again. See [`PATCH /posts/:postId`]
   publishing a target, the post's `publishResults.<target>.publishingAt` is set and nothing else can
   publish it there; a second request at the same moment gets
   `409 This post is being published to GitHub right now. Check its result in a moment.` A claim left
-  behind by a crash expires after 10 minutes. A failed target can be published again.
+  behind by a crash expires after 10 minutes. A claim is always stamped with the time it was taken
+  and every call to a provider gives up after 30 seconds (see [Provider errors](#provider-errors)),
+  so a claim that old really was left behind. A failed target can be published again.
 
 | Target | What publishing does |
 |---|---|
@@ -274,8 +282,11 @@ LinkedIn or GitHub, the task's `autoPostStatus` becomes `published`.
    publisher can also run a job with `POST /publish-jobs/:jobId/process`, and an admin can run the
    due ones with `POST /publish-jobs/process-due`.
 3. **Claim.** A run first moves the job from `queued` to `processing` in one atomic update, sets
-   `lockedAt` and adds 1 to `attempts`. Only queued jobs can be claimed, so simultaneous runs can't
-   publish the same job twice and a completed job never runs again.
+   `startedAt` and `lockedAt` and adds 1 to `attempts`. Only queued jobs can be claimed, so
+   simultaneous runs can't publish the same job twice and a completed job never runs again. The
+   background job runs its jobs one after another, and each records the time it actually ran
+   (`startedAt`, `lockedAt`, the post's `publishingAt` and `publishedAt`, `completedAt`, the next
+   retry), not the time the pass started, so a job late in a slow pass never looks stuck.
 4. **Checks.** The job fails at once, with no retry, if its post or the post's author is gone
    (`The post no longer exists`), the post is waiting for approval or was rejected
    (`The post is waiting for approval`, `The post was not approved`), or the post is hidden or
@@ -313,7 +324,8 @@ admins, a queued job whose `nextRetryAt` hasn't come yet.
   refresh token (`grant_type=refresh_token` at `<LINKEDIN_OAUTH_BASE>/oauth/v2/accessToken`, with
   `LINKEDIN_CLIENT_ID` and `LINKEDIN_CLIENT_SECRET`) and stores the new token and expiry. If LinkedIn
   refuses, or the server has no LinkedIn client settings, the account is marked as needing to be
-  linked again. If LinkedIn can't be reached, nothing is marked and the request fails with `502`.
+  linked again, and that refresh token isn't sent again until the account is linked again. If
+  LinkedIn can't be reached, nothing is marked and the request fails with `502`.
 - **When the user has to link again** (`needsRelink: true` in `GET /integrations`): the token can't
   be read (after `JWT_SECRET` changed; `isConnected` is then `false` too), LinkedIn refused to
   refresh it, or it has expired and there is no refresh token (GitHub tokens are never refreshed).
@@ -355,7 +367,9 @@ OAuth), the answer is `502` with a message a person can read:
 - `GitHub refused the request: <GitHub's reason>` when it answered with a `4xx` (a revoked token,
   for example).
 - `GitHub had a problem: <its reason>` when it answered with a `5xx`.
-- `Couldn't reach GitHub. Try again in a moment.` when it didn't answer.
+- `Couldn't reach GitHub. Try again in a moment.` when it couldn't be reached.
+- `GitHub didn't answer in time. Try again in a moment.` when it took more than 30 seconds to
+  answer. Every call to LinkedIn or GitHub gives up after 30 seconds.
 
 Linking with a pasted token is different: a token the provider refuses is the caller's mistake, so
 the answer is `400 GitHub didn't accept this token: <reason>`. Failures while publishing don't fail
@@ -387,12 +401,14 @@ The owner posts it, with the draft's text or their own, through
 [`POST /personal-tasks/:taskId/share`](#post-personal-taskstaskidshare):
 
 1. A post is created with visibility `public`, targets Pandav and, if the owner asks, LinkedIn,
-   title `Task completed: <task title>` and tags `task`, `progress` and `auto-generated`. It is in
-   the Pandav feed straight away.
+   title `Task completed: <task title>` and tags `task`, `progress` and `auto-generated`. Without
+   LinkedIn, or when the owner is an admin or team leader, it is in the Pandav feed straight away.
 2. With LinkedIn, a `user` or `team_member` post waits for approval like any other, and the task's
    `autoPostStatus` follows it: `pending_approval`, then `approved` or `rejected` when an approver
    decides, then `published` once a publisher publishes it to LinkedIn. An edit that sends the post
-   back for approval sets `pending_approval` again.
+   back for approval sets `pending_approval` again. While the post waits, only its author and
+   admins see it in the feed; once it is approved it shows to everyone, and a rejected one never
+   does (see [Who sees a post](#who-sees-a-post)).
 3. Otherwise the post is published at once, to LinkedIn with the owner's linked account if asked.
    `autoPostStatus` becomes `published` or `failed`, and `autoPostMessage` holds the result
    message.
@@ -401,8 +417,10 @@ The share endpoint works once per task. Any post of the owner's with the task as
 counts as a share, however it was made (`POST /posts`, `POST /posts/from-task/:taskId` or the share
 endpoint): completing the task again then offers no draft (`already_generated`), and the share
 endpoint answers `409`. It doesn't look at `autoGenerateLinkedInPost`, so the owner can share any
-completed task. Deleting the shared post resets the task (`lastAutoGeneratedPost: null`,
-`autoPostStatus: none`) once no other post points at it, so it can be shared again.
+completed task. Deleting the shared post always resets the task (`lastAutoGeneratedPost: null`,
+`autoPostStatus: none`, `autoPostMessage: null`), since those fields describe that post. The task
+can be shared again once no post made from it is left: while another one (from `POST /posts` or
+`POST /posts/from-task/:taskId`) remains, the share endpoint still answers `409` with that post's id.
 
 `POST /posts/from-task/:taskId` makes a post from a completed task on request instead, with the
 caller's choice of targets, visibility and first line (`intro`), whatever
@@ -460,8 +478,9 @@ states:
 
 Anything else is refused with `409`, for example
 `This post is removed. Only flagged posts can be unflagged.` Each change replaces
-`moderationReason` (leaving `reason` out clears it) and sets `moderatedBy` and `moderatedAt`. The
-author is told (`post_moderated`, with the reason, also emailed), except for `unflag`.
+`moderationReason` (at most 500 characters; leaving `reason` out clears it) and sets `moderatedBy`
+and `moderatedAt`. The author is told (`post_moderated`, with the reason, also emailed), except for
+`unflag`.
 
 | Status | Seen by | Publishing |
 |---|---|---|
@@ -474,9 +493,11 @@ author is told (`post_moderated`, with the reason, also emailed), except for `un
 - **Posts.** The author edits `title`, `content`, `tags`, `visibility` and `mediaUrls` with
   [`PATCH /posts/:postId`](#patch-postspostid), with the same checks as on creation; targets can't
   change, and a removed post can't be edited. The author or an admin deletes a post with
-  [`DELETE /posts/:postId`](#delete-postspostid). Its queued and failed publish jobs go with it;
-  completed jobs stay as the record of what was published. Posts already on LinkedIn or GitHub stay
-  there. When an admin deletes someone else's post, the author is told (`post_moderated`).
+  [`DELETE /posts/:postId`](#delete-postspostid). A removed post can only be deleted by an admin: it
+  is the record of a moderation decision an admin may still review or undo. Its queued and failed
+  publish jobs go with it; completed jobs stay as the record of what was published. Posts already on
+  LinkedIn or GitHub stay there. When an admin deletes someone else's post, the author is told
+  (`post_moderated`).
 - **Comments.** The comment's author, the post's author or an admin deletes a comment with
   [`DELETE /posts/:postId/comments/:commentId`](#delete-postspostidcommentscommentid). Comments
   can't be edited.
@@ -509,6 +530,10 @@ object and how it is delivered). Nobody is told about their own action.
 `moderationStatus` for moderation), `connectionId` for connections, and `jobId`, `postId`,
 `provider` for `publish_failed`.
 
+A notification's title holds at most 200 characters and its body 1000. Longer text (a long name, or
+a provider's long error message in `publish_failed`) is cut to fit and ends in `…`, so the
+notification and its email are still sent.
+
 ## Background job
 
 `social-publish` runs every minute (see [Admin.md](Admin.md#background-jobs)). Each pass:
@@ -524,7 +549,9 @@ Its result, shown to an admin who runs it by hand with `POST /api/v2/admin/jobs/
 ```
 
 Passes are safe to repeat: a job is claimed before it runs, and a target already published is never
-published again.
+published again. The time of the pass (which an admin running it by hand outside production may set
+with `now`) only decides which jobs are stuck and which are due; each job records the times it
+actually ran (see [Publish jobs](#publish-jobs), step 3).
 
 ## Environment variables
 
@@ -558,7 +585,7 @@ Each event has `actor` (the caller), `action`, `targetType`, `targetId`, `status
 |---|---|---|
 | `social_post_created` | `POST /posts`, `POST /posts/from-task/:taskId`, `POST /personal-tasks/:taskId/share` | `targets`, `visibility`; `sourceTask` when a task is shared |
 | `social_post_updated` | `PATCH /posts/:postId` | `fields` (the fields sent), `backToApproval`, `cancelledJobs` |
-| `social_post_deleted` | `DELETE /posts/:postId` | `author`, `byAuthor`, `jobsRemoved` |
+| `social_post_deleted` | `DELETE /posts/:postId` | `author`, `byAuthor`, `jobsRemoved`, and the post's `moderationStatus` and `moderationReason` when it was deleted |
 | `social_comment_deleted` | `DELETE /posts/:postId/comments/:commentId` | `commentId`, `commenter`, `byCommenter` |
 | `social_post_approval_updated` | `PATCH /posts/:postId/approve` | `action` |
 | `social_post_publish_triggered` | `POST /posts/:postId/publish` | `targets` |
@@ -837,7 +864,7 @@ Errors:
 
 ### `DELETE /posts/:postId`
 
-The author or an admin.
+The author or an admin; a removed post, an admin only.
 
 Deletes the post, its `queued` and `failed` publish jobs (`completed` ones are kept), and resets a
 personal task shared as this post (see [auto-share](#personal-tasks-and-auto-share)). Copies already
@@ -852,6 +879,8 @@ Errors:
 
 - `404 Post not found` (also when the caller may not see it)
 - `403 Only the author or an admin can delete a post`
+- `409 This post was removed by an admin and can't be deleted` when its author tries to delete a
+  removed post
 
 ### `POST /posts/:postId/like`
 
@@ -1327,7 +1356,7 @@ Body:
 | Field | Required | Notes |
 |---|---|---|
 | `action` | Yes | `flag`, `unflag`, `hide`, `unhide`, `remove` or `restore` |
-| `reason` | No | Text, stored trimmed and shown to the author. Leaving it out clears the earlier reason; `null` is refused |
+| `reason` | No | Text of at most 500 characters, stored trimmed and shown to the author. Leaving it out clears the earlier reason; `null` is refused |
 
 Moves the post to its new state if the action applies to its current one (see
 [Moderation](#moderation)), and tells the author except for `unflag`. Returns the post with
@@ -1352,6 +1381,7 @@ Errors:
 - `403 User role <role> is not authorized to access this route`
 - `400 action must be one of: flag, unflag, hide, unhide, remove, restore`
 - `400 reason must be a string`
+- `400 reason can be at most 500 characters`
 - `404 Post not found`
 - `409 This post is <status>. Only <states> posts can be <flagged, unflagged, hidden, unhidden,
   removed or restored>.` when the action doesn't apply to the post's state, for example
@@ -1490,8 +1520,11 @@ Any user.
 
 Returns the caller's pending requests in both directions and their accepted connections, with how
 many there are of each. Rejected requests are not listed, and neither are connections with
-deactivated or deleted accounts. The other user is populated as
-`{ _id, name, email, role, profileImage }`; in `connected` both sides are.
+deactivated or deleted accounts. In the pending lists the other user is populated as
+`{ _id, name, role, profileImage }`, without their email: anyone may send a request, and an email
+is only shared once both have agreed (as in [`GET /users/discover`](#get-usersdiscover), which
+shows emails to admins only). In `connected` both sides are populated as
+`{ _id, name, email, role, profileImage }`.
 
 ```json
 {
@@ -1502,7 +1535,7 @@ deactivated or deleted accounts. The other user is populated as
       {
         "_id": "66a1b2c3d4e5f60718295002",
         "requester": "66a1b2c3d4e5f60718290001",
-        "recipient": { "_id": "66a1b2c3d4e5f60718290004", "name": "Kim Other", "email": "kim@example.com", "role": "team_leader" },
+        "recipient": { "_id": "66a1b2c3d4e5f60718290004", "name": "Kim Other", "role": "team_leader" },
         "status": "pending",
         "respondedAt": null
       }
@@ -1891,6 +1924,9 @@ Errors:
 - `502` when the provider fails or can't be reached (see [Provider errors](#provider-errors))
 - `400 Invalid tokenExpiresAt`
 
+The first two give their [rate-limit](#rate-limits) place back; the others, which come after the
+provider was asked, count toward the limit.
+
 ### `DELETE /integrations/:provider`
 
 Any user, for their own linked account.
@@ -2005,3 +2041,6 @@ Errors:
 - `403 Invalid OAuth state` (issued for another provider or user)
 - `502 LinkedIn refused the request: <reason>` when the provider refuses the code or the token, and
   the other [provider errors](#provider-errors)
+
+The `400` and `403` answers give their [rate-limit](#rate-limits) place back; a `502`, which comes
+after the provider was asked, counts toward the limit.

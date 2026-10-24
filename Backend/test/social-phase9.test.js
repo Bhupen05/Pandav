@@ -52,6 +52,7 @@ const provider = http.createServer((req, res) => {
       return auth === 'Bearer down-token' ? reply(503, { message: 'Service unavailable' }) : reply(200, [{ id: 'e1', type: 'PushEvent' }]);
     }
     if (method === 'POST' && url === '/repos/acme/broken/issues') return reply(500, { message: 'Something broke' });
+    if (method === 'POST' && url === '/repos/acme/verbose/issues') return reply(500, { message: 'z'.repeat(1500) });
     if (method === 'POST' && /^\/repos\/[^/]+\/[^/]+\/issues$/.test(url)) {
       return reply(201, { id: providerCalls.length, html_url: `https://github.example/issues/${providerCalls.length}` });
     }
@@ -227,6 +228,31 @@ test('publishing once, and the publishing queue', async (t) => {
     outOfAttempts.data.data.failedStuck === 1 && (await jobById(job._id)).status === 'failed', JSON.stringify(outOfAttempts.data));
   await check('which is announced too', (await notificationsFor(lee, 'publish_failed')).length === 2);
 
+  // A provider's very long reason still reaches whoever has to retry
+  const verbose = await post(lee, { content: 'P9 verbose', targets: { github: true } });
+  const verboseJob = (await call('POST', `/social/posts/${verbose._id}/publish/jobs`, { token: adminToken, body: { githubRepo: 'acme/verbose', maxAttempts: 1 } })).data.data[0];
+  const verboseRun = await call('POST', `/social/publish-jobs/${verboseJob._id}/process`, { token: adminToken });
+  const verboseNote = (await notificationsFor(lee, 'publish_failed')).at(-1);
+  await check('a job failing with a reason too long for a notification is still announced',
+    verboseRun.data.data?.status === 'failed' && verboseNote?.data.jobId === verboseJob._id && verboseNote.body.length <= 1000
+      && verboseNote.body.startsWith('GitHub had a problem: zzz'),
+    JSON.stringify(verboseNote).slice(0, 300));
+  await check('and emailed', outbox().some((mail) => mail.to === 'lee@social9.test' && mail.text.startsWith('GitHub had a problem: zzz')));
+
+  // ---------- A pass records when each job really ran ----------
+  const late = await post(lee, { content: 'P9 late pass', targets: { github: true } });
+  const lateJob = (await call('POST', `/social/posts/${late._id}/publish/jobs`, { token: lee.token, body: { githubRepo: 'acme/site' } })).data.data[0];
+  await db.collection('socialpublishjobv2').updateOne({ _id: oid(lateJob._id) }, { $set: { nextRetryAt: new Date(Date.now() - 2 * 60 * MINUTE) } });
+  // A pass that started an hour ago, as the later jobs of a slow pass see it
+  const latePass = await runSocialJob(new Date(Date.now() - 60 * MINUTE));
+  const lateRun = await jobById(lateJob._id);
+  const latePost = await db.collection('socialpostv2').findOne({ _id: oid(late._id) });
+  const justNow = (date) => date instanceof Date && Math.abs(Date.now() - date.getTime()) < MINUTE;
+  await check('a pass runs the jobs due at its time', latePass.data.data?.processed === 1 && lateRun.status === 'completed', JSON.stringify(latePass.data));
+  await check('each job is stamped with when it ran, not when the pass started',
+    justNow(lateRun.startedAt) && justNow(lateRun.completedAt) && justNow(latePost.publishResults.github.publishedAt),
+    JSON.stringify({ startedAt: lateRun.startedAt, completedAt: lateRun.completedAt, publishedAt: latePost.publishResults.github.publishedAt }));
+
   // ---------- Jobs a leader queued for a member ----------
   await call('POST', '/social/integrations/github/link', { token: mia.token, body: { accessToken: 'mia-token' } });
   const miaPost = await post(mia, { content: 'Mia ships', targets: { pandav: true, github: true } });
@@ -337,7 +363,10 @@ test('approvals: the queue, the answer, and the task that follows', async (t) =>
   const sharedId = shared.data.data?.postId;
   const taskStatus = async () => (await db.collection('personaltaskv2').findOne({ _id: oid(task._id) })).autoPostStatus;
   await check('a shared task waits for approval', shared.status === 201 && (await taskStatus()) === 'pending_approval');
+  const inFeed = async (person) => (await call('GET', '/social/feed', { token: person.token })).data.data.some((p) => p._id === sharedId);
+  await check('until then only its author sees the shared post in the feed', (await inFeed(mia)) && !(await inFeed(people.ned)));
   const approved = await call('PATCH', `/social/posts/${sharedId}/approve`, { token: lee.token, body: { action: 'approved' } });
+  await check('once approved, everyone does', await inFeed(people.ned));
   await check('approving answers with the author and her role',
     approved.status === 200 && approved.data.data.author?.role === 'team_member' && approved.data.data.author.name === 'Mia Member', JSON.stringify(approved.data).slice(0, 300));
   await check('the task follows: approved', (await taskStatus()) === 'approved');
@@ -349,6 +378,18 @@ test('approvals: the queue, the answer, and the task that follows', async (t) =>
   const sharedAgain = await call('POST', `/social/personal-tasks/${task._id}/share`, { token: mia.token, body: {} });
   await check('sharing it again is a 409 with the post id under data', sharedAgain.status === 409 && sharedAgain.data.data?.postId === sharedId,
     JSON.stringify(sharedAgain.data));
+
+  // Deleting the shared post resets the task; another post made from it still counts as a share
+  const fromTask = (await call('POST', `/social/posts/from-task/${task._id}`, { token: mia.token, body: {} })).data.data;
+  await call('DELETE', `/social/posts/${sharedId}`, { token: mia.token });
+  const reset = await db.collection('personaltaskv2').findOne({ _id: oid(task._id) });
+  await check('deleting the shared post resets the task', reset.autoPostStatus === 'none' && reset.lastAutoGeneratedPost === null, JSON.stringify(reset));
+  const stillShared = await call('POST', `/social/personal-tasks/${task._id}/share`, { token: mia.token, body: {} });
+  await check('but it cannot be shared again while another post made from it remains',
+    stillShared.status === 409 && stillShared.data.data?.postId === fromTask._id, JSON.stringify(stillShared.data));
+  await call('DELETE', `/social/posts/${fromTask._id}`, { token: mia.token });
+  const sharedOnceMore = await call('POST', `/social/personal-tasks/${task._id}/share`, { token: mia.token, body: {} });
+  await check('once none remains, it can', sharedOnceMore.status === 201 && (await taskStatus()) === 'published', JSON.stringify(sharedOnceMore.data));
 
   const rejected = await call('PATCH', `/social/posts/${ozPost._id}/approve`, { token: adminToken, body: { action: 'rejected' } });
   await check('an admin rejects the outsider\'s post', rejected.status === 200 && rejected.data.data.approvalStatus === 'rejected');
@@ -387,9 +428,17 @@ test('editing and deleting posts and comments', async (t) => {
   const externalOnly = await feedPost('Mia LinkedIn only');
   await call('PATCH', `/social/moderation/posts/${externalOnly._id}`, { token: adminToken, body: { action: 'remove' } });
   await check('a removed post cannot be edited', (await call('PATCH', `/social/posts/${externalOnly._id}`, { token: mia.token, body: { content: 'x' } })).status === 409);
+  const authorDelete = await call('DELETE', `/social/posts/${externalOnly._id}`, { token: mia.token });
+  await check('nor deleted by its author, which would lose the moderation record',
+    authorDelete.status === 409 && /removed by an admin/.test(authorDelete.data.message), JSON.stringify(authorDelete.data));
+  await check('so her post offers no delete', (await feedPost('Mia LinkedIn only')).viewer.canDelete === false);
   await check('a post someone cannot see is not found for them', (await call('PATCH', `/social/posts/${externalOnly._id}`, { token: oz.token, body: { content: 'x' } })).status === 404);
   await check('or for deleting', (await call('DELETE', `/social/posts/${externalOnly._id}`, { token: oz.token })).status === 404);
   await check("a leader cannot delete his member's post", (await call('DELETE', `/social/posts/${publicPost._id}`, { token: lee.token })).status === 403);
+  await check('an admin can delete a removed post', (await call('DELETE', `/social/posts/${externalOnly._id}`, { token: adminToken })).status === 200);
+  const removedAudit = (await auditsFor('social_post_deleted')).find((a) => a.targetId === externalOnly._id);
+  await check('and the audit log keeps its moderation state', removedAudit?.details.moderationStatus === 'removed' && 'moderationReason' in removedAudit.details,
+    JSON.stringify(removedAudit?.details));
 
   // ---------- Deleting takes the jobs with it ----------
   const broken = await feedPost('P9 broken', lee.token);
@@ -452,6 +501,17 @@ test('moderation follows its states', async (t) => {
   await moderate('flag');
   await moderate('unflag');
   await check('except unflagging', (await notes()) === 6, String(await notes()));
+
+  // A reason has to fit in the notification that carries it to the author
+  const tooLong = await moderate('flag', 'x'.repeat(501));
+  await check('a reason over 500 characters is a 400', tooLong.status === 400 && /at most 500/.test(tooLong.data.message), JSON.stringify(tooLong.data));
+  const longest = `Spam ${'y'.repeat(495)}`;
+  const flaggedLong = await moderate('flag', longest);
+  const longNote = (await notificationsFor(ivy, 'post_moderated')).at(-1);
+  await check('a 500-character reason is stored', flaggedLong.status === 200 && flaggedLong.data.data.moderationReason === longest);
+  await check('and reaches the author in full', (await notes()) === 7 && longNote.body.endsWith(`Reason: ${longest}`), JSON.stringify(longNote).slice(0, 200));
+  await check('by email too', outbox().some((mail) => mail.to === 'ivy@social9.test' && mail.text.includes(longest)));
+  await moderate('unflag');
   const listed = await call('GET', `/social/moderation/posts?status=clean&owner=${ivy._id}`, { token: adminToken });
   await check('the moderation list keeps its filters', listed.data.data.some((p) => p._id === target._id) && listed.data.data.every((p) => p.moderationStatus === 'clean'));
   await check('only admins moderate', (await call('PATCH', `/social/moderation/posts/${target._id}`, { token: oz.token, body: { action: 'flag' } })).status === 403);
@@ -468,6 +528,13 @@ test('connections: withdraw, remove, ask again, blocks', async (t) => {
   const request = (await ask(ivy, oz)).data.data;
   const requestNote = (await notificationsFor(oz, 'connection_request')).at(-1);
   await check('the recipient hears about the request', requestNote?.link === '/network' && requestNote.data.connectionId === request._id, JSON.stringify(requestNote));
+  // Sending a request must not be a way round discover's email rule
+  const sentList = (await call('GET', '/social/connections', { token: ivy.token })).data.data.pendingSent.find((c) => c._id === request._id);
+  await check("a sent request shows the recipient's name but not their email",
+    sentList?.recipient?.name === 'Oz Outsider' && !('email' in sentList.recipient), JSON.stringify(sentList));
+  const receivedList = (await call('GET', '/social/connections', { token: oz.token })).data.data.pendingReceived.find((c) => c._id === request._id);
+  await check("nor does a received one show the requester's", receivedList?.requester?.name === 'Ivy Contact' && !('email' in receivedList.requester),
+    JSON.stringify(receivedList));
   await check('the recipient cannot withdraw it', (await remove(oz, request._id)).status === 403);
   await check('someone else cannot see it', (await remove(bo, request._id)).status === 404);
   const withdrawn = await remove(ivy, request._id);
@@ -490,6 +557,9 @@ test('connections: withdraw, remove, ask again, blocks', async (t) => {
   await check('asking when connected is refused', (await ask(ivy, oz)).status === 409);
   const listing = await call('GET', '/social/connections', { token: ivy.token });
   await check('the connection lists have counts', listing.data.counts?.connected === 1 && listing.data.data.connected.length === 1, JSON.stringify(listing.data.counts));
+  const accepted = listing.data.data.connected[0];
+  await check('once both agreed, each sees the other\'s email', accepted.recipient.email === 'oz@social9.test' && accepted.requester.email === 'ivy@social9.test',
+    JSON.stringify(accepted));
   const removed = await remove(oz, again._id);
   await check('either person removes a connection', removed.status === 200 && removed.data.message === 'Connection removed');
 
@@ -570,6 +640,11 @@ test('linked accounts: refresh, unlink, unreadable tokens, provider errors', asy
   await call('POST', '/social/integrations/linkedin/link', { token: ivy.token, body: { accessToken: 'ivy-li', refreshToken: 'bad-refresh', tokenExpiresAt: past } });
   const refused = await call('GET', '/social/integrations/linkedin/profile', { token: ivy.token });
   await check('a refused refresh asks to link again', refused.status === 409 && /Link the account again/.test(refused.data.message), JSON.stringify(refused.data));
+  const refreshCalls = () => providerCalls.filter((c) => c.path === '/oauth/v2/accessToken' && c.body.includes('grant_type=refresh_token')).length;
+  const refreshesBefore = refreshCalls();
+  const refusedAgain = await call('GET', '/social/integrations/linkedin/profile', { token: ivy.token });
+  await check('and the refused refresh token is not sent to LinkedIn again', refusedAgain.status === 409 && refreshCalls() === refreshesBefore,
+    `${refusedAgain.status} ${refreshCalls() - refreshesBefore} more refreshes`);
   const ivyLinkedIn = await linkedOf(ivy, 'linkedin');
   await check('and the account says it needs relinking', ivyLinkedIn.needsRelink === true && ivyLinkedIn.isConnected === true, JSON.stringify(ivyLinkedIn));
   await check('tokens are never returned', !('accessToken' in ivyLinkedIn) && !('refreshToken' in ivyLinkedIn));
@@ -669,6 +744,25 @@ test('rate limits count only requests that are let through', async (t) => {
     if ((await call('POST', '/social/posts', { token, body: { content: `post ${i}` } })).status === 429) limitedAt = i;
   }
   await check('posts that go through still count', limitedAt === 28, `limited after ${limitedAt}`);
+
+  // Linked accounts (10 a minute): a refusal before any provider is asked
+  // gives its place back; a token the provider refused does not
+  const link = (accessToken) => call('POST', '/social/integrations/github/link', { token, body: accessToken === undefined ? {} : { accessToken } });
+  const unasked = [];
+  for (let i = 0; i < 12; i += 1) unasked.push((await link()).status);
+  await check('link attempts refused before asking GitHub are all answered', unasked.every((status) => status === 400), unasked.join());
+  const asked = [];
+  for (let i = 0; i < 11; i += 1) asked.push((await link('bad-token')).status);
+  await check('tokens GitHub refused use up the limit',
+    asked.slice(0, 10).every((status) => status === 400) && asked[10] === 429, asked.join());
+  // The OAuth callback asks LinkedIn with this server's client secret
+  const { kim } = people;
+  const { state } = (await call('GET', '/social/integrations/linkedin/oauth/start', { token: kim.token })).data.data;
+  const codes = [];
+  for (let i = 0; i < 10; i += 1) {
+    codes.push((await call('POST', '/social/integrations/linkedin/oauth/callback', { token: kim.token, body: { code: 'bad-code', state } })).status);
+  }
+  await check('codes LinkedIn refused use up the limit too', codes.slice(0, 9).every((status) => status === 502) && codes[9] === 429, codes.join());
 });
 
 test('feed paging skips nothing', async (t) => {

@@ -10,10 +10,20 @@ setInterval(() => {
 
 const getKey = (req, keyPrefix) => `${keyPrefix}:${req.user?._id || req.clientIp || req.ip || 'anon'}`;
 
+// A request that has started work the limit exists to cap (a call to
+// LinkedIn or GitHub, made with the user's token or this server's OAuth
+// credentials) keeps its slot even when it then ends in an error. Otherwise
+// failed provider calls would be unlimited: a free checker for stolen tokens,
+// or a flood of token requests in this server's name.
+export const keepRateLimitSlot = (res) => {
+  res.locals.keepRateLimitSlot = true;
+};
+
 // At most `max` requests per user (or address) in a fixed window. Only
 // requests that are let through count: one that ends in an error (bad input,
 // not allowed, refused by the messaging rule, ...) gives its slot back when
-// its response finishes, so mistakes don't lock anyone out.
+// its response finishes, so mistakes don't lock anyone out, unless it was
+// let through to the work it was limited for (keepRateLimitSlot).
 export const createRateLimiterV2 = ({ keyPrefix, windowMs, max }) => {
   return (req, res, next) => {
     const now = Date.now();
@@ -36,7 +46,7 @@ export const createRateLimiterV2 = ({ keyPrefix, windowMs, max }) => {
 
     entry.count += 1;
     res.once('finish', () => {
-      const refused = res.statusCode >= 400 && res.statusCode !== 429;
+      const refused = res.statusCode >= 400 && res.statusCode !== 429 && !res.locals.keepRateLimitSlot;
       // Only within the same window: a new window started without this request
       if (refused && store.get(key) === entry && entry.count > 0) entry.count -= 1;
     });

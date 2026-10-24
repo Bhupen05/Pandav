@@ -227,6 +227,9 @@ export const validateCreatePublishJobs = (req, res, next) => {
   next();
 };
 
+// SocialPostV2.moderationReason: it is also sent to the author
+export const MAX_MODERATION_REASON_LENGTH = 500;
+
 export const validateModerationUpdate = (req, res, next) => {
   const { action, reason } = req.body || {};
   const allowed = ['flag', 'unflag', 'hide', 'unhide', 'remove', 'restore'];
@@ -237,6 +240,10 @@ export const validateModerationUpdate = (req, res, next) => {
 
   if (reason !== undefined && typeof reason !== 'string') {
     return validatorError(res, 'reason must be a string');
+  }
+
+  if (typeof reason === 'string' && reason.trim().length > MAX_MODERATION_REASON_LENGTH) {
+    return validatorError(res, `reason can be at most ${MAX_MODERATION_REASON_LENGTH} characters`);
   }
 
   next();

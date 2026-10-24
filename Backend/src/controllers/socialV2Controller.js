@@ -8,31 +8,13 @@ import SocialPublishJobV2 from '../models/SocialPublishJobV2.js';
 import Chat from '../models/Chat.js';
 import Team from '../models/Team.js';
 import User from '../models/User.js';
-import { EDITABLE_POST_FIELDS, GITHUB_REPO_REQUIRED } from '../middleware/validateV2.js';
+import { EDITABLE_POST_FIELDS, GITHUB_REPO_REQUIRED, isGithubRepo } from '../middleware/validateV2.js';
+import { keepRateLimitSlot } from '../middleware/rateLimitV2.js';
 import { logAuditEventV2 } from '../utils/auditLoggerV2.js';
 import { blockedUserIds, isBlockedBetween } from '../utils/blocks.js';
 import { escapeRegex, pick, sendServerError } from '../utils/http.js';
 import { directMessageProblem } from '../utils/messaging.js';
 import { adminIds, notify } from '../utils/notify.js';
-import {
-  EXTERNAL_PROVIDERS,
-  ProviderError,
-  accessTokenFor,
-  claimTarget,
-  describeIntegration,
-  exchangeOAuthCode,
-  executePublishForPost,
-  fetchActivity,
-  fetchProfile,
-  isPublishable,
-  needsExternalApproval,
-  oauthConfig,
-  oauthConfigured,
-  providerName,
-  publishDueJobs,
-  releaseTarget,
-  runPublishJob,
-} from '../utils/socialPublishing.js';
 import { canReviewFor, ledUserIds, teamUserIds } from '../utils/teams.js';
 
 const MAX_MESSAGE_LENGTH = 2000;
@@ -64,6 +46,19 @@ const snippet = (text, length = 140) => {
   return flat.length > length ? `${flat.slice(0, length - 1)}…` : flat;
 };
 
+// notify() with the text cut to what a notification holds (title 200, body
+// 1000 characters; models/Notification.js). Longer text would be refused, and
+// notify() swallows the error, so the notification and its email would be lost.
+const NOTICE_TITLE_MAX = 200;
+const NOTICE_BODY_MAX = 1000;
+const clip = (text, length) => (text.length > length ? `${text.slice(0, length - 1)}…` : text);
+const tell = (req, recipients, notice) =>
+  notify(req, recipients, {
+    ...notice,
+    title: clip(String(notice.title).trim(), NOTICE_TITLE_MAX),
+    ...(notice.body ? { body: clip(String(notice.body).trim(), NOTICE_BODY_MAX) } : {}),
+  });
+
 // Dates in messages, as people read them, in the app's timezone
 const timezone = () => process.env.APP_TIMEZONE || 'Asia/Kolkata';
 const formatWhen = (date) =>
@@ -73,6 +68,596 @@ const formatDay = (date) =>
 
 const targetNames = (targets) =>
   EXTERNAL_PROVIDERS.filter((provider) => targets?.[provider]).map(providerName).join(' and ');
+
+// ---------- LinkedIn and GitHub ----------
+//
+// Everything that talks to the two providers (profiles, activity, OAuth,
+// token refresh), publishing a post to them, and running publish jobs. The
+// social-publish background job (jobs/socialJobs.js) uses publishDueJobs.
+
+const EXTERNAL_PROVIDERS = ['linkedin', 'github'];
+const PROVIDER_NAMES = { linkedin: 'LinkedIn', github: 'GitHub', pandav: 'Pandav' };
+const providerName = (provider) => PROVIDER_NAMES[provider] || provider;
+
+// Read when used, not at import: dotenv loads after imports are evaluated.
+// The tests point these at a fake provider.
+const linkedinApiBase = () => process.env.LINKEDIN_API_BASE || 'https://api.linkedin.com';
+const githubApiBase = () => process.env.GITHUB_API_BASE || 'https://api.github.com';
+const linkedinOAuthBase = () => process.env.LINKEDIN_OAUTH_BASE || 'https://www.linkedin.com';
+const githubOAuthBase = () => process.env.GITHUB_OAUTH_BASE || 'https://github.com';
+
+// A call to LinkedIn or GitHub that didn't work. `status` is what to answer
+// the client (502: the provider failed us), `providerStatus` the provider's
+// own HTTP status when it answered at all, and `detail` its own message.
+class ProviderError extends Error {
+  constructor(message, { status = 502, providerStatus = null, detail = null } = {}) {
+    super(message);
+    this.name = 'ProviderError';
+    this.status = status;
+    this.providerStatus = providerStatus;
+    this.detail = detail || message;
+  }
+
+  // The provider answered and said no (a bad or expired token or code), as
+  // opposed to being unreachable or failing on its side
+  get refused() {
+    return this.providerStatus >= 400 && this.providerStatus < 500;
+  }
+}
+
+const safeJson = async (response) => {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+};
+
+// How long a provider gets to answer. It keeps a publish well inside the
+// 10-minute claims below: a claim that old really was left behind.
+const PROVIDER_TIMEOUT_MS = 30 * 1000;
+
+// Calls a provider and returns its JSON body (and the response), or throws a
+// ProviderError a user can read
+const providerCall = async (provider, url, { method = 'GET', token, headers = {}, body } = {}, fallback = 'no reason given') => {
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: { Accept: 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers },
+      body,
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (error?.name === 'TimeoutError') {
+      throw new ProviderError(`${providerName(provider)} didn't answer in time. Try again in a moment.`);
+    }
+    throw new ProviderError(`Couldn't reach ${providerName(provider)}. Try again in a moment.`);
+  }
+
+  const data = await safeJson(response);
+  // GitHub's OAuth endpoint answers 200 with an `error` field
+  if (!response.ok || data?.error) {
+    const detail = data?.error_description || data?.message || (typeof data?.error === 'string' ? data.error : null) || fallback;
+    const providerStatus = response.ok ? 400 : response.status;
+    const what = providerStatus >= 500 ? 'had a problem' : 'refused the request';
+    throw new ProviderError(`${providerName(provider)} ${what}: ${detail}`, { providerStatus, detail });
+  }
+  return { data, response };
+};
+
+// ---------- LinkedIn and GitHub: profiles and activity ----------
+
+const fetchGithubProfile = async (token) => {
+  const { data } = await providerCall('github', `${githubApiBase()}/user`, { token }, 'Unable to verify GitHub token');
+  return {
+    providerUserId: String(data.id),
+    accountHandle: data.login,
+    metadata: {
+      name: data.name || null,
+      avatarUrl: data.avatar_url || null,
+      profileUrl: data.html_url || null,
+    },
+  };
+};
+
+const fetchLinkedInProfile = async (token) => {
+  try {
+    const { data } = await providerCall('linkedin', `${linkedinApiBase()}/v2/userinfo`, { token });
+    return {
+      providerUserId: String(data?.sub || ''),
+      accountHandle: data?.name || data?.email || String(data?.sub || ''),
+      metadata: {
+        name: data?.name || null,
+        email: data?.email || null,
+        picture: data?.picture || null,
+      },
+    };
+  } catch (error) {
+    // Unreachable: the older endpoint won't do better
+    if (!error.providerStatus) throw error;
+  }
+
+  // Apps without OpenID Connect only have the older profile endpoint
+  const { data } = await providerCall('linkedin', `${linkedinApiBase()}/v2/me`, { token }, 'Unable to verify LinkedIn token');
+  const first = data?.localizedFirstName || '';
+  const last = data?.localizedLastName || '';
+  return {
+    providerUserId: String(data.id),
+    accountHandle: `${first} ${last}`.trim() || String(data.id),
+    metadata: {
+      localizedFirstName: data?.localizedFirstName || null,
+      localizedLastName: data?.localizedLastName || null,
+    },
+  };
+};
+
+const fetchProfile = (provider, token) =>
+  (provider === 'linkedin' ? fetchLinkedInProfile(token) : fetchGithubProfile(token));
+
+// Recent activity as the provider sends it: the member's latest LinkedIn
+// shares, or the account's latest public GitHub events
+const fetchActivity = async (integration, token) => {
+  if (integration.provider === 'linkedin') {
+    const owner = encodeURIComponent(`urn:li:person:${integration.providerUserId}`);
+    const { data } = await providerCall('linkedin', `${linkedinApiBase()}/v2/shares?q=owners&owners=${owner}&count=20`, {
+      token,
+      headers: { 'X-Restli-Protocol-Version': '2.0.0' },
+    }, 'Unable to fetch LinkedIn posts');
+    return data?.elements || [];
+  }
+
+  const { data } = await providerCall('github',
+    `${githubApiBase()}/users/${encodeURIComponent(integration.accountHandle)}/events/public?per_page=20`,
+    { token }, 'Unable to fetch GitHub activity');
+  return Array.isArray(data) ? data : [];
+};
+
+// ---------- LinkedIn and GitHub: OAuth ----------
+
+const oauthConfig = (provider) => {
+  if (provider === 'github') {
+    return {
+      clientId: process.env.GITHUB_CLIENT_ID,
+      clientSecret: process.env.GITHUB_CLIENT_SECRET,
+      redirectUri: process.env.GITHUB_REDIRECT_URI,
+      authUrl: `${githubOAuthBase()}/login/oauth/authorize`,
+      tokenUrl: `${githubOAuthBase()}/login/oauth/access_token`,
+      scope: process.env.GITHUB_OAUTH_SCOPE || 'read:user user:email public_repo',
+    };
+  }
+
+  return {
+    clientId: process.env.LINKEDIN_CLIENT_ID,
+    clientSecret: process.env.LINKEDIN_CLIENT_SECRET,
+    redirectUri: process.env.LINKEDIN_REDIRECT_URI,
+    authUrl: `${linkedinOAuthBase()}/oauth/v2/authorization`,
+    tokenUrl: `${linkedinOAuthBase()}/oauth/v2/accessToken`,
+    scope: process.env.LINKEDIN_OAUTH_SCOPE || 'openid profile email w_member_social',
+  };
+};
+
+const oauthConfigured = (cfg) => Boolean(cfg.clientId && cfg.clientSecret && cfg.redirectUri);
+
+const linkedInTokenRequest = (cfg, params) =>
+  providerCall('linkedin', cfg.tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ ...params, client_id: cfg.clientId, client_secret: cfg.clientSecret }).toString(),
+  }, 'LinkedIn OAuth token exchange failed');
+
+// Swaps the code from the provider's redirect for a token:
+// { accessToken, refreshToken, expiresIn (seconds), scope }
+const exchangeOAuthCode = async (provider, code, cfg) => {
+  let tokenData;
+  if (provider === 'github') {
+    const { data } = await providerCall('github', cfg.tokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: cfg.clientId, client_secret: cfg.clientSecret, code, redirect_uri: cfg.redirectUri }),
+    }, 'GitHub OAuth token exchange failed');
+    tokenData = {
+      accessToken: data.access_token,
+      refreshToken: null,
+      expiresIn: null,
+      scope: data.scope ? String(data.scope).split(',').filter(Boolean) : [],
+    };
+  } else {
+    const { data } = await linkedInTokenRequest(cfg, { grant_type: 'authorization_code', code, redirect_uri: cfg.redirectUri });
+    tokenData = {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token || null,
+      expiresIn: data.expires_in || null,
+      scope: cfg.scope ? String(cfg.scope).split(' ').filter(Boolean) : [],
+    };
+  }
+
+  if (!tokenData.accessToken) {
+    throw new ProviderError(`${providerName(provider)} sent no access token`);
+  }
+  return tokenData;
+};
+
+// A new LinkedIn access token from a refresh token. Throws a ProviderError
+// that counts as refused when LinkedIn says no or this server can't ask.
+const refreshLinkedInToken = async (refreshToken) => {
+  const cfg = oauthConfig('linkedin');
+  if (!cfg.clientId || !cfg.clientSecret) {
+    throw new ProviderError("LinkedIn isn't set up on this server", { status: 400, providerStatus: 400 });
+  }
+  const { data } = await linkedInTokenRequest(cfg, { grant_type: 'refresh_token', refresh_token: refreshToken });
+  if (!data.access_token) {
+    throw new ProviderError('LinkedIn sent no access token', { providerStatus: 400 });
+  }
+  return { accessToken: data.access_token, refreshToken: data.refresh_token || null, expiresIn: data.expires_in || null };
+};
+
+// ---------- LinkedIn and GitHub: linked account tokens ----------
+
+const isExpired = (integration, now) => Boolean(integration.tokenExpiresAt) && integration.tokenExpiresAt <= now;
+
+// The token to call the provider with for a linked account (loaded with
+// +accessToken +refreshToken), as { token }, or { problem } saying why there
+// is none:
+//   not_linked   nothing is linked
+//   relink       the token can't be read (JWT_SECRET changed), or it expired
+//                and couldn't be refreshed: the user has to link again
+//   unreachable  LinkedIn couldn't be reached to refresh it (`error` says so)
+// An expired LinkedIn token is refreshed first when there is a refresh token.
+// When LinkedIn refuses, the account is marked as needing to be linked again,
+// and that refresh token isn't sent again (each try is a call with this
+// server's client secret) until the account is linked again.
+const accessTokenFor = async (integration, now = new Date()) => {
+  if (!integration || !integration.isConnected) return { problem: 'not_linked' };
+  const token = integration.accessToken;
+  if (!token) return { problem: 'relink' };
+  if (!isExpired(integration, now)) return { token };
+  if (integration.needsRelink) return { problem: 'relink' };
+
+  const refreshToken = integration.provider === 'linkedin' ? integration.refreshToken : null;
+  if (!refreshToken) return { problem: 'relink' };
+
+  try {
+    const fresh = await refreshLinkedInToken(refreshToken);
+    integration.accessToken = fresh.accessToken;
+    if (fresh.refreshToken) integration.refreshToken = fresh.refreshToken;
+    integration.tokenExpiresAt = fresh.expiresIn ? new Date(now.getTime() + Number(fresh.expiresIn) * 1000) : null;
+    integration.needsRelink = false;
+    await integration.save();
+    return { token: fresh.accessToken };
+  } catch (error) {
+    if (!(error instanceof ProviderError)) throw error;
+    // LinkedIn being down says nothing about the link itself
+    if (!error.refused) return { problem: 'unreachable', error };
+    await SocialIntegration.updateOne({ _id: integration._id }, { $set: { needsRelink: true } });
+    integration.needsRelink = true;
+    return { problem: 'relink' };
+  }
+};
+
+// A linked account as the owner sees it (loaded with +accessToken
+// +refreshToken), without its tokens. isConnected only while the stored token
+// can be read; needsRelink when the user has to link it again.
+const describeIntegration = (integration, now = new Date()) => {
+  const readable = Boolean(integration.accessToken);
+  const canRefresh = integration.provider === 'linkedin' && Boolean(integration.refreshToken);
+  const data = integration.toObject();
+  delete data.accessToken;
+  delete data.refreshToken;
+  return {
+    ...data,
+    isConnected: Boolean(integration.isConnected) && readable,
+    needsRelink: Boolean(integration.needsRelink) || !readable || (isExpired(integration, now) && !canRefresh),
+    tokenExpiresAt: integration.tokenExpiresAt || null,
+  };
+};
+
+// ---------- LinkedIn and GitHub: publishing a post ----------
+
+// Hidden and removed posts never leave Pandav
+const isPublishable = (post) => !['hidden', 'removed'].includes(post.moderationStatus);
+
+// Posts by users and team members for LinkedIn or GitHub wait for a leader's
+// or an admin's approval
+const needsExternalApproval = (role, targets) =>
+  Boolean(targets?.linkedin || targets?.github) && (role === 'team_member' || role === 'user');
+
+const PUBLISH_LOCK_MS = 10 * 60 * 1000;
+
+// Claims one external target of a post for publishing, so two requests (or a
+// request and a job) never publish the post to the same place twice. Returns
+// 'claimed', or why not: 'published' (it already is) or 'busy' (something is
+// publishing it there right now). publishTarget releases the claim.
+const claimTarget = async (postId, provider, now = new Date()) => {
+  const path = `publishResults.${provider}`;
+  const claimed = await SocialPost.findOneAndUpdate(
+    {
+      _id: postId,
+      [`${path}.status`]: { $ne: 'published' },
+      // A claim left behind by a crash expires
+      $or: [
+        { [`${path}.publishingAt`]: null },
+        { [`${path}.publishingAt`]: { $lt: new Date(now.getTime() - PUBLISH_LOCK_MS) } },
+      ],
+    },
+    { $set: { [`${path}.publishingAt`]: now } },
+    { projection: { _id: 1 } },
+  );
+  if (claimed) return 'claimed';
+
+  const post = await SocialPost.findById(postId).select(path).lean();
+  return post?.publishResults?.[provider]?.status === 'published' ? 'published' : 'busy';
+};
+
+const releaseTarget = (postId, provider) =>
+  SocialPost.updateOne({ _id: postId }, { $set: { [`publishResults.${provider}.publishingAt`]: null } });
+
+// The personal task a shared post came from follows it
+const markTaskPublished = async (post, message) => {
+  if (!post.sourceTask) return;
+  await PersonalTask.updateOne(
+    { _id: post.sourceTask._id ?? post.sourceTask, lastAutoGeneratedPost: post._id },
+    { $set: { autoPostStatus: 'published', autoPostMessage: message } },
+  );
+};
+
+const publishToLinkedIn = async (integration, token, text) => {
+  const { data, response } = await providerCall('linkedin', `${linkedinApiBase()}/v2/ugcPosts`, {
+    method: 'POST',
+    token,
+    headers: { 'Content-Type': 'application/json', 'X-Restli-Protocol-Version': '2.0.0' },
+    body: JSON.stringify({
+      author: `urn:li:person:${integration.providerUserId}`,
+      lifecycleState: 'PUBLISHED',
+      specificContent: {
+        'com.linkedin.ugc.ShareContent': {
+          shareCommentary: { text },
+          shareMediaCategory: 'NONE',
+        },
+      },
+      visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' },
+    }),
+  }, 'LinkedIn publish failed');
+  return { externalId: data?.id || response.headers.get('x-restli-id') || null, raw: data };
+};
+
+const publishToGithub = async (token, post, githubRepo) => {
+  const targetRepo = githubRepo || process.env.GITHUB_DEFAULT_REPO;
+  if (!targetRepo) throw new Error(GITHUB_REPO_REQUIRED);
+  // It becomes part of the API path: never let it reach another GitHub endpoint
+  if (!isGithubRepo(targetRepo)) throw new Error('githubRepo must look like owner/repo');
+
+  const { data } = await providerCall('github', `${githubApiBase()}/repos/${targetRepo}/issues`, {
+    method: 'POST',
+    token,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: post.title || `Pandav update by ${post.author.name}`, body: post.content }),
+  }, 'GitHub publish failed');
+  return { externalId: data?.html_url || data?.id || null, raw: data };
+};
+
+// Publishes a post (with `author` populated) to one external target with the
+// author's linked account, and stores the outcome in publishResults (which
+// also releases a claim from claimTarget). Never throws for a failed
+// publish: returns { status: 'published' | 'failed', message, externalId, raw }.
+// publishedAt is when the provider accepted it.
+const publishTarget = async (post, provider, { githubRepo = null } = {}) => {
+  const name = providerName(provider);
+  let entry;
+  let raw = null;
+  try {
+    const integration = await SocialIntegration.findOne({ user: post.author._id, provider }).select('+accessToken +refreshToken');
+    const { token, problem, error } = await accessTokenFor(integration);
+    if (problem === 'not_linked') throw new Error(`The author hasn't linked a ${name} account`);
+    if (problem === 'relink') throw new Error(`The author's ${name} account has to be linked again`);
+    if (problem) throw error;
+
+    const published = provider === 'linkedin'
+      ? await publishToLinkedIn(integration, token, post.content)
+      : await publishToGithub(token, post, githubRepo);
+    raw = published.raw;
+    entry = {
+      status: 'published',
+      externalId: published.externalId ? String(published.externalId) : null,
+      message: `Published to ${name}`,
+      publishedAt: new Date(),
+      publishingAt: null,
+    };
+  } catch (error) {
+    entry = { status: 'failed', externalId: null, message: error.message, publishedAt: null, publishingAt: null };
+  }
+
+  await SocialPost.updateOne({ _id: post._id }, { $set: { [`publishResults.${provider}`]: entry } });
+  post.set(`publishResults.${provider}`, entry);
+  if (entry.status === 'published') await markTaskPublished(post, entry.message);
+  return { status: entry.status, message: entry.message, externalId: entry.externalId, raw };
+};
+
+// Publishes a post to each of `targets` now; returns the outcome per target
+// ({ status: 'none' | 'published' | 'failed', message, externalId? }).
+// External targets must have been claimed (claimTarget), unless the post is
+// brand new.
+const executePublishForPost = async (post, targets = {}, { githubRepo = null } = {}) => {
+  const result = {
+    pandav: { status: 'none', message: null },
+    linkedin: { status: 'none', message: null },
+    github: { status: 'none', message: null },
+  };
+
+  if (targets.pandav) {
+    // Nothing to send: the post is in the feed already
+    const entry = { status: 'published', message: 'Post is available in Pandav feed', publishedAt: new Date() };
+    await SocialPost.updateOne({ _id: post._id }, { $set: { 'publishResults.pandav': entry } });
+    post.set('publishResults.pandav', entry);
+    result.pandav = { status: entry.status, message: entry.message };
+  }
+
+  for (const provider of EXTERNAL_PROVIDERS) {
+    if (!targets[provider]) continue;
+    const outcome = await publishTarget(post, provider, { githubRepo });
+    result[provider] = outcome.status === 'published'
+      ? { status: 'published', externalId: outcome.externalId, message: outcome.message }
+      : { status: 'failed', message: outcome.message };
+  }
+
+  return result;
+};
+
+// ---------- LinkedIn and GitHub: running publish jobs ----------
+
+// A run that stopped part-way (the server restarted) is picked up again
+// after this long
+const STUCK_AFTER_MS = 10 * 60 * 1000;
+const backoffMs = (attempts) => Math.min(2 ** attempts, 60) * 60 * 1000;
+
+// Tells whoever the job is for (the author) and whoever queued it that it
+// won't publish without a retry
+const notifyPublishFailed = (req, job) =>
+  tell(req, [job.owner, job.queuedBy], {
+    type: 'publish_failed',
+    title: `Publishing to ${providerName(job.provider)} failed`,
+    body: `${String(job.lastError || 'It failed').replace(/\.$/, '')}. You can retry it on the Publish jobs page.`,
+    link: '/publish-jobs',
+    data: { jobId: String(job._id), postId: String(job.post?._id ?? job.post), provider: job.provider },
+    email: true,
+  });
+
+const finishJob = async (job, fields, { req, notifyFailure = false } = {}) => {
+  job.set({ lockedAt: null, ...fields });
+  await job.save();
+  if (notifyFailure) await notifyPublishFailed(req, job);
+  return job;
+};
+
+// Runs one queued publish job. It is claimed first (queued → processing in
+// one atomic update), so two runs can never publish the same job twice.
+// `claimed: false` means it wasn't queued (another run has it, or it's done
+// or failed). `req` is the request that ran it (null in the background job).
+// Every time it records (the claim, the post's publishingAt, completedAt,
+// the next retry) is read from the clock when it happens, never the time a
+// queue pass started: a pass runs its jobs one after another, and a lock
+// stamped with an earlier time would look stale while the job still runs.
+const runPublishJob = async (jobId, { req = null } = {}) => {
+  const claimedAt = new Date();
+  const job = await SocialPublishJobV2.findOneAndUpdate(
+    { _id: jobId, status: 'queued' },
+    { $set: { status: 'processing', startedAt: claimedAt, lockedAt: claimedAt }, $inc: { attempts: 1 } },
+    { new: true },
+  );
+  if (!job) {
+    return { success: false, claimed: false, error: 'This job is already being processed or is no longer queued' };
+  }
+
+  // Things a retry can't fix: the job fails at once
+  const fail = async (reason) => {
+    await finishJob(job, { status: 'failed', lastError: reason, completedAt: new Date(), nextRetryAt: null }, { req, notifyFailure: true });
+    return { success: false, error: reason, job };
+  };
+
+  const post = await SocialPost.findById(job.post).populate('author', 'name role teamId');
+  if (!post || !post.author) return fail('The post no longer exists');
+  if (post.approvalStatus === 'pending') return fail('The post is waiting for approval');
+  if (post.approvalStatus === 'rejected') return fail('The post was not approved');
+  if (!isPublishable(post)) return fail(`The post is ${post.moderationStatus}`);
+
+  const claim = await claimTarget(post._id, job.provider);
+  if (claim === 'published') {
+    // Published another way since it was queued (directly, or by another job)
+    await finishJob(job, {
+      status: 'completed',
+      lastError: null,
+      completedAt: new Date(),
+      result: { externalId: post.publishResults?.[job.provider]?.externalId || null, alreadyPublished: true },
+    });
+    return { success: true, job };
+  }
+  if (claim === 'busy') {
+    // Being published there right now: look again shortly, without using up an attempt
+    await finishJob(job, {
+      status: 'queued',
+      attempts: Math.max(0, job.attempts - 1),
+      nextRetryAt: new Date(Date.now() + 60 * 1000),
+      lastError: `The post is being published to ${providerName(job.provider)} right now`,
+    });
+    return { success: false, error: job.lastError, job };
+  }
+
+  const outcome = await publishTarget(post, job.provider, { githubRepo: job.payload?.githubRepo || null });
+  const finishedAt = new Date();
+  if (outcome.status === 'published') {
+    await finishJob(job, {
+      status: 'completed',
+      lastError: null,
+      completedAt: finishedAt,
+      result: { externalId: outcome.externalId, raw: outcome.raw },
+    });
+    return { success: true, job };
+  }
+
+  const outOfAttempts = job.attempts >= job.maxAttempts;
+  await finishJob(job, {
+    status: outOfAttempts ? 'failed' : 'queued',
+    lastError: outcome.message,
+    nextRetryAt: outOfAttempts ? null : new Date(finishedAt.getTime() + backoffMs(job.attempts)),
+    completedAt: outOfAttempts ? finishedAt : null,
+  }, { req, notifyFailure: outOfAttempts });
+  return { success: false, error: outcome.message, job };
+};
+
+// Jobs left in 'processing' for over 10 minutes (their run stopped part-way)
+// go back in the queue with the usual backoff, or fail when their attempts
+// are used up
+const recoverStuckJobs = async (now = new Date(), req = null) => {
+  const cutoff = new Date(now.getTime() - STUCK_AFTER_MS);
+  const stuck = await SocialPublishJobV2.find({
+    status: 'processing',
+    // Jobs from before lockedAt existed have only startedAt
+    $or: [{ lockedAt: { $lt: cutoff } }, { lockedAt: null, startedAt: { $lt: cutoff } }],
+  });
+
+  const recovered = { requeued: 0, failed: 0 };
+  for (const job of stuck) {
+    const outOfAttempts = job.attempts >= job.maxAttempts;
+    const update = outOfAttempts
+      ? { status: 'failed', lastError: 'Publishing stopped part-way and no attempts are left', completedAt: now, nextRetryAt: null, lockedAt: null }
+      : { status: 'queued', lastError: 'Publishing stopped part-way; it will try again', nextRetryAt: new Date(now.getTime() + backoffMs(job.attempts)), lockedAt: null };
+    // Unless the run finished meanwhile
+    const changed = await SocialPublishJobV2.findOneAndUpdate(
+      { _id: job._id, status: 'processing', lockedAt: job.lockedAt },
+      { $set: update },
+      { new: true },
+    );
+    if (!changed) continue;
+    if (outOfAttempts) {
+      recovered.failed += 1;
+      await notifyPublishFailed(req, changed);
+    } else {
+      recovered.requeued += 1;
+    }
+  }
+  return recovered;
+};
+
+// One pass of the publishing queue: recover stuck jobs, then run up to
+// `limit` queued jobs that are due, oldest first, one after another. `now`
+// (the pass's time, which an admin may set outside production) only decides
+// which jobs are stuck and which are due; each job records its own times.
+export const publishDueJobs = async (now = new Date(), limit = 20, req = null) => {
+  const recovered = await recoverStuckJobs(now, req);
+  const due = await SocialPublishJobV2.find({ status: 'queued', nextRetryAt: { $lte: now } })
+    .sort({ nextRetryAt: 1 })
+    .limit(limit)
+    .select('_id');
+
+  const outcomes = [];
+  for (const { _id } of due) {
+    const run = await runPublishJob(_id, { req });
+    // Another run took it first
+    if (run.claimed === false) continue;
+    outcomes.push({ jobId: _id, success: run.success, status: run.job.status, error: run.error || null });
+  }
+  return { recovered, outcomes };
+};
 
 // Answers for a ProviderError (LinkedIn or GitHub failed us), and for a
 // linked account whose token can't be used
@@ -182,7 +767,7 @@ const viewerContext = async (user) => ({
 // endpoints: approve (admin, or the author's leader, never their own), publish
 // (author, admin, author's leader; while approved or not needing approval,
 // not hidden or removed, with somewhere outside Pandav left to publish),
-// edit (author) and delete (author or admin).
+// edit (author) and delete (author or admin; a removed post admin only).
 const postActions = (post, ctx) => {
   const authorId = post.author ? idOf(post.author) : null;
   const isAuthor = authorId !== null && authorId === ctx.userId;
@@ -196,7 +781,7 @@ const postActions = (post, ctx) => {
     canApprove: authorId !== null && post.approvalStatus === 'pending' && live && !isAuthor && (ctx.isAdmin || leadsAuthor),
     canPublish: authorId !== null && (isAuthor || ctx.isAdmin || leadsAuthor) && isPublishable(post) && decided && leftToPublish,
     canEdit: isAuthor && live,
-    canDelete: isAuthor || ctx.isAdmin,
+    canDelete: ctx.isAdmin || (isAuthor && live),
   };
 };
 
@@ -219,7 +804,7 @@ const approversFor = async (authorId) => {
 };
 
 const askForApproval = async (req, post) =>
-  notify(req, await approversFor(idOf(post.author)), {
+  tell(req, await approversFor(idOf(post.author)), {
     type: 'post_approval_needed',
     title: `${req.user.name} asks to share a post on ${targetNames(post.targets)}`,
     body: post.title || snippet(post.content),
@@ -592,10 +1177,16 @@ export const deletePost = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Post not found' });
     }
     const isAuthor = Boolean(post.author) && idOf(post.author) === String(req.user._id);
-    if (!isAuthor && req.user.role !== 'admin') {
+    const isAdmin = req.user.role === 'admin';
+    if (!isAuthor && !isAdmin) {
       return (await canUserViewPost(post, req.user))
         ? res.status(403).json({ success: false, message: 'Only the author or an admin can delete a post' })
         : res.status(404).json({ success: false, message: 'Post not found' });
+    }
+    // A removed post is the record of a moderation decision, which an admin
+    // can still review or undo: only an admin may delete it
+    if (post.moderationStatus === 'removed' && !isAdmin) {
+      return res.status(409).json({ success: false, message: "This post was removed by an admin and can't be deleted" });
     }
 
     await SocialPost.deleteOne({ _id: post._id });
@@ -612,10 +1203,16 @@ export const deletePost = async (req, res) => {
       action: 'social_post_deleted',
       targetType: 'SocialPostV2',
       targetId: post._id,
-      details: { author: post.author ? idOf(post.author) : null, byAuthor: isAuthor, jobsRemoved },
+      details: {
+        author: post.author ? idOf(post.author) : null,
+        byAuthor: isAuthor,
+        jobsRemoved,
+        moderationStatus: post.moderationStatus,
+        moderationReason: post.moderationReason || null,
+      },
     });
     if (!isAuthor && post.author) {
-      await notify(req, [post.author._id], {
+      await tell(req, [post.author._id], {
         type: 'post_moderated',
         title: 'An admin deleted your post',
         body: post.title || snippet(post.content),
@@ -694,7 +1291,7 @@ export const addComment = async (req, res) => {
     const comment = post.comments[post.comments.length - 1];
 
     if (post.author) {
-      await notify(req, [post.author._id], {
+      await tell(req, [post.author._id], {
         type: 'post_comment',
         title: `${req.user.name} commented on your post`,
         body: snippet(comment.text),
@@ -777,7 +1374,7 @@ export const requestConnection = async (req, res) => {
       theirs.status = 'accepted';
       theirs.respondedAt = new Date();
       await theirs.save();
-      await notify(req, [theirs.requester], {
+      await tell(req, [theirs.requester], {
         type: 'connection_accepted',
         title: `${req.user.name} accepted your connection request`,
         link: '/network',
@@ -824,7 +1421,7 @@ export const requestConnection = async (req, res) => {
       targetId: connection._id,
       details: { recipient: userId, again: Boolean(existing) },
     });
-    await notify(req, [userId], {
+    await tell(req, [userId], {
       type: 'connection_request',
       title: `${req.user.name} wants to connect`,
       body: 'Accept or decline the request in your network.',
@@ -869,7 +1466,7 @@ export const respondConnection = async (req, res) => {
 
     // A declined request isn't announced
     if (action === 'accepted') {
-      await notify(req, [connection.requester], {
+      await tell(req, [connection.requester], {
         type: 'connection_accepted',
         title: `${req.user.name} accepted your connection request`,
         link: '/network',
@@ -921,10 +1518,13 @@ export const removeConnection = async (req, res) => {
   }
 };
 
-// The other person in each connection; deactivated and deleted accounts are left out
-const personPopulate = (path) => ({
+// The other person in each connection; deactivated and deleted accounts are
+// left out. Their email only once both have agreed to connect: anyone may send
+// a request, and a pending one would otherwise hand out the email that
+// GET /users/discover keeps to admins.
+const personPopulate = (path, { withEmail = false } = {}) => ({
   path,
-  select: 'name email role profileImage',
+  select: `name role profileImage${withEmail ? ' email' : ''}`,
   match: { isActive: true, deletedAt: null },
 });
 
@@ -936,7 +1536,7 @@ export const getConnections = async (req, res) => {
       NetworkConnection.find({
         $or: [{ requester: req.user._id }, { recipient: req.user._id }],
         status: 'accepted',
-      }).populate(personPopulate('requester')).populate(personPopulate('recipient')),
+      }).populate(personPopulate('requester', { withEmail: true })).populate(personPopulate('recipient', { withEmail: true })),
     ]);
 
     const data = {
@@ -1128,7 +1728,7 @@ export const approvePost = async (req, res) => {
     }
 
     const approved = action === 'approved';
-    await notify(req, [post.author._id], {
+    await tell(req, [post.author._id], {
       type: approved ? 'post_approved' : 'post_rejected',
       title: approved ? `${req.user.name} approved your post` : `${req.user.name} didn't approve your post`,
       body: approved
@@ -1406,6 +2006,8 @@ export const linkProviderAccount = async (req, res) => {
 
     const token = String(accessToken).trim();
     let profile;
+    // From here the provider is asked: a refused token still counts toward the limit
+    keepRateLimitSlot(res);
     try {
       profile = await fetchProfile(provider, token);
     } catch (error) {
@@ -1563,6 +2165,9 @@ export const completeProviderOAuth = async (req, res) => {
 
     let tokenData;
     let profile;
+    // From here the provider is asked, with this server's client secret: a
+    // refused code still counts toward the limit
+    keepRateLimitSlot(res);
     try {
       tokenData = await exchangeOAuthCode(provider, String(code), cfg);
       profile = await fetchProfile(provider, tokenData.accessToken);
@@ -1665,7 +2270,7 @@ export const publishPostToTargets = async (req, res) => {
         claimed.push(provider);
       }
       // Each target's result releases its claim
-      result = await executePublishForPost(post, effectiveTargets, { githubRepo, now });
+      result = await executePublishForPost(post, effectiveTargets, { githubRepo });
     } catch (error) {
       await releaseClaims();
       throw error;
@@ -1817,7 +2422,7 @@ export const processPublishJob = async (req, res) => {
       });
     }
 
-    const runResult = await runPublishJob(job._id, { req, now });
+    const runResult = await runPublishJob(job._id, { req });
     if (runResult.claimed === false) {
       return res.status(409).json({ success: false, message: runResult.error });
     }
@@ -1946,7 +2551,7 @@ export const moderatePost = async (req, res) => {
     const post = await SocialPost.findOneAndUpdate(
       { _id: postId, moderationStatus: { $in: rule.from } },
       { $set: { moderationStatus: rule.to, moderationReason: reason, moderatedBy: req.user._id, moderatedAt: new Date() } },
-      { new: true },
+      { new: true, runValidators: true },
     );
     if (!post) {
       const current = await SocialPost.findById(postId).select('moderationStatus');
@@ -1968,7 +2573,7 @@ export const moderatePost = async (req, res) => {
 
     // Unflagging changes nothing the author can see
     if (rule.title) {
-      await notify(req, [post.author], {
+      await tell(req, [post.author], {
         type: 'post_moderated',
         title: rule.title,
         body: reason ? `${rule.body} Reason: ${reason}` : rule.body,

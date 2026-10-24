@@ -62,9 +62,12 @@ const socialPostSchema = new mongoose.Schema({
     default: 'clean',
     index: true,
   },
+  // Shown to the author, in the post_moderated notification too
   moderationReason: {
     type: String,
     default: null,
+    trim: true,
+    maxlength: 500,
   },
   moderatedBy: {
     type: mongoose.Schema.Types.ObjectId,
@@ -103,7 +106,7 @@ const socialPostSchema = new mongoose.Schema({
       publishedAt: { type: Date, default: null },
       // Set while a request or job is publishing here, so nothing else can
       // publish the post to the same place at the same time (see
-      // utils/socialPublishing.js). A lock older than 10 minutes is ignored.
+      // controllers/socialV2Controller.js). A lock older than 10 minutes is ignored.
       publishingAt: { type: Date, default: null },
     },
     github: {
@@ -113,7 +116,7 @@ const socialPostSchema = new mongoose.Schema({
       publishedAt: { type: Date, default: null },
       // Set while a request or job is publishing here, so nothing else can
       // publish the post to the same place at the same time (see
-      // utils/socialPublishing.js). A lock older than 10 minutes is ignored.
+      // controllers/socialV2Controller.js). A lock older than 10 minutes is ignored.
       publishingAt: { type: Date, default: null },
     },
   },
