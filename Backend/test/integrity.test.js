@@ -168,12 +168,17 @@ test('integrity', async (t) => {
   // ---------- Deleting a user cleans up ----------
   const dave = await register('Dave', 'dave3@test.com');
   await call('POST', '/attendance/checkin', { token: dave.token });
-  await call('POST', '/chat/send', { token: dave.token, body: { receiverId: bob._id, message: 'bye' } });
+  await connect(dave, bob);
+  const bye = await call('POST', '/chat/send', { token: dave.token, body: { receiverId: bob._id, message: 'bye' } });
+  await check('setup: Dave messages Bob', bye.status === 201, JSON.stringify(bye.data));
   const daveTask = await call('POST', '/tasks', { token: adminToken, body: { title: 'Pair', description: 'd', assignedTo: [dave._id, bob._id], startDate: '2026-10-01', dueDate: '2026-10-30' } });
   await check('admin deletes user', (await call('DELETE', `/users/${dave._id}`, { token: adminToken })).status === 200);
   const daveId = new mongoose.Types.ObjectId(dave._id);
   await check('their attendance is removed', (await db.collection('attendances').countDocuments({ user: daveId })) === 0);
-  await check('their messages are removed', (await db.collection('chats').countDocuments({ $or: [{ sender: daveId }, { receiver: daveId }] })) === 0);
+  // Messages are the other person's conversation too: they stay, from "Deleted user"
+  const bobsChat = (await call('GET', `/chat/messages/${dave._id}`, { token: bob.token })).data.data;
+  await check('their messages stay in the other person\'s conversation',
+    bobsChat.length === 1 && bobsChat[0].message === 'bye' && bobsChat[0].sender.name === 'Deleted user', JSON.stringify(bobsChat));
   const pair = (await call('GET', `/tasks/${daveTask.data.data._id}`, { token: adminToken })).data.data;
   await check('shared task kept, user unassigned with their progress', pair.assignedTo.length === 1 && pair.assignedTo[0]._id === bob._id && pair.assigneeProgress.length === 1);
 });

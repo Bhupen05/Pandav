@@ -151,15 +151,20 @@ ticket instead:
    the frontend reads it from `VITE_BACKEND_URL`), not to the frontend's `/api` proxy: Vercel
    can't proxy WebSockets. Pass the ticket as `auth.token`. Socket.io's CORS setting allows the
    same origins as the API.
-3. The server verifies the ticket. The user must exist and be active, and their password must not
-   have changed since the ticket was issued. Otherwise the connection is refused and the client
-   gets `connect_error` with the message `Not authorized`.
+3. The server verifies the ticket. The user must exist, be active and not deleted, their password
+   must not have changed since the ticket was issued, and the session it came from must still
+   work (the ticket carries its session id and version: it is refused after signing out
+   everywhere or deactivation). Otherwise the connection is refused and the client gets
+   `connect_error` with the message `Not authorized`.
 4. The socket joins a room named after the user's id, taken from the ticket and never from the
    client. Every socket the user has open (one per tab) is in that room, so events sent to a user
    reach all their tabs. The socket then gets its first `update_active_users` (see
    [Who is online](#who-is-online)).
 
-The ticket is checked only when connecting: an open socket stays open after it expires. Each
+The ticket is checked only when connecting: an open socket stays open after it expires, until
+the session ends. Signing out closes that browser's sockets, signing out everywhere or a password
+reset closes all of the user's sockets, and changing the password closes those of the user's
+other browsers. Each
 reconnect needs a new ticket, so pass `auth` as a function, as the frontend does:
 
 ```js

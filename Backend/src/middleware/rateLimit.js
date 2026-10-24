@@ -82,6 +82,8 @@ export const accountSecurityLimiter = createRateLimiterV2({
   keyPrefix: 'account-security',
   windowMs: 15 * 60 * 1000,
   max: 20,
+  // Wrong passwords and codes are what this limit is for
+  countRefused: true,
 });
 
 // For routes that check the password only sometimes (PUT /users/:id checks

@@ -13,7 +13,7 @@ import { keepRateLimitSlot } from '../middleware/rateLimitV2.js';
 import { logAuditEventV2 } from '../utils/auditLoggerV2.js';
 import { blockedUserIds, isBlockedBetween } from '../utils/blocks.js';
 import { escapeRegex, pick, sendServerError } from '../utils/http.js';
-import { directMessageProblem } from '../utils/messaging.js';
+import { contactsChanged, directMessageProblem } from '../utils/messaging.js';
 import { adminIds, notify } from '../utils/notify.js';
 import { canReviewFor, ledUserIds, teamUserIds } from '../utils/teams.js';
 
@@ -1287,7 +1287,7 @@ export const addComment = async (req, res) => {
 
     post.comments.push({ user: req.user._id, text: text.trim() });
     await post.save();
-    await post.populate('comments.user', 'name email role profileImage');
+    await post.populate(commenterPopulate);
     const comment = post.comments[post.comments.length - 1];
 
     if (post.author) {
@@ -1374,6 +1374,8 @@ export const requestConnection = async (req, res) => {
       theirs.status = 'accepted';
       theirs.respondedAt = new Date();
       await theirs.save();
+      // Connections may message each other: whom they see online changes
+      contactsChanged([theirs.requester, theirs.recipient]);
       await tell(req, [theirs.requester], {
         type: 'connection_accepted',
         title: `${req.user.name} accepted your connection request`,
@@ -1463,6 +1465,7 @@ export const respondConnection = async (req, res) => {
     connection.status = action;
     connection.respondedAt = new Date();
     await connection.save();
+    if (action === 'accepted') contactsChanged([connection.requester, connection.recipient]);
 
     // A declined request isn't announced
     if (action === 'accepted') {
@@ -1503,6 +1506,7 @@ export const removeConnection = async (req, res) => {
     }
 
     await connection.deleteOne();
+    if (connection.status === 'accepted') contactsChanged([connection.requester, connection.recipient]);
     await logAuditEventV2(req, {
       action: 'social_connection_removed',
       targetType: 'NetworkConnectionV2',

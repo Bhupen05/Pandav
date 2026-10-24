@@ -24,7 +24,9 @@ export const keepRateLimitSlot = (res) => {
 // not allowed, refused by the messaging rule, ...) gives its slot back when
 // its response finishes, so mistakes don't lock anyone out, unless it was
 // let through to the work it was limited for (keepRateLimitSlot).
-export const createRateLimiterV2 = ({ keyPrefix, windowMs, max }) => {
+// `countRefused: true` keeps every slot: for limits on guessing (a wrong
+// password is exactly the request they must count).
+export const createRateLimiterV2 = ({ keyPrefix, windowMs, max, countRefused = false }) => {
   return (req, res, next) => {
     const now = Date.now();
     const key = getKey(req, keyPrefix);
@@ -45,6 +47,7 @@ export const createRateLimiterV2 = ({ keyPrefix, windowMs, max }) => {
     }
 
     entry.count += 1;
+    if (countRefused) return next();
     res.once('finish', () => {
       const refused = res.statusCode >= 400 && res.statusCode !== 429 && !res.locals.keepRateLimitSlot;
       // Only within the same window: a new window started without this request

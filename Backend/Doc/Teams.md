@@ -25,7 +25,7 @@ Every document also has `_id` and Mongoose's version key `__v`.
 |-------|------|-------|
 | `name` | String | Required, trimmed, at most 80 characters, unique (exact, case-sensitive match) |
 | `description` | String | Optional, trimmed, at most 500 characters |
-| `leaders` | [ObjectId → User] | Never without a leader who can sign in: the endpoints refuse to remove a team's last active leader or let them leave (other leaders who are deactivated or deleted don't count), and refuse to delete the account of its only leader |
+| `leaders` | [ObjectId → User] | Never without a leader who can sign in: the endpoints refuse to remove a team's last active leader or let them leave (other leaders who are deactivated or deleted don't count), and refuse to deactivate or delete the account of its only leader |
 | `members` | [ObjectId → User] | Members who aren't leaders. A member promoted to leader moves to `leaders` |
 | `createdBy` | ObjectId → User | Required. The admin who created the team, or the user who created it for themselves |
 | `isActive` | Boolean | Default `true`; `false` means the team is frozen. Only admins change it (see [Frozen teams](#frozen-teams)) |

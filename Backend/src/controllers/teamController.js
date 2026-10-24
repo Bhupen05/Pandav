@@ -9,6 +9,7 @@ import { escapeRegex, listResponse, pick, sendServerError } from '../utils/http.
 import { notify } from '../utils/notify.js';
 import { logAuditEventV2 } from '../utils/auditLoggerV2.js';
 import { blockedUserIds, isBlockedBetween } from '../utils/blocks.js';
+import { contactsChanged } from '../utils/messaging.js';
 import { FROZEN_TEAM_MESSAGE, findTeamToManage, isInAnyTeam, isTeamLeader, teamUserIds } from '../utils/teams.js';
 
 const TEAM_ROLES = ['team_leader', 'team_member'];
@@ -143,14 +144,15 @@ const lengthProblem = (name, description) => {
 // Takes someone who just left a team (or was removed) back to a plain user:
 // only a team role is taken away, only while they aren't in another team, and
 // their open team tasks no longer wait on them. Finished ones keep them as
-// the record of who did the work.
-const releaseFromTeam = async (userId, teamId) => {
+// the record of who did the work. `by` is who made the change, for the
+// tasks' history.
+const releaseFromTeam = async (userId, teamId, by) => {
   await User.updateOne(
     { _id: userId, role: { $in: TEAM_ROLES }, teamId: { $in: [teamId, null] } },
     { $set: { role: 'user' } }
   );
   await User.updateOne({ _id: userId, teamId }, { $set: { teamId: null } });
-  await Task.unassignUser(userId, { team: teamId });
+  await Task.unassignUser(userId, { team: teamId }, { by });
 };
 
 // Puts an invite whose acceptance couldn't finish back to pending
@@ -425,6 +427,8 @@ export const updateTeam = async (req, res) => {
       }
       // Only a change of state is announced, not a repeated freeze
       if (changes.isActive !== undefined && before.isActive !== changes.isActive) {
+        // A frozen team's members can't message each other as teammates
+        contactsChanged(teamUserIds(after));
         await notifyFreeze(req, after, !changes.isActive);
         await logAuditEventV2(req, {
           action: changes.isActive ? 'team_unfrozen' : 'team_frozen',
@@ -470,6 +474,7 @@ export const deleteTeam = async (req, res) => {
       Attendance.updateMany({ team: team._id }, { $set: { team: null } }),
     ]);
 
+    contactsChanged(allUserIds);
     await notify(req, allUserIds, {
       type: 'team_deleted',
       title: `${team.name} was deleted`,
@@ -847,6 +852,7 @@ export const acceptInvite = async (req, res) => {
       return res.status(400).json({ success: false, message: stillThere ? FROZEN_TEAM_MESSAGE : TEAM_GONE_MESSAGE });
     }
 
+    contactsChanged(teamUserIds(joined));
     await notify(req, joined.leaders, {
       type: 'team_invite_accepted',
       title: `${req.user.name} joined ${joined.name}`,
@@ -965,7 +971,9 @@ export const leaveTeam = async (req, res) => {
       if (!updated) return res.status(404).json({ success: false, message: 'You are not in this team' });
     }
 
-    await releaseFromTeam(userId, team._id);
+    await releaseFromTeam(userId, team._id, req.user._id);
+    // Teammates may message each other: whom they see online changes
+    contactsChanged([...teamUserIds(team), userId]);
 
     await notify(req, updated.leaders, {
       type: 'team_member_left',
@@ -1039,7 +1047,9 @@ export const removeMember = async (req, res) => {
         : res.status(404).json({ success: false, message: 'User is not in this team' });
     }
 
-    await releaseFromTeam(userId, team._id);
+    await releaseFromTeam(userId, team._id, req.user._id);
+    // Teammates may message each other: whom they see online changes
+    contactsChanged([...teamUserIds(team), userId]);
 
     await notify(req, userId, {
       type: 'team_removed',

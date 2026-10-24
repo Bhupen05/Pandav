@@ -122,6 +122,9 @@ async function seedPeople() {
     teamId: person.team ? teams[person.team]._id : null,
     department: person.department,
     isActive: person.isActive ?? true,
+    // Confirmed, so EMAIL_VERIFICATION_REQUIRED doesn't lock the demo accounts out
+    emailVerified: true,
+    emailVerifiedAt: at(-45),
     createdAt: at(-45),
   })));
 

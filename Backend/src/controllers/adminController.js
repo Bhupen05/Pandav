@@ -279,7 +279,7 @@ export const getStats = async (req, res) => {
     const [
       roles, activeUsers, teams, frozenTeams,
       taskStatuses, overdue, awaitingReview,
-      checkedInToday, pendingAttendance,
+      checkedInToday, pendingAttendance, corrections,
       contactStatuses, flagged, pendingApproval,
     ] = await Promise.all([
       User.aggregate([{ $match: liveAccounts }, ...countBy('role')]),
@@ -295,6 +295,8 @@ export const getStats = async (req, res) => {
       }),
       Attendance.countDocuments({ day: today, checkInTime: { $ne: null } }),
       Attendance.countDocuments({ approvalStatus: 'pending' }),
+      // Asked-for fixes to a missed check-out (the record itself may be reviewed already)
+      Attendance.countDocuments({ 'correctionRequest.requestedAt': { $ne: null } }),
       Contact.aggregate(countBy('status')),
       SocialPost.countDocuments({ moderationStatus: 'flagged' }),
       SocialPost.countDocuments({ approvalStatus: 'pending' }),
@@ -307,7 +309,7 @@ export const getStats = async (req, res) => {
         users: { total: Object.values(byRole).reduce((sum, n) => sum + n, 0), active: activeUsers, byRole },
         teams: { total: teams, frozen: frozenTeams },
         tasks: { byStatus: countsFor(TASK_STATUSES, taskStatuses), overdue, awaitingReview },
-        attendance: { checkedInToday, pendingReviews: pendingAttendance },
+        attendance: { checkedInToday, pendingReviews: pendingAttendance, correctionRequests: corrections },
         contact: { byStatus: countsFor(CONTACT_STATUSES, contactStatuses) },
         social: { flagged, pendingApproval },
       },

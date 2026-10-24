@@ -43,6 +43,14 @@ the timers off; the jobs can then still be run by hand.
 | `GET /admin/jobs` | Each job's `name`, how often it runs (`everyMinutes`), whether it is `running`, and `lastRunAt`, `lastResult`, `lastError` |
 | `POST /admin/jobs/:name/run` | Runs it now and returns what it did. Unknown names answer `404`. Outside production, `{ "now": "2026-10-24T18:00:00Z" }` runs it as if it were that time |
 
+| Job | Runs | Does |
+|---|---|---|
+| `social-publish` | Every minute | Puts publish jobs stuck in `processing` back in the queue (or fails them), then publishes queued posts that are due ([SocialHub.md](SocialHub.md)) |
+| `task-reminders` | Every 15 minutes | Due-soon and overdue reminders for open tasks ([Tasks.md](Tasks.md)) |
+| `task-recurrence` | Every 30 minutes | Creates the next occurrence of repeating tasks ([Tasks.md](Tasks.md)) |
+| `attendance-missed-checkout` | Every hour | Marks days left without a check-out and tells their owner ([Attendance.md](Attendance.md)) |
+| `attendance-auto-absent` | Every hour | When turned on in the attendance settings, records absences for the previous workday ([Attendance.md](Attendance.md)) |
+
 Running a job by hand is recorded in the audit log (`admin_job_run`).
 
 ## Audit log
@@ -128,7 +136,7 @@ download every task and record:
       "overdue": 4,
       "awaitingReview": 5
     },
-    "attendance": { "checkedInToday": 18, "pendingReviews": 6 },
+    "attendance": { "checkedInToday": 18, "pendingReviews": 6, "correctionRequests": 1 },
     "contact": { "byStatus": { "new": 2, "in-progress": 1, "resolved": 10, "closed": 0 } },
     "social": { "flagged": 1, "pendingApproval": 2 }
   }
@@ -145,6 +153,7 @@ download every task and record:
 | `tasks.awaitingReview` | Open tasks someone has asked to have approved: the task is `completion-requested`, or at least one assignee has asked |
 | `attendance.checkedInToday` | Records for today (in the app's timezone) with a check-in time |
 | `attendance.pendingReviews` | Attendance records waiting for review |
+| `attendance.correctionRequests` | Missed check-outs whose owner asked for the time to be fixed |
 | `contact.byStatus` | Contact messages in each status |
 | `social.flagged` | Social Hub posts flagged for moderation |
 | `social.pendingApproval` | Social Hub posts waiting for a reviewer's approval |

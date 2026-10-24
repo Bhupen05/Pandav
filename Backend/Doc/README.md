@@ -4,11 +4,11 @@ Reference for the backend's HTTP API and its real-time events. Each module has i
 
 | Page | Covers |
 |------|--------|
-| [Users.md](Users.md) | Registration, sign-in, sessions, profiles, user administration |
-| [Tasks.md](Tasks.md) | Tasks, per-assignee progress, completion approval, leaderboard |
-| [Attendance.md](Attendance.md) | Check-in/out, one record per person per day, approval |
-| [Teams.md](Teams.md) | Teams, invites, membership rules, team tasks and attendance |
-| [Chat.md](Chat.md) | Direct and team chat, read receipts, Socket.io events |
+| [Users.md](Users.md) | Registration, sign-in, two-step sign-in, sessions, password resets, email verification, profiles, deleting an account, user administration |
+| [Tasks.md](Tasks.md) | Tasks and team tasks, per-assignee progress, review, cancel and reopen, history, comments, files, checklists, repeating tasks, reminders, summary, leaderboard |
+| [Attendance.md](Attendance.md) | Check-in/out, team attendance, leave and balances, settings and holidays, reviews, missed check-outs, summaries, export |
+| [Teams.md](Teams.md) | Teams, invites, membership, leaving a team, freezing |
+| [Chat.md](Chat.md) | Direct and team chat, conversations, unread counts, editing and deleting, blocks, reports, presence, Socket.io events |
 | [SocialHub.md](SocialHub.md) | Feed, posts, publishing to LinkedIn/GitHub, connections, personal tasks |
 | [Contact.md](Contact.md) | The public contact form (field limits, honeypot) and the admin inbox: search, statuses, replies by email |
 | [Notifications.md](Notifications.md) | Notifications: stored, live over the socket, optionally emailed |
@@ -59,13 +59,21 @@ curl -c cookies.txt -X POST http://localhost:5000/api/v2/auth/login \
 curl -b cookies.txt http://localhost:5000/api/v2/auth/me
 ```
 
-A session stops working when it expires, when the user signs out (that browser only), when the
-password is changed or reset (every session), or when the account is deactivated or deleted.
-The response is then `401`.
+A session stops working when it expires, when the user signs out (that browser only) or signs
+out everywhere (`POST /auth/logout-all`), when the password is changed (every other session) or
+reset by an admin or by email (every session), or when the account is deactivated or deleted.
+The response is then `401`. Deactivation ends sessions for good: reactivating the account doesn't
+bring them back.
+
+After an admin resets someone's password, every route except a few listed in
+[Users.md](Users.md) answers `403` with `code: "PASSWORD_CHANGE_REQUIRED"` until they choose
+their own.
 
 Socket.io connections can't use the cookie (the socket server is reached directly, not through
 the frontend's proxy). They authenticate with a one-minute ticket from
-`POST /api/v2/auth/socket-token`; see [Chat.md](Chat.md).
+`POST /api/v2/auth/socket-token`, which is refused once the session it came from has ended; see
+[Chat.md](Chat.md). Signing out closes that browser's sockets; changing the password closes the
+other browsers' sockets.
 
 ## Roles
 
@@ -120,8 +128,9 @@ Responses are sent with `Cache-Control: no-store`.
 
 ## Lists and paging
 
-These lists page when asked: `GET /tasks`, `GET /tasks/pending-approval`, `GET /attendance`,
-`GET /users` and `GET /contact`.
+These lists page when asked: `GET /tasks`, `GET /tasks/pending-approval`,
+`GET /teams/:teamId/tasks`, `GET /teams/:teamId/tasks/pending-approval`, `GET /attendance`,
+`GET /users`, `GET /teams` and `GET /contact`.
 Without `page` they return every match:
 
 ```json
@@ -140,9 +149,10 @@ With `?page=2&limit=20` (`limit` defaults to 50, at most 200) they return one pa
 ```
 
 Chat conversations, team chats and the Social Hub feed page differently, 50 at a time: the first
-page is the latest 50, `?before=<date of the oldest item shown>` loads the 50 before that, and
-`hasMore` says whether there are older ones. Within a page, chat messages are oldest first and
-feed posts newest first.
+page is the latest 50, `?before=<date of the oldest item shown>&beforeId=<its _id>` loads the 50
+before that, and `hasMore` says whether there are older ones. The date and the id are compared
+together, so items from the same millisecond are never skipped; `before` alone still works.
+Within a page, chat messages are oldest first and feed posts newest first.
 
 Notifications and the admins' audit log page by id instead: newest first, `?before=<_id of the
 oldest item shown>` loads the page before it, and `hasMore` says whether there is one. See
@@ -152,14 +162,23 @@ oldest item shown>` loads the page before it, and `hasMore` says whether there i
 
 | What | Limit | Counted per |
 |------|-------|-------------|
-| `POST /auth/login` | 10 failed attempts per 15 minutes (successful sign-ins don't count) | Address |
+| `POST /auth/login` and `POST /auth/2fa/verify` | 10 failed attempts per 15 minutes (successful sign-ins don't count) | Address |
+| Wrong codes at the second sign-in step | 10 per 15 minutes | Account |
 | `POST /auth/register` | 10 per hour | Address |
+| `POST /auth/forgot-password` | 5 per hour | Address |
+| New verification links (`POST /auth/resend-verification`) | 5 per hour | Address |
+| Checking the password or a sign-in code while signed in (changing the password or your own email, two-step sign-in settings, deleting the account) | 20 per 15 minutes, failures included | User |
+| `GET /users/search` | 60 per minute | User |
 | `POST /contact` | 5 per hour | Address |
+| Team invites | 30 per hour | Team |
 | Social Hub writes | 30 per minute | User |
-| Direct messages: `POST /chat/send` and `POST /social/messages`, counted together | 45 per minute | User |
+| Direct messages: `POST /chat/send`, `PATCH /chat/messages/:id` and `POST /social/messages`, counted together | 45 per minute | User |
+| Message reports (direct and team) | 20 per hour | User |
 | Social Hub account linking and OAuth | 10 per minute | User |
 
-The limits live in the server's memory, so they reset on restart and assume a single instance.
+Except where it says "failures included", a request that is refused (bad input, not allowed)
+gives its place back, so mistakes don't use up a limit. The limits live in the server's memory,
+so they reset on restart and assume a single instance.
 
 ## Input handling
 

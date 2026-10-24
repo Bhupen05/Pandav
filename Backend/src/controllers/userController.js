@@ -5,11 +5,9 @@ import Task from '../models/Task.js';
 import Attendance from '../models/Attendance.js';
 import AuthToken from '../models/AuthToken.js';
 import Block from '../models/Block.js';
-import Chat from '../models/Chat.js';
 import Notification from '../models/Notification.js';
 import Team from '../models/Team.js';
 import TeamInvite from '../models/TeamInvite.js';
-import TeamChatMessage from '../models/TeamChatMessage.js';
 import SocialPost from '../models/SocialPostV2.js';
 import SocialIntegration from '../models/SocialIntegrationV2.js';
 import SocialPublishJob from '../models/SocialPublishJobV2.js';
@@ -97,14 +95,15 @@ const deleteAccount = async (user) => {
   await Task.unassignUser(id);
   await Promise.all([
     Attendance.deleteMany({ user: id }),
-    Chat.deleteMany({ $or: [{ sender: id }, { receiver: id }] }),
+    // Direct and team messages stay: they are the other people's
+    // conversations too, and show as from "Deleted user"
     Team.updateMany(
       { $or: [{ leaders: id }, { members: id }] },
       { $pull: { leaders: id, members: id } }
     ),
-    TeamInvite.deleteMany({ $or: [{ invitedUser: id }, { invitedBy: id }] }),
-    TeamChatMessage.deleteMany({ sender: id }),
-    TeamChatMessage.updateMany({ 'readBy.user': id }, { $pull: { readBy: { user: id } } }),
+    // Invites to them go; invites they sent stay in their team's history
+    TeamInvite.deleteMany({ invitedUser: id }),
+    TeamInvite.updateMany({ invitedBy: id, status: 'pending' }, { $set: { status: 'withdrawn' } }),
     // Social Hub: their posts, linked accounts (and stored tokens), jobs,
     // personal tasks and connections go; their likes and comments too
     SocialPost.deleteMany({ author: id }),
