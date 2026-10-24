@@ -576,6 +576,13 @@ test('the contact inbox: search, sort, counts and status', async (t) => {
   await check('an unknown status is refused', invalid.status === 400 && invalid.data.message === 'Invalid status', JSON.stringify(invalid.data));
   await check('an unknown message is a 404',
     (await call('PUT', `/contact/${new mongoose.Types.ObjectId()}`, { token: adminToken, body: { status: 'closed' } })).status === 404);
+  const { insertedId: legacyId } = await contacts.insertOne(message(30, {
+    name: 'L'.repeat(150), email: 'legacy@admin9.test', subject: 'From before the limits', message: 'x'.repeat(6000),
+  }));
+  const legacy = await call('PUT', `/contact/${legacyId}`, { token: adminToken, body: { status: 'closed' } });
+  await check('a message from before the limits can still be handled', legacy.status === 200 && legacy.data.data.status === 'closed',
+    JSON.stringify(legacy.data).slice(0, 200));
+  await contacts.deleteOne({ _id: legacyId });
   const changes = await db.collection('auditeventv2').find({ action: 'contact_status_changed', targetId: visitor._id }).sort({ _id: 1 }).toArray();
   await check('each change is in the audit log, once', changes.length === 2 && changes[0].details.from === 'new' &&
     changes[0].details.to === 'resolved' && changes[1].details.to === 'in-progress', JSON.stringify(changes.map((c) => c.details)));

@@ -168,7 +168,8 @@ export const updateContact = async (req, res) => {
         contact.resolvedBy = undefined;
         contact.resolvedAt = undefined;
       }
-      await contact.save();
+      // Messages sent before the field limits may be longer; they can still be handled
+      await contact.save({ validateModifiedOnly: true });
 
       await logAuditEventV2(req, {
         action: 'contact_status_changed',
@@ -226,7 +227,7 @@ export const replyToContact = async (req, res) => {
     // sender actually received
     contact.replies.push({ by: req.user._id, message: message.trim(), at: new Date(), sent });
     if (contact.status === 'new') contact.status = 'in-progress';
-    await contact.save();
+    await contact.save({ validateModifiedOnly: true });
 
     await logAuditEventV2(req, {
       action: 'contact_replied',

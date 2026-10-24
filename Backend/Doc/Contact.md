@@ -27,6 +27,9 @@ Paths on this page are under `/api/v2`.
 
 A deleted admin account shows as `Deleted user` in `resolvedBy` and `replies[].by`.
 
+The length limits apply to new messages. Messages sent before them keep their text in full, and
+their status can still be changed and they can still be replied to.
+
 ## Endpoints
 
 | Method | Path | Who may call | Does |
