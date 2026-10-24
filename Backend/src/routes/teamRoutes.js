@@ -8,6 +8,10 @@ import {
   updateTeam,
   deleteTeam,
   inviteMember,
+  getInviteCandidates,
+  getTeamInvites,
+  withdrawInvite,
+  leaveTeam,
   removeMember,
   addLeader,
   acceptInvite,
@@ -37,8 +41,15 @@ router.route('/:id')
   .put(protect, adminOrLeader, isLeaderOfTeam, updateTeam)
   .delete(protect, authorize('admin'), deleteTeam);
 
-// ── Member management ─────────────────────────────────────────────────────────
+// ── Invites a team sends ──────────────────────────────────────────────────────
+// The handlers check who may call them (the team's leaders, admins)
 router.post('/:teamId/invite', protect, adminOrLeader, isLeaderOfTeam, inviteMember);
+router.get('/:teamId/invite-candidates', protect, getInviteCandidates);
+router.get('/:teamId/invites', protect, getTeamInvites);
+router.delete('/:teamId/invites/:inviteId', protect, withdrawInvite);
+
+// ── Member management ─────────────────────────────────────────────────────────
+router.post('/:teamId/leave', protect, leaveTeam);
 router.post('/:teamId/leaders', protect, authorize('admin'), addLeader);
 router.delete('/:teamId/members/:userId', protect, adminOrLeader, removeMember);
 
