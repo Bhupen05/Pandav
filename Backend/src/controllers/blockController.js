@@ -4,7 +4,7 @@ import NetworkConnection from '../models/NetworkConnectionV2.js';
 import User from '../models/User.js';
 import { logAuditEventV2 } from '../utils/auditLoggerV2.js';
 import { sendServerError } from '../utils/http.js';
-import { refreshPresenceFor } from '../utils/presence.js';
+import { contactsChanged } from '../utils/messaging.js';
 
 // A block works both ways: neither person can message the other, see the
 // other typing or online, or ask to connect (utils/blocks.js). The person
@@ -27,11 +27,13 @@ export const blockUser = async (req, res) => {
     if (typeof userId !== 'string' || !mongoose.isObjectIdOrHexString(userId)) {
       return res.status(400).json({ success: false, message: 'Invalid user' });
     }
-    if (userId === req.user._id.toString()) {
+    // Ids can come spelt in capitals; the caller's own id is lower case
+    const otherId = userId.toLowerCase();
+    if (otherId === req.user._id.toString()) {
       return res.status(400).json({ success: false, message: 'You cannot block yourself' });
     }
 
-    const target = await User.findOne({ _id: userId, deletedAt: null }).select('name role profileImage');
+    const target = await User.findOne({ _id: otherId, deletedAt: null }).select('name role profileImage');
     if (!target) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -72,7 +74,7 @@ export const blockUser = async (req, res) => {
     }
 
     // Each stops seeing the other online, and typing stops at once
-    refreshPresenceFor([req.user._id, target._id]);
+    contactsChanged([req.user._id, target._id]);
 
     return res.status(created ? 201 : 200).json({
       success: true,
@@ -90,11 +92,11 @@ export const blockUser = async (req, res) => {
 // @access  Private
 export const unblockUser = async (req, res) => {
   try {
-    const { userId } = req.params;
-
-    if (!mongoose.isObjectIdOrHexString(userId)) {
+    if (!mongoose.isObjectIdOrHexString(req.params.userId)) {
       return res.status(400).json({ success: false, message: 'Invalid user' });
     }
+    // Sockets' rooms and the audit log use lower-case ids
+    const userId = req.params.userId.toLowerCase();
 
     const { deletedCount } = await Block.deleteOne({ blocker: req.user._id, blocked: userId });
     if (deletedCount === 0) {
@@ -107,7 +109,7 @@ export const unblockUser = async (req, res) => {
       targetId: userId,
     });
 
-    refreshPresenceFor([req.user._id, userId]);
+    contactsChanged([req.user._id, userId]);
 
     return res.json({ success: true, message: 'Unblocked' });
   } catch (error) {
@@ -115,16 +117,17 @@ export const unblockUser = async (req, res) => {
   }
 };
 
-// @desc    The people the current user has blocked, most recent first
+// @desc    The people the current user has blocked, most recent first.
+//          Deactivated accounts are listed (the block stays if the account
+//          comes back, so it can be lifted here); deleted ones are not.
 // @route   GET /api/v2/chat/blocks
 // @access  Private
 export const getBlockedUsers = async (req, res) => {
   try {
     const blocks = await Block.find({ blocker: req.user._id })
       .sort({ createdAt: -1 })
-      .populate({ path: 'blocked', select: 'name profileImage', match: { deletedAt: null, isActive: true } });
+      .populate({ path: 'blocked', select: 'name profileImage', match: { deletedAt: null } });
 
-    // Deleted and deactivated accounts are left out
     const data = blocks
       .filter((block) => block.blocked)
       .map((block) => blockedPerson(block.blocked, block.createdAt));

@@ -73,9 +73,18 @@ One block per pair and direction. A block works both ways: see [Blocks](#blocks)
 
 ### Deleted accounts and teams
 
-Deleting a team deletes its messages. A deleted account is kept, anonymised and deactivated (see
-[Users.md](Users.md)), so its direct and team messages stay where they are: they show the sender
-as "Deleted user". Nobody can message a deleted account.
+Deleting a team deletes its messages.
+
+Deleting an account (see [Users.md](Users.md)) currently deletes its messages too: every direct
+message the person sent or received, and every team message they sent. Their conversations
+disappear from the other people's [conversations list](#list-conversations) rather than staying.
+Keeping them is a change to account deletion, not to the chat.
+
+Wherever messages from a deleted account remain (for example an account marked deleted with
+`deletedAt` while its messages were kept, or messages whose sender no longer exists), the chat
+shows the person as "Deleted user": the conversations list gives `"name": "Deleted user"`,
+`deleted: true` and hides their role, department and picture. Nobody can message a deleted or
+deactivated account (`404 Recipient not found`), and nobody can block a deleted one.
 
 ## Who can message whom
 
@@ -180,6 +189,9 @@ is never in the list, and neither is anyone blocked either way round.
   are sent together, at most once a second; a socket whose list didn't change gets nothing.
 - A socket's contacts are looked up when it connects, and again once they are 5 minutes old, so a
   new connection or a team change shows within about 5 minutes.
+- If a lookup fails (a database error, say), the socket keeps the list it had and the lookup is
+  tried again about every 5 seconds until it works. A socket whose very first lookup failed gets
+  no `update_active_users` until then.
 - Blocking and unblocking (`POST /chat/blocks`, `DELETE /chat/blocks/:userId`) update both people's
   sockets at once.
 - After something that changes whom the user may message (accepting a connection, joining or
@@ -392,6 +404,10 @@ Replaces the text and sets `isEdited: true` and `editedAt`. Both people's socket
 `message_updated` with the message. Sending the same text again changes nothing and sends no
 event. Returns the message.
 
+The new text is stored only if the message is still not deleted at that moment, so an edit that
+races a delete (from another tab) can't bring the deleted text back: it gets
+`409 This message was deleted` instead.
+
 | Status | Message |
 |--------|---------|
 | `400` | `Message cannot be empty` |
@@ -529,7 +545,8 @@ For the nav badge and the chat lists:
 `GET /api/v2/chat/blocks`
 
 **Who:** any signed-in user. Lists the people the caller blocked (not the people who blocked the
-caller), the most recent block first. Deleted and deactivated accounts are left out.
+caller), the most recent block first. Deactivated accounts are listed: their block still applies
+if the account is reactivated, so it can be lifted here. Deleted accounts are left out.
 
 ```json
 {
@@ -565,7 +582,7 @@ changes nothing else and returns `200`.
 | Status | Message |
 |--------|---------|
 | `400` | `Invalid user` (`userId` missing or not an id) |
-| `400` | `You cannot block yourself` |
+| `400` | `You cannot block yourself` (ids are compared regardless of letter case) |
 | `404` | `User not found` (no such account, or it was deleted) |
 | `400` | `Admins can't be blocked` |
 
@@ -763,7 +780,8 @@ In a frozen team only an admin can edit (their own messages).
 Replaces the text and sets `isEdited: true` and `editedAt`. Every leader and member of the team
 gets `team_message_updated` with the message, populated as in
 [Send a team message](#send-a-team-message). Sending the same text again changes nothing and sends
-no event. Returns the message.
+no event. Returns the message. As for direct messages, an edit that races a delete (by a leader or
+an admin) gets `409 This message was deleted` and never brings the deleted text back.
 
 | Status | Message |
 |--------|---------|

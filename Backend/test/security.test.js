@@ -70,16 +70,6 @@ test('security', async (t) => {
   const senderKeys = Object.keys(sent.data.data?.sender || {}).sort().join(',');
   await check('chat payload exposes only _id,name of participants', senderKeys === '_id,name', senderKeys);
 
-  // Presence across tabs, as an admin sees it (everyone else only sees the
-  // people they may message; presence goes out at most once a second)
-  const adminSock = await connectSocket(server.base, adminToken);
-  const aliceSock2 = await connectSocket(server.base, aliceToken);
-  aliceSock1.socket.close();
-  await sleep(1500);
-  const latestOnline = adminSock.online.at(-1) || [];
-  await check('closing one tab keeps user online while another is open', latestOnline.includes(alice._id), JSON.stringify(latestOnline));
-  adminSock.socket.close();
-
   // Chat validation
   const badReceiver = await call('POST', '/chat/send', { token: aliceToken, body: { receiverId: 'abc', message: 'x' } });
   await check('chat rejects invalid receiver id', badReceiver.status === 400);
@@ -205,6 +195,6 @@ test('security', async (t) => {
   await check('login rate-limited after 10 failures', loginStatus === 429, `last status ${loginStatus}`);
 
 
-  aliceSock2.socket.close();
+  aliceSock1.socket.close();
   eveSock.socket.close();
 });

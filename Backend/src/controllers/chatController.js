@@ -1,6 +1,5 @@
 import mongoose from 'mongoose';
-import Chat from '../models/Chat.js';
-import { MAX_REPORT_REASON_LENGTH } from '../models/MessageReport.js';
+import Chat, { MAX_REPORT_REASON_LENGTH } from '../models/Chat.js';
 import Team from '../models/Team.js';
 import TeamChatMessage from '../models/TeamChatMessage.js';
 import User from '../models/User.js';
@@ -97,12 +96,14 @@ export const sendMessage = async (req, res) => {
     });
 
     await newMessage.save();
+    // The receiver's room, from the stored id (the request may spell it in capitals)
+    const receiverRoom = String(newMessage.receiver);
     await newMessage.populate(participants);
 
     // Emit the populated message to receiver's room in real-time
     const io = req.app.get('io');
     if (io) {
-      io.to(receiverId.toString()).emit('receive_message', newMessage);
+      io.to(receiverRoom).emit('receive_message', newMessage);
     }
 
     res.status(201).json({ success: true, data: newMessage });
@@ -115,12 +116,13 @@ export const sendMessage = async (req, res) => {
 // ?beforeId=<_id> of the oldest message shown to load the page before it.
 export const getMessages = async (req, res) => {
   try {
-    const { userId } = req.params;
     const currentUserId = req.user.id;
 
-    if (!isId(userId)) {
+    if (!isId(req.params.userId)) {
       return res.status(400).json({ success: false, message: 'Invalid user' });
     }
+    // Compared with stored ids and used as a room name below
+    const userId = req.params.userId.toLowerCase();
 
     const cursor = cursorFilter(req.query, 'timestamp');
     if (cursor.error) {
@@ -162,13 +164,11 @@ export const getMessages = async (req, res) => {
 // arrived while their conversation was open)
 export const markAsRead = async (req, res) => {
   try {
-    const { userId } = req.params;
-
-    if (!isId(userId)) {
+    if (!isId(req.params.userId)) {
       return res.status(400).json({ success: false, message: 'Invalid user' });
     }
 
-    await markConversationRead(req, userId, req.user.id);
+    await markConversationRead(req, req.params.userId.toLowerCase(), req.user.id);
     res.json({ success: true });
   } catch (error) {
     sendServerError(res, error);
@@ -364,6 +364,23 @@ const findOwnDirectMessage = async (req, res, select = '') => {
   return message;
 };
 
+// Deletes a message (Chat or TeamChatMessage) the way the chat shows it:
+// its text is emptied and deletedAt set. In one conditional update, so an
+// edit or another delete at the same moment can't undo it or do it twice.
+// Returns the message as it is now (null if it no longer exists), and
+// whether this call deleted it.
+const softDelete = async (Model, message) => {
+  if (message.deletedAt) return { current: message, deleted: false };
+  const deleted = await Model.findOneAndUpdate(
+    { _id: message._id, deletedAt: null },
+    { $set: { message: '', deletedAt: new Date() } },
+    { new: true },
+  );
+  if (deleted) return { current: deleted, deleted: true };
+  // Deleted by another request since it was loaded
+  return { current: await Model.findById(message._id), deleted: false };
+};
+
 // The sender corrects a direct message, within 24 hours of sending it, while
 // they may still message the receiver
 export const editMessage = async (req, res) => {
@@ -396,16 +413,23 @@ export const editMessage = async (req, res) => {
 
     const rooms = conversationRooms(message);
     const changed = message.message !== text.trim();
+    let result = message;
     if (changed) {
-      message.message = text.trim();
-      message.isEdited = true;
-      message.editedAt = new Date();
-      await message.save();
+      // Only if it is still not deleted: a delete from another tab since it
+      // was loaded must not get its text back
+      result = await Chat.findOneAndUpdate(
+        { _id: message._id, sender: req.user._id, deletedAt: null },
+        { $set: { message: text.trim(), isEdited: true, editedAt: new Date() } },
+        { new: true },
+      );
+      if (!result) {
+        return res.status(409).json({ success: false, message: ALREADY_DELETED });
+      }
     }
-    await message.populate(participants);
-    if (changed) emitToConversation(req, rooms, 'message_updated', message);
+    await result.populate(participants);
+    if (changed) emitToConversation(req, rooms, 'message_updated', result);
 
-    return res.json({ success: true, data: message });
+    return res.json({ success: true, data: result });
   } catch (error) {
     sendServerError(res, error);
   }
@@ -423,16 +447,14 @@ export const deleteMessage = async (req, res) => {
     }
 
     const rooms = conversationRooms(message);
-    const deleting = !message.deletedAt;
-    if (deleting) {
-      message.message = '';
-      message.deletedAt = new Date();
-      await message.save();
+    const { current, deleted } = await softDelete(Chat, message);
+    if (!current) {
+      return res.status(404).json({ success: false, message: 'Message not found' });
     }
-    await message.populate(participants);
-    if (deleting) emitToConversation(req, rooms, 'message_deleted', message);
+    await current.populate(participants);
+    if (deleted) emitToConversation(req, rooms, 'message_deleted', current);
 
-    return res.json({ success: true, data: message });
+    return res.json({ success: true, data: current });
   } catch (error) {
     sendServerError(res, error);
   }
@@ -658,16 +680,23 @@ export const editTeamMessage = async (req, res) => {
     }
 
     const changed = message.message !== text.trim();
+    let result = message;
     if (changed) {
-      message.message = text.trim();
-      message.isEdited = true;
-      message.editedAt = new Date();
-      await message.save();
+      // Only if it is still not deleted: a leader's or an admin's delete
+      // since it was loaded must not get its text back
+      result = await TeamChatMessage.findOneAndUpdate(
+        { _id: message._id, team: team._id, sender: req.user._id, deletedAt: null },
+        { $set: { message: text.trim(), isEdited: true, editedAt: new Date() } },
+        { new: true },
+      );
+      if (!result) {
+        return res.status(409).json({ success: false, message: ALREADY_DELETED });
+      }
     }
-    await populateTeamMessageDetails(message);
-    if (changed) emitToTeam(req, team, 'team_message_updated', message);
+    await populateTeamMessageDetails(result);
+    if (changed) emitToTeam(req, team, 'team_message_updated', result);
 
-    return res.json({ success: true, data: message });
+    return res.json({ success: true, data: result });
   } catch (error) {
     sendServerError(res, error);
   }
@@ -696,28 +725,26 @@ export const deleteTeamMessage = async (req, res) => {
     }
 
     const senderId = String(message.sender);
-    const deleting = !message.deletedAt;
-    if (deleting) {
-      message.message = '';
-      message.deletedAt = new Date();
-      await message.save();
+    const { current, deleted } = await softDelete(TeamChatMessage, message);
+    if (!current) {
+      return res.status(404).json({ success: false, message: 'Message not found' });
     }
-    await populateTeamMessageDetails(message);
+    await populateTeamMessageDetails(current);
 
-    if (deleting) {
-      emitToTeam(req, team, 'team_message_deleted', message);
+    if (deleted) {
+      emitToTeam(req, team, 'team_message_deleted', current);
       // Someone else removing a message is a moderation action
       if (!isSender) {
         await logAuditEventV2(req, {
           action: 'chat_message_deleted',
           targetType: 'TeamChatMessage',
-          targetId: message._id,
+          targetId: current._id,
           details: { teamId: String(team._id), senderId },
         });
       }
     }
 
-    return res.json({ success: true, data: message });
+    return res.json({ success: true, data: current });
   } catch (error) {
     sendServerError(res, error);
   }

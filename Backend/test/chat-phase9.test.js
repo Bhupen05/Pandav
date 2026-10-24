@@ -1,8 +1,8 @@
 // End-to-end checks for Phase 9 of the chat: { success, data } responses,
 // paging that keeps messages from the same millisecond, the conversations
 // list, unread counts for the nav and team chat, editing and deleting
-// messages, blocks, reporting messages to admins, and presence that only
-// shows the people a user may message
+// messages, blocks, reporting messages to admins, presence that only shows
+// the people a user may message, and typing permissions that expire
 import { after, before, test } from 'node:test';
 import mongoose from 'mongoose';
 import { ADMIN, USER, checker, connectDatabase, connectSocket, sleep, startServer } from './helpers.js';
@@ -15,12 +15,21 @@ let server;
 let db;
 let adminToken;
 let admin;
+// A second server whose contacts never expire during the tests, so only the
+// typing permission's own lifetime can explain a refused typing indicator,
+// and whose failed contacts lookups are tried again quickly
+let serverB;
+let dbB;
 before(async () => {
   server = await startServer('chat-phase9', {
-    // Short caches, so the tests can see them expire
-    CHAT_TYPING_TTL_MS: '1500',
+    // Contacts expire fast, so the tests can see them looked up again
     CHAT_CONTACTS_TTL_MS: '3000',
   });
+  serverB = await startServer('chat-phase9-b', {
+    CHAT_TYPING_TTL_MS: '1500',
+    CHAT_CONTACTS_RETRY_MS: '500',
+  });
+  dbB = await connectDatabase('chat-phase9-b');
   db = await connectDatabase('chat-phase9');
   const { register, login, me } = server.api;
   for (const [key, name] of [['amy', 'Amy Sender'], ['ben', 'Ben Receiver'], ['cat', 'Cat Stranger'], ['lea', 'Lea Leader'],
@@ -36,15 +45,17 @@ before(async () => {
 after(async () => {
   sockets.forEach(({ socket }) => socket.close());
   await db?.close();
+  await dbB?.close();
   await server?.stop();
+  await serverB?.stop();
 });
 
 const oid = (id) => new mongoose.Types.ObjectId(id);
 const HOUR = 60 * 60 * 1000;
 
 // A socket that records every event it receives, by name
-const watch = async (token) => {
-  const opened = await connectSocket(server.base, token);
+const watch = async (token, base = server.base) => {
+  const opened = await connectSocket(base, token);
   const events = {};
   opened.socket.onAny((name, payload) => { (events[name] ||= []).push(payload); });
   opened.events = events;
@@ -123,6 +134,19 @@ test('direct messages: responses, editing and deleting', async (t) => {
   const unread = (await call('GET', '/chat/unread', { token: ben.token })).data;
   await check('unread counts leave out deleted messages', unread.data[amy._id] === 1 && unread.total === 1, JSON.stringify(unread));
   await call('PUT', `/chat/read/${amy._id}`, { token: ben.token });
+
+  // Ids are hex, and a request may spell one in capitals
+  const shouted = await call('POST', '/chat/send', { token: amy.token, body: { receiverId: ben._id.toUpperCase(), message: 'caps' } });
+  await sleep(300);
+  await check('an id in capitals still reaches the receiver at once',
+    shouted.status === 201 && (benSocket.events.receive_message || []).some((m) => m.message === 'caps'), JSON.stringify(shouted.data));
+  const receipts = (amySocket.events.messages_read || []).length;
+  await call('PUT', `/chat/read/${amy._id.toUpperCase()}`, { token: ben.token });
+  await sleep(300);
+  await check('and so does a read receipt',
+    amySocket.events.messages_read?.length === receipts + 1 && amySocket.events.messages_read.at(-1).readerId === ben._id);
+  const toSelf = await call('POST', '/chat/send', { token: adminToken, body: { receiverId: admin._id.toUpperCase(), message: 'me' } });
+  await check('nobody messages themselves, whatever the case of the id', toSelf.status === 400, JSON.stringify(toSelf.data));
 });
 
 test('paging keeps messages sent in the same millisecond', async (t) => {
@@ -325,7 +349,10 @@ test('conversations list', async (t) => {
 
   await connect(eve, amy);
   await call('POST', '/chat/send', { token: eve.token, body: { receiverId: amy._id, message: 'bye for now' } });
-  // The accounts area deletes accounts by anonymising them
+  // An account deleted by anonymising it (see Users.md), with its messages
+  // still in place: how the chat shows whatever is left of a deleted account.
+  // Deleting an account through the API removes its messages today (see
+  // "Deleted accounts and teams" in Chat.md), so this is set up directly.
   await db.collection('users').updateOne({ _id: oid(eve._id) },
     { $set: { name: 'Deleted user', isActive: false, deletedAt: new Date(), email: `deleted-${eve._id}@deleted.invalid` } });
   const long = 'L'.repeat(200);
@@ -349,7 +376,8 @@ test('conversations list', async (t) => {
   await check('a deleted account shows as "Deleted user", and cannot be messaged',
     eveRow?.user.name === 'Deleted user' && eveRow.user.deleted === true && eveRow.canMessage === false && eveRow.lastMessage.text === 'bye for now',
     JSON.stringify(eveRow));
-  await check('its messages stay', (await call('GET', `/chat/messages/${eve._id}`, { token: amy.token })).data.count === 1);
+  await check('what is left of the conversation can still be read',
+    (await call('GET', `/chat/messages/${eve._id}`, { token: amy.token })).data.count === 1);
 
   const page = (await call('GET', '/chat/conversations?limit=1', { token: amy.token })).data;
   const next = (await call('GET', `/chat/conversations?limit=5&before=${encodeURIComponent(page.data[0].lastMessage.at)}&beforeId=${page.data[0].lastMessage._id}`, { token: amy.token })).data;
@@ -398,6 +426,10 @@ test('blocks', async (t) => {
   await check("others' blocks are not listed", (await call('GET', '/chat/blocks', { token: dan.token })).data.count === 0);
 
   await check('nobody blocks themselves', (await call('POST', '/chat/blocks', { token: amy.token, body: { userId: amy._id } })).status === 400);
+  const selfInCapitals = await call('POST', '/chat/blocks', { token: amy.token, body: { userId: amy._id.toUpperCase() } });
+  await check('not even with their id in capitals',
+    selfInCapitals.status === 400 && (await db.collection('blocks').countDocuments({ blocker: oid(amy._id), blocked: oid(amy._id) })) === 0,
+    JSON.stringify(selfInCapitals.data));
   await check('admins cannot be blocked', (await call('POST', '/chat/blocks', { token: amy.token, body: { userId: admin._id } })).status === 400);
   await check('a malformed id is a 400', (await call('POST', '/chat/blocks', { token: amy.token, body: { userId: 'nope' } })).status === 400);
   await check('an unknown person is a 404',
@@ -405,13 +437,25 @@ test('blocks', async (t) => {
   await check('a deleted account is a 404', (await call('POST', '/chat/blocks', { token: amy.token, body: { userId: people.eve._id } })).status === 404);
 
   await check('the blocked person cannot lift it', (await call('DELETE', `/chat/blocks/${amy._id}`, { token: dan.token })).status === 404);
-  const lifted = await call('DELETE', `/chat/blocks/${dan._id}`, { token: amy.token });
+  // The id in capitals: the audit log still names Dan by his id
+  const lifted = await call('DELETE', `/chat/blocks/${dan._id.toUpperCase()}`, { token: amy.token });
   await check('the blocker unblocks', lifted.status === 200);
   await check('unblocking again is a 404', (await call('DELETE', `/chat/blocks/${dan._id}`, { token: amy.token })).status === 404);
   await check('a malformed id is a 400 there too', (await call('DELETE', '/chat/blocks/nope', { token: amy.token })).status === 400);
   await check('the unblock is audited', (await audits('chat_user_unblocked')).some((a) => a.targetId === dan._id));
   await check('the reply rule applies again', (await call('POST', '/chat/send', { token: dan.token, body: { receiverId: amy._id, message: 'thanks' } })).status === 201);
   await call('DELETE', `/chat/blocks/${cat._id}`, { token: amy.token });
+
+  // A deactivated account keeps its block (it applies again if the account
+  // comes back), so it stays on the list where it can be lifted
+  const { nat } = people;
+  await call('POST', '/chat/blocks', { token: amy.token, body: { userId: nat._id } });
+  const deactivated = await call('PUT', `/users/${nat._id}/toggle-active`, { token: adminToken });
+  const withInactive = (await call('GET', '/chat/blocks', { token: amy.token })).data;
+  await check('a deactivated person stays on the list',
+    deactivated.status === 200 && withInactive.data.some((row) => row._id === nat._id && row.name === 'Nat Member'), JSON.stringify(withInactive));
+  await check('and can be unblocked from it', (await call('DELETE', `/chat/blocks/${nat._id}`, { token: amy.token })).status === 200);
+  await call('PUT', `/users/${nat._id}/toggle-active`, { token: adminToken });
 });
 
 test('presence shows only the people a user may message', async (t) => {
@@ -446,6 +490,10 @@ test('presence shows only the people a user may message', async (t) => {
   unaSocket.socket.emit('refresh_contacts');
   await sleep(600);
   await check('refresh_contacts brings in a new connection', latest(catSocket).includes(una._id), JSON.stringify(latest(catSocket)));
+  // Messages both ways, so each may still write to the other (a reply) once
+  // the block below has removed their connection and been lifted
+  await call('POST', '/chat/send', { token: cat.token, body: { receiverId: una._id, message: 'hi Una' } });
+  await call('POST', '/chat/send', { token: una.token, body: { receiverId: cat._id, message: 'hi Cat' } });
 
   // A block takes effect at once, for both people
   const unaBefore = latest(unaSocket);
@@ -453,28 +501,146 @@ test('presence shows only the people a user may message', async (t) => {
   await sleep(600);
   await check('a block hides each from the other at once',
     !latest(catSocket).includes(una._id) && unaBefore.includes(cat._id) && !latest(unaSocket).includes(cat._id), JSON.stringify([latest(catSocket), unaBefore, latest(unaSocket)]));
-  await call('DELETE', `/chat/blocks/${cat._id}`, { token: una.token });
+  // Well within the 3 s after which contacts are looked up anyway
+  await call('DELETE', `/chat/blocks/${cat._id.toUpperCase()}`, { token: una.token });
+  await sleep(600);
+  await check('unblocking shows each to the other again at once, whatever the case of the id',
+    latest(catSocket).includes(una._id) && latest(unaSocket).includes(cat._id), JSON.stringify([latest(catSocket), latest(unaSocket)]));
 
   // Contacts are looked up again on their own once they are old (3 s in these tests)
   await connect(ben, cat);
   await sleep(7000);
   await check('stale contacts are refreshed without asking', latest(catSocket).includes(ben._id), JSON.stringify(latest(catSocket)));
 
-  // Typing permissions expire (1.5 s in these tests), so a block made
-  // behind the app's back still takes effect
-  const typing = () => (amySocket.events.user_typing || []).filter((e) => e.userId === ben._id).length;
-  benSocket.socket.emit('typing', { recipientId: amy._id });
-  await sleep(300);
-  await check('typing reaches a contact', typing() === 1);
-  await db.collection('blocks').insertOne({ blocker: oid(amy._id), blocked: oid(ben._id), createdAt: new Date(), updatedAt: new Date() });
-  await sleep(2000);
-  benSocket.socket.emit('typing', { recipientId: amy._id });
-  await sleep(400);
-  await check('a block takes effect once the permission expires', typing() === 1, `${typing()} typing events`);
-  await db.collection('blocks').deleteOne({ blocker: oid(amy._id), blocked: oid(ben._id) });
+  // Presence across tabs
+  const amySecondTab = await watch(amy.token);
+  amySocket.socket.close();
+  await sleep(1500);
+  await check('closing one tab keeps the user online while another is open', latest(benSocket).includes(amy._id), JSON.stringify(latest(benSocket)));
 
+  const amySees = latest(amySecondTab);
   benSocket.socket.close();
   await sleep(1500);
-  await check('someone leaving is seen by their contacts', !latest(amySocket).includes(ben._id), JSON.stringify(latest(amySocket)));
+  await check('someone leaving is seen by their contacts', amySees.includes(ben._id) && !latest(amySecondTab).includes(ben._id),
+    JSON.stringify([amySees, latest(amySecondTab)]));
   await check('the server keeps running', (await fetch(`${server.base}/api/v2/health`)).status === 200);
+});
+
+// ---------- The second server: contacts last 5 minutes, typing permissions 1.5 s ----------
+
+const peopleB = {};
+
+test('a socket whose first contacts lookup fails gets its list once a retry works', async (t) => {
+  const check = checker(t);
+  const { login, me } = serverB.api;
+  const token = await login(USER);
+  const una = await me(token);
+
+  // A team document the app can't read makes every lookup of Una's contacts throw
+  const unreadable = await dbB.collection('teams').insertOne({
+    name: 'Unreadable', leaders: 'not-an-id', members: [oid(una._id)], isActive: true, createdAt: new Date(), updatedAt: new Date(),
+  });
+  const socket = await watch(token, serverB.base);
+  await sleep(1500);
+  await check('(no list while the lookup fails)', socket.ok && !socket.events.update_active_users, JSON.stringify(socket.events));
+
+  await dbB.collection('teams').deleteOne({ _id: unreadable.insertedId });
+  await sleep(1500);
+  await check('the lookup is tried again, and the socket gets its first list', Array.isArray(socket.events.update_active_users?.[0]),
+    JSON.stringify(socket.events));
+  socket.socket.close();
+});
+
+test('typing permissions expire on their own', async (t) => {
+  const check = checker(t);
+  const { call, connect, login, register } = serverB.api;
+  const adminTokenB = await login(ADMIN);
+  for (const [key, name] of [['pia', 'Pia Typist'], ['quinn', 'Quinn Reader'], ['leo', 'Leo Leader'], ['max', 'Max Member']]) {
+    peopleB[key] = await register(name, `${key}@chat9b.test`);
+  }
+  const { pia, quinn, leo, max } = peopleB;
+  const typingFrom = (watched, who) => (watched.events.user_typing || []).filter((e) => e.userId === who._id).length;
+
+  // ---------- A block ----------
+  await connect(pia, quinn);
+  const piaSocket = await watch(pia.token, serverB.base);
+  const quinnSocket = await watch(quinn.token, serverB.base);
+  await sleep(300);
+  piaSocket.socket.emit('typing', { recipientId: quinn._id });
+  await sleep(300);
+  await check('typing reaches a contact', typingFrom(quinnSocket, pia) === 1, JSON.stringify(quinnSocket.events));
+
+  // Made behind the app's back, so nothing looks up contacts again: only the
+  // typing permission running out can stop the indicator
+  await dbB.collection('blocks').insertOne({ blocker: oid(quinn._id), blocked: oid(pia._id), createdAt: new Date(), updatedAt: new Date() });
+  piaSocket.socket.emit('typing', { recipientId: quinn._id });
+  await sleep(300);
+  await check('(the permission is remembered for a while)', typingFrom(quinnSocket, pia) === 2, `${typingFrom(quinnSocket, pia)} typing events`);
+  await sleep(1500);
+  piaSocket.socket.emit('typing', { recipientId: quinn._id });
+  await sleep(300);
+  await check('once it runs out, a new block stops typing', typingFrom(quinnSocket, pia) === 2, `${typingFrom(quinnSocket, pia)} typing events`);
+  await dbB.collection('blocks').deleteOne({ blocker: oid(quinn._id), blocked: oid(pia._id) });
+  // A refused recipient is checked again on the next event
+  piaSocket.socket.emit('typing', { recipientId: quinn._id.toUpperCase() });
+  await sleep(300);
+  await check('typing works again once the block is gone, whatever the case of the id', typingFrom(quinnSocket, pia) === 3,
+    `${typingFrom(quinnSocket, pia)} typing events`);
+
+  // ---------- A frozen team ----------
+  const team = (await call('POST', '/teams', { token: leo.token, body: { name: 'Typing Team' } })).data.data;
+  const invite = (await call('POST', `/teams/${team._id}/invite`, { token: leo.token, body: { userId: max._id } })).data.data;
+  await call('PUT', `/teams/invites/${invite._id}/accept`, { token: max.token });
+  peopleB.team = team;
+  const leoSocket = await watch(leo.token, serverB.base);
+  const maxSocket = await watch(max.token, serverB.base);
+  await sleep(300);
+  leoSocket.socket.emit('typing', { recipientId: max._id });
+  await sleep(300);
+  await check('typing reaches a teammate', typingFrom(maxSocket, leo) === 1, JSON.stringify(maxSocket.events));
+  const frozen = await call('PUT', `/teams/${team._id}`, { token: adminTokenB, body: { isActive: false } });
+  await sleep(1800);
+  leoSocket.socket.emit('typing', { recipientId: max._id });
+  await sleep(300);
+  await check('once the permission runs out, a frozen team stops typing', frozen.status === 200 && typingFrom(maxSocket, leo) === 1,
+    `${typingFrom(maxSocket, leo)} typing events`);
+  await call('PUT', `/teams/${team._id}`, { token: adminTokenB, body: { isActive: true } });
+});
+
+test('an edit racing a delete never brings the text back', async (t) => {
+  const check = checker(t);
+  const { call } = serverB.api;
+  const { pia, quinn, leo, max, team } = peopleB;
+  const deletedWithText = (stored) => stored.filter((m) => m.deletedAt && m.message !== '');
+
+  // Team messages: the sender edits each one as a leader deletes it
+  const teamMessages = [];
+  for (let i = 0; i < 8; i++) {
+    teamMessages.push((await call('POST', `/chat/teams/${team._id}/send`, { token: max.token, body: { message: `team ${i}` } })).data.data);
+  }
+  const teamOutcomes = await Promise.all(teamMessages.map((m) => Promise.all([
+    call('PATCH', `/chat/teams/${team._id}/messages/${m._id}`, { token: max.token, body: { message: `team ${m._id} edited` } }),
+    call('DELETE', `/chat/teams/${team._id}/messages/${m._id}`, { token: leo.token }),
+  ])));
+  const teamStored = await dbB.collection('teamchatmessages').find({ _id: { $in: teamMessages.map((m) => oid(m._id)) } }).toArray();
+  await check('every team message ends up deleted, without its text',
+    teamStored.length === 8 && teamStored.every((m) => m.deletedAt) && deletedWithText(teamStored).length === 0,
+    JSON.stringify(deletedWithText(teamStored)));
+  await check('each edit either landed first or was refused',
+    teamOutcomes.every(([edit, remove]) => [200, 409].includes(edit.status) && remove.status === 200),
+    JSON.stringify(teamOutcomes.map(([edit, remove]) => [edit.status, remove.status])));
+
+  // Direct messages: the sender edits and deletes each one from two tabs
+  const direct = [];
+  for (let i = 0; i < 5; i++) {
+    direct.push((await call('POST', '/chat/send', { token: pia.token, body: { receiverId: quinn._id, message: `direct ${i}` } })).data.data);
+  }
+  await Promise.all(direct.map((m) => Promise.all([
+    call('PATCH', `/chat/messages/${m._id}`, { token: pia.token, body: { message: `direct ${m._id} edited` } }),
+    call('DELETE', `/chat/messages/${m._id}`, { token: pia.token }),
+  ])));
+  const directStored = await dbB.collection('chats').find({ _id: { $in: direct.map((m) => oid(m._id)) } }).toArray();
+  await check('every direct message ends up deleted, without its text',
+    directStored.length === 5 && directStored.every((m) => m.deletedAt) && deletedWithText(directStored).length === 0,
+    JSON.stringify(deletedWithText(directStored)));
 });

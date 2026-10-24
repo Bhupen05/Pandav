@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { reportFields } from './MessageReport.js';
+import { reportFields } from './Chat.js';
 
 const teamChatMessageSchema = new mongoose.Schema({
   team: {
