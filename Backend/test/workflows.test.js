@@ -48,6 +48,11 @@ test('workflows', async (t) => {
   await check('old password no longer works', !(await login({ email: 'carol@test.com', password: 'carolpass1' })));
   carolToken = await login({ email: 'carol@test.com', password: 'newcarol1' });
   await check('new password works', !!carolToken);
+  // ...but she has to replace it with her own before doing anything else
+  await check('the admin-set password must be replaced first',
+    (await call('GET', '/tasks', { token: carolToken })).data?.code === 'PASSWORD_CHANGE_REQUIRED');
+  carolToken = (await call('PUT', '/auth/updatepassword', { token: carolToken, body: { currentPassword: 'newcarol1', newPassword: 'owncarol1' } })).session;
+  await check('after which she can carry on', (await call('GET', '/tasks', { token: carolToken })).status === 200);
   await check('reset of unknown user returns 404', (await call('PUT', '/users/64b000000000000000000000/reset-password', { token: adminToken, body: { newPassword: 'whatever1' } })).status === 404);
 
   // Error responses carry a readable message for the UI
@@ -85,7 +90,8 @@ test('account, task and date checks', async (t) => {
   const taken = await call('PUT', `/users/${dee._id}`, { token: adminToken, body: { email: 'lou@test.com' } });
   await check('an email already in use is a 400', taken.status === 400 && taken.data.message === 'That email is already in use', JSON.stringify(taken.data));
   const selfOff = await call('PUT', `/users/${admin._id}`, { token: adminToken, body: { isActive: 'false' } });
-  await check('an admin cannot deactivate themselves with "false" as text', selfOff.status === 400 && (await me(adminToken))?.isActive === true, `${selfOff.status}`);
+  // Still signed in: a deactivated account's session would get a 401
+  await check('an admin cannot deactivate themselves with "false" as text', selfOff.status === 400 && (await me(adminToken))?.role === 'admin', `${selfOff.status}`);
   await check('isActive must be true or false',
     (await call('PUT', `/users/${dee._id}`, { token: adminToken, body: { isActive: 'nope' } })).status === 400);
   const upper = admin._id.toUpperCase();

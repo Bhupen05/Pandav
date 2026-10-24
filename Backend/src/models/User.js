@@ -5,6 +5,14 @@ import validator from 'validator';
 const PROFILE_IMAGE_PATTERN = /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+=*$/;
 // ~200 KB of image data once base64-encoded
 export const MAX_PROFILE_IMAGE_LENGTH = 280000;
+export const PASSWORD_MIN_LENGTH = 6;
+
+// validator.isEmail also accepts quoted names and other rare forms that mail
+// software reads in different ways (a nodemailer advisory is about this).
+// Nobody needs them for a work account, so they are refused.
+const UNSAFE_EMAIL_CHARACTERS = /[\s"<>;,()\\]/;
+export const isAcceptableEmail = (value) =>
+  typeof value === 'string' && validator.isEmail(value) && !UNSAFE_EMAIL_CHARACTERS.test(value);
 
 const userSchema = new mongoose.Schema({
   name: {
@@ -16,13 +24,14 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: [true, 'Please provide an email'],
     unique: true,
+    trim: true,
     lowercase: true,
-    validate: [validator.isEmail, 'Please provide a valid email'],
+    validate: [isAcceptableEmail, 'Please provide a valid email'],
   },
   password: {
     type: String,
     required: [true, 'Please provide a password'],
-    minlength: 6,
+    minlength: PASSWORD_MIN_LENGTH,
     select: false,
   },
   role: {
@@ -88,6 +97,8 @@ const userSchema = new mongoose.Schema({
     // Chosen during setup, until the first code confirms it
     pendingSecret: { type: String, select: false },
     backupCodes: { type: [String], select: false, default: undefined },
+    // The 30-second step of the last code accepted, so each code works once
+    lastUsedStep: { type: Number, select: false },
   },
   // Whether notifications marked for email are also emailed
   emailNotifications: {
@@ -122,6 +133,24 @@ userSchema.pre('save', async function(next) {
 userSchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
+
+// The signed-in user's own account, as register, login, the two-step
+// sign-in and GET /auth/me return it. Never includes secrets.
+export const accountPayload = (user) => ({
+  _id: user._id,
+  name: user.name,
+  email: user.email,
+  role: user.role,
+  phone: user.phone,
+  department: user.department,
+  profileImage: user.profileImage,
+  createdAt: user.createdAt,
+  teamId: user.teamId ?? null,
+  emailVerified: user.emailVerified === true,
+  mustChangePassword: user.mustChangePassword === true,
+  twoFactorEnabled: user.twoFactor?.enabled === true,
+  emailNotifications: user.emailNotifications !== false,
+});
 
 const User = mongoose.model('User', userSchema);
 

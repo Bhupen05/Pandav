@@ -42,7 +42,9 @@ async function createInitialUsers() {
       }
 
       const password = account.password || randomPassword();
-      await User.create({ ...account, password });
+      // Set up by whoever runs the server, so there is no address to confirm
+      // (with EMAIL_VERIFICATION_REQUIRED the admin could otherwise never sign in)
+      await User.create({ ...account, password, emailVerified: true, emailVerifiedAt: new Date() });
       created.push({ email: account.email, password, role: account.role });
     }
 

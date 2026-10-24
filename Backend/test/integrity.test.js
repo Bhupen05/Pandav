@@ -151,7 +151,8 @@ test('integrity', async (t) => {
   const huge = await call('PUT', `/users/${alice._id}`, { token: alice.token, raw: JSON.stringify({ name: 'x'.repeat(1100000) }) });
   await check('request bodies over 1 MB get 413, not 500', huge.status === 413 && huge.data?.message === 'Request is too large', `status ${huge.status}`);
   const chatList = await call('GET', '/users/chat-list', { token: bob.token });
-  await check('chat list no longer embeds profile images', chatList.data.data.every((u) => !('profileImage' in u)));
+  await check('chat list carries photos (now that they are small)',
+    chatList.data.data.find((u) => u._id === alice._id)?.profileImage === tinyPng, JSON.stringify(chatList.data).slice(0, 300));
 
   // ---------- Deleting a user cleans up ----------
   const dave = await register('Dave', 'dave3@test.com');
