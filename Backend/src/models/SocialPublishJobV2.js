@@ -1,10 +1,19 @@
 import mongoose from 'mongoose';
 
 const socialPublishJobV2Schema = new mongoose.Schema({
+  // The post's author: publishing always uses their linked account
   owner: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,
+    index: true,
+  },
+  // Who queued the job (the author, an admin, or the author's team leader).
+  // They see it in their job list and hear if it fails.
+  queuedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
     index: true,
   },
   post: {
@@ -54,6 +63,13 @@ const socialPublishJobV2Schema = new mongoose.Schema({
     default: null,
   },
   startedAt: {
+    type: Date,
+    default: null,
+  },
+  // Set while a run has the job (status 'processing'). A job whose run
+  // stopped (the server restarted mid-run) is picked up again by the
+  // social-publish background job once this is 10 minutes old.
+  lockedAt: {
     type: Date,
     default: null,
   },

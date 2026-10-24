@@ -3,6 +3,8 @@ import { protect, authorize } from '../middleware/auth.js';
 import {
   validateProviderParam,
   validateCreatePost,
+  validateUpdatePost,
+  validatePostFromTask,
   validatePostComment,
   validateConnectionRequest,
   validateConnectionResponse,
@@ -24,11 +26,17 @@ import {
   createPost,
   generatePostFromPersonalTask,
   getFeed,
+  getPost,
   getMyPosts,
+  getPendingApprovalPosts,
+  updatePost,
+  deletePost,
   toggleLike,
   addComment,
+  deleteComment,
   requestConnection,
   respondConnection,
+  removeConnection,
   getConnections,
   sendNetworkMessage,
   getNetworkMessages,
@@ -42,6 +50,7 @@ import {
   deletePersonalTask,
   linkProviderAccount,
   getSocialIntegrations,
+  unlinkProviderAccount,
   getProviderProfile,
   fetchProviderPosts,
   publishPostToTargets,
@@ -62,10 +71,15 @@ router.use(protect);
 
 router.get('/feed', getFeed);
 router.get('/posts/me', getMyPosts);
+router.get('/posts/pending-approval', authorize('admin', 'team_leader'), getPendingApprovalPosts);
 router.post('/posts', socialWriteRateLimiter, validateCreatePost, createPost);
-router.post('/posts/from-task/:taskId', socialWriteRateLimiter, generatePostFromPersonalTask);
+router.post('/posts/from-task/:taskId', socialWriteRateLimiter, validatePostFromTask, generatePostFromPersonalTask);
+router.get('/posts/:postId', getPost);
+router.patch('/posts/:postId', socialWriteRateLimiter, validateUpdatePost, updatePost);
+router.delete('/posts/:postId', socialWriteRateLimiter, deletePost);
 router.post('/posts/:postId/like', socialWriteRateLimiter, toggleLike);
 router.post('/posts/:postId/comments', socialWriteRateLimiter, validatePostComment, addComment);
+router.delete('/posts/:postId/comments/:commentId', socialWriteRateLimiter, deleteComment);
 router.post('/posts/:postId/publish', socialWriteRateLimiter, validatePublishRequest, publishPostToTargets);
 router.patch('/posts/:postId/approve', socialWriteRateLimiter, authorize('admin', 'team_leader'), approvePost);
 
@@ -82,6 +96,7 @@ router.get('/users/discover', discoverUsers);
 
 router.post('/connections/request', socialWriteRateLimiter, validateConnectionRequest, requestConnection);
 router.patch('/connections/:connectionId/respond', socialWriteRateLimiter, validateConnectionResponse, respondConnection);
+router.delete('/connections/:connectionId', socialWriteRateLimiter, removeConnection);
 router.get('/connections', getConnections);
 
 router.post('/messages', directMessageRateLimiter, validateNetworkMessage, sendNetworkMessage);
@@ -96,6 +111,7 @@ router.delete('/personal-tasks/:taskId', socialWriteRateLimiter, deletePersonalT
 
 router.post('/integrations/:provider/link', socialIntegrationRateLimiter, validateProviderParam, validateIntegrationsLink, linkProviderAccount);
 router.get('/integrations', getSocialIntegrations);
+router.delete('/integrations/:provider', socialIntegrationRateLimiter, validateProviderParam, unlinkProviderAccount);
 router.get('/integrations/:provider/profile', validateProviderParam, getProviderProfile);
 router.get('/integrations/:provider/posts', validateProviderParam, fetchProviderPosts);
 

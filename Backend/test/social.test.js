@@ -64,7 +64,7 @@ test('social hub', async (t) => {
 
   // ---------- Linked accounts: tokens are encrypted at rest ----------
   const badLink = await call('POST', '/social/integrations/github/link', { token: mia.token, body: { accessToken: 'bad-token' } });
-  await check('a token the provider refuses is a 400 with its reason', badLink.status === 400 && badLink.data.message === 'Bad credentials', JSON.stringify(badLink.data));
+  await check('a token the provider refuses is a 400 with its reason', badLink.status === 400 && badLink.data.message === "GitHub didn't accept this token: Bad credentials", JSON.stringify(badLink.data));
   const link = await call('POST', '/social/integrations/github/link', { token: mia.token, body: { accessToken: 'mia-secret-token' } });
   await check('Mia links GitHub', link.status === 200 && !('accessToken' in link.data.data), JSON.stringify(link.data).slice(0, 200));
   const stored = await integrations.findOne({ provider: 'github' });
@@ -104,7 +104,11 @@ test('social hub', async (t) => {
   await check('with Mia\'s decrypted token', lastIssue?.auth === 'Bearer mia-secret-token', lastIssue?.auth);
 
   // ---------- Publish jobs run once ----------
-  const jobs = await call('POST', `/social/posts/${shipIt._id}/publish/jobs`, { token: mia.token, body: { githubRepo: 'acme/site' } });
+  const again = await call('POST', `/social/posts/${shipIt._id}/publish/jobs`, { token: mia.token, body: { githubRepo: 'acme/site' } });
+  await check('a job for a target already published is refused', again.status === 409, JSON.stringify(again.data));
+  const shipMore = (await call('POST', '/social/posts', { token: mia.token, body: { content: 'Ship it again', targets: { pandav: true, github: true } } })).data.data;
+  await call('PATCH', `/social/posts/${shipMore._id}/approve`, { token: lee.token, body: { action: 'approved' } });
+  const jobs = await call('POST', `/social/posts/${shipMore._id}/publish/jobs`, { token: mia.token, body: { githubRepo: 'acme/site' } });
   const job = jobs.data.data?.[0];
   await check('Mia queues a GitHub job', jobs.status === 201 && job?.status === 'queued', JSON.stringify(jobs.data).slice(0, 200));
   await check('a leader of another team cannot run it',
@@ -194,7 +198,7 @@ test('social hub', async (t) => {
   const feedAfter = await call('GET', '/social/feed', { token: mia.token });
   await check('the feed still loads', feedAfter.status === 200, `status ${feedAfter.status}`);
   await check('his posts and comments are gone', feedAfter.status === 200 &&
-    !feedAfter.data.data.some((p) => p.author?._id === oscar._id || p.comments.some((c) => c.user === oscar._id)));
+    !feedAfter.data.data.some((p) => p.author?._id === oscar._id || p.comments.some((c) => (c.user?._id ?? c.user) === oscar._id)));
   await check('his linked account and token are gone', (await integrations.countDocuments({ accountHandle: 'old' })) === 0);
 
   // A leftover post without an author (data from before this cleanup) doesn't break the feed
