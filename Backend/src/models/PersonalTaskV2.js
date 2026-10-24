@@ -49,9 +49,12 @@ const personalTaskSchema = new mongoose.Schema({
     ref: 'SocialPostV2',
     default: null,
   },
+  // What happened to the post made by sharing the task: waiting for a
+  // leader's or admin's approval, approved or rejected, then published (or
+  // failed) once it reached its targets
   autoPostStatus: {
     type: String,
-    enum: ['none', 'pending_approval', 'published', 'failed', 'already_generated'],
+    enum: ['none', 'pending_approval', 'approved', 'rejected', 'published', 'failed', 'already_generated'],
     default: 'none',
   },
   autoPostMessage: {

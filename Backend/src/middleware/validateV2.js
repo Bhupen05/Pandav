@@ -25,6 +25,10 @@ const GITHUB_REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 export const isGithubRepo = (value) =>
   typeof value === 'string' && GITHUB_REPO.test(value) && !value.includes('..') && !value.endsWith('/.');
 
+// Publishing or queuing for GitHub without a repository, when the server has
+// no GITHUB_DEFAULT_REPO
+export const GITHUB_REPO_REQUIRED = 'Choose the GitHub repository to open the issue in (owner/name)';
+
 const invalidGithubRepo = (githubRepo) =>
   githubRepo !== undefined && githubRepo !== null && githubRepo !== '' && !isGithubRepo(githubRepo);
 
@@ -36,28 +40,76 @@ export const validateProviderParam = (req, res, next) => {
   next();
 };
 
+const VISIBILITY_PROBLEM = `visibility must be one of: ${VISIBILITIES.join(', ')}`;
+
+// What's wrong with the editable fields of a post, if anything (the same
+// rules on create and edit). Fields left out are not checked.
+const postFieldProblem = ({ title, visibility, mediaUrls, tags }) => {
+  if (title !== undefined && title !== null && typeof title !== 'string') {
+    return 'title must be text';
+  }
+  if (visibility !== undefined && !VISIBILITIES.includes(visibility)) {
+    return VISIBILITY_PROBLEM;
+  }
+  if (mediaUrls !== undefined && (!Array.isArray(mediaUrls) || mediaUrls.length > MAX_MEDIA_URLS || !mediaUrls.every(isWebUrl))) {
+    return `mediaUrls must be up to ${MAX_MEDIA_URLS} http(s) links`;
+  }
+  if (tags !== undefined && (!Array.isArray(tags) || tags.length > MAX_TAGS || !tags.every((tag) => isNonEmptyString(tag) && tag.length <= 40))) {
+    return `tags must be up to ${MAX_TAGS} words of at most 40 characters`;
+  }
+  return null;
+};
+
 export const validateCreatePost = (req, res, next) => {
-  const { content, title, targets, visibility, mediaUrls, tags, sourceTask } = req.body;
+  const { content, targets, sourceTask } = req.body;
   if (!isNonEmptyString(content)) {
     return validatorError(res, 'Post content is required');
-  }
-  if (title !== undefined && title !== null && typeof title !== 'string') {
-    return validatorError(res, 'title must be text');
   }
   if (targets && !hasAtLeastOneTarget(targets)) {
     return validatorError(res, 'Select at least one target: pandav, linkedin, or github');
   }
-  if (visibility !== undefined && !VISIBILITIES.includes(visibility)) {
-    return validatorError(res, `visibility must be one of: ${VISIBILITIES.join(', ')}`);
-  }
-  if (mediaUrls !== undefined && (!Array.isArray(mediaUrls) || mediaUrls.length > MAX_MEDIA_URLS || !mediaUrls.every(isWebUrl))) {
-    return validatorError(res, `mediaUrls must be up to ${MAX_MEDIA_URLS} http(s) links`);
-  }
-  if (tags !== undefined && (!Array.isArray(tags) || tags.length > MAX_TAGS || !tags.every((tag) => isNonEmptyString(tag) && tag.length <= 40))) {
-    return validatorError(res, `tags must be up to ${MAX_TAGS} words of at most 40 characters`);
+  const problem = postFieldProblem(req.body);
+  if (problem) {
+    return validatorError(res, problem);
   }
   if (sourceTask !== undefined && sourceTask !== null && !mongoose.isObjectIdOrHexString(sourceTask)) {
     return validatorError(res, 'Invalid sourceTask');
+  }
+  next();
+};
+
+// PATCH /social/posts/:postId: the fields an author may change. Targets are
+// fixed when the post is created.
+export const EDITABLE_POST_FIELDS = ['title', 'content', 'tags', 'visibility', 'mediaUrls'];
+
+export const validateUpdatePost = (req, res, next) => {
+  const body = req.body || {};
+  if (!EDITABLE_POST_FIELDS.some((field) => body[field] !== undefined)) {
+    return validatorError(res, `Send at least one of: ${EDITABLE_POST_FIELDS.join(', ')}`);
+  }
+  if (body.content !== undefined && !isNonEmptyString(body.content)) {
+    return validatorError(res, 'Post content is required');
+  }
+  const problem = postFieldProblem(body);
+  if (problem) {
+    return validatorError(res, problem);
+  }
+  next();
+};
+
+const MAX_INTRO_LENGTH = 200;
+
+// POST /social/posts/from-task/:taskId
+export const validatePostFromTask = (req, res, next) => {
+  const { targets, visibility, intro } = req.body || {};
+  if (targets !== undefined && (targets === null || typeof targets !== 'object' || !hasAtLeastOneTarget(targets))) {
+    return validatorError(res, 'Select at least one target: pandav, linkedin, or github');
+  }
+  if (visibility !== undefined && !VISIBILITIES.includes(visibility)) {
+    return validatorError(res, VISIBILITY_PROBLEM);
+  }
+  if (intro !== undefined && (!isNonEmptyString(intro) || intro.trim().length > MAX_INTRO_LENGTH)) {
+    return validatorError(res, `intro must be text of at most ${MAX_INTRO_LENGTH} characters`);
   }
   next();
 };
@@ -135,7 +187,7 @@ export const validatePublishRequest = (req, res, next) => {
     return validatorError(res, 'At least one target is required');
   }
   if (targets?.github && (!githubRepo && !process.env.GITHUB_DEFAULT_REPO)) {
-    return validatorError(res, 'githubRepo is required when publishing to github unless GITHUB_DEFAULT_REPO is set');
+    return validatorError(res, GITHUB_REPO_REQUIRED);
   }
   if (invalidGithubRepo(githubRepo)) {
     return validatorError(res, 'githubRepo must look like owner/repo');

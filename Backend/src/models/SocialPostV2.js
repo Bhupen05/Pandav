@@ -101,13 +101,26 @@ const socialPostSchema = new mongoose.Schema({
       externalId: { type: String, default: null },
       message: { type: String, default: null },
       publishedAt: { type: Date, default: null },
+      // Set while a request or job is publishing here, so nothing else can
+      // publish the post to the same place at the same time (see
+      // utils/socialPublishing.js). A lock older than 10 minutes is ignored.
+      publishingAt: { type: Date, default: null },
     },
     github: {
       status: { type: String, enum: ['none', 'published', 'failed'], default: 'none' },
       externalId: { type: String, default: null },
       message: { type: String, default: null },
       publishedAt: { type: Date, default: null },
+      // Set while a request or job is publishing here, so nothing else can
+      // publish the post to the same place at the same time (see
+      // utils/socialPublishing.js). A lock older than 10 minutes is ignored.
+      publishingAt: { type: Date, default: null },
     },
+  },
+  // Last time the author edited the post
+  editedAt: {
+    type: Date,
+    default: null,
   },
   likes: [{
     type: mongoose.Schema.Types.ObjectId,
@@ -118,7 +131,7 @@ const socialPostSchema = new mongoose.Schema({
 
 socialPostSchema.index({ createdAt: -1 });
 socialPostSchema.index({ author: 1, createdAt: -1 });
+// Feed paging: newest first, ties broken by id
+socialPostSchema.index({ createdAt: -1, _id: -1 });
 
 export default mongoose.model('SocialPostV2', socialPostSchema);
-
-

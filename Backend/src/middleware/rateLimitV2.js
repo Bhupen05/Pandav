@@ -10,19 +10,23 @@ setInterval(() => {
 
 const getKey = (req, keyPrefix) => `${keyPrefix}:${req.user?._id || req.clientIp || req.ip || 'anon'}`;
 
+// At most `max` requests per user (or address) in a fixed window. Only
+// requests that are let through count: one that ends in an error (bad input,
+// not allowed, refused by the messaging rule, ...) gives its slot back when
+// its response finishes, so mistakes don't lock anyone out.
 export const createRateLimiterV2 = ({ keyPrefix, windowMs, max }) => {
   return (req, res, next) => {
     const now = Date.now();
     const key = getKey(req, keyPrefix);
-    const current = store.get(key);
+    let entry = store.get(key);
 
-    if (!current || current.expiresAt <= now) {
-      store.set(key, { count: 1, expiresAt: now + windowMs });
-      return next();
+    if (!entry || entry.expiresAt <= now) {
+      entry = { count: 0, expiresAt: now + windowMs };
+      store.set(key, entry);
     }
 
-    if (current.count >= max) {
-      const retryAfter = Math.ceil((current.expiresAt - now) / 1000);
+    if (entry.count >= max) {
+      const retryAfter = Math.ceil((entry.expiresAt - now) / 1000);
       res.set('Retry-After', String(retryAfter));
       return res.status(429).json({
         success: false,
@@ -30,8 +34,12 @@ export const createRateLimiterV2 = ({ keyPrefix, windowMs, max }) => {
       });
     }
 
-    current.count += 1;
-    store.set(key, current);
+    entry.count += 1;
+    res.once('finish', () => {
+      const refused = res.statusCode >= 400 && res.statusCode !== 429;
+      // Only within the same window: a new window started without this request
+      if (refused && store.get(key) === entry && entry.count > 0) entry.count -= 1;
+    });
     return next();
   };
 };
