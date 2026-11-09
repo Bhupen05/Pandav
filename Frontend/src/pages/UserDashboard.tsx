@@ -1,595 +1,499 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
-import { taskAPI } from '../api/taskAPI'
-import { useAuth } from '../context/useAuth'
+import { useCallback, useState } from 'react'
+import { Link, Navigate, useNavigate } from 'react-router-dom'
+import { AlertTriangle, CalendarClock, ClipboardList, Globe, ListTodo, MessageCircle, ThumbsUp, Trophy } from 'lucide-react'
+import { taskAPI, type FeedPost, type PersonalTodo } from '../api/taskAPI'
 import { getErrorMessage } from '../api/axios'
-import { canRequestCompletion, canStart, isWaitingForTeammates, type AssigneeProgress } from '../utils/taskProgress'
+import { useAuth } from '../context/useAuth'
 import { useFeedback } from '../context/useFeedback'
-import { socialV2API } from '../api/socialV2API'
+import { canRequestCompletion, canStart, isWaitingForTeammates } from '../utils/taskProgress'
 import ShareTaskDialog, { type ShareOffer } from '../components/ShareTaskDialog'
+import { InlineError, PriorityBadge, StatusBadge } from '../components/tasks/ui'
+import { STATUS_LABEL, dueDayOf, formatDay, initials } from '../components/tasks/taskFormat'
+import { useSection } from '../components/tasks/useSection'
+import { useTaskActions } from '../components/tasks/useTaskActions'
+import { OPEN_STATUSES, TASK_STATUSES, type LeaderboardRow, type Task, type TaskStatus } from '../components/tasks/types'
 
-type Task = {
-  _id: string
-  title: string
-  description?: string
-  status: 'pending' | 'in-progress' | 'completed' | 'cancelled' | 'completion-requested'
-  startDate?: string
-  dueDate?: string
-  priority?: 'low' | 'medium' | 'high' | 'urgent'
-  assignedTo?: Array<string | { _id: string; name?: string; email?: string }>
-  assigneeProgress?: AssigneeProgress[]
-  tags?: string[]
+type Period = 'month' | 'all'
+
+// The stat cards, one per status, so they add up to the total
+const STAT_STYLE: Record<TaskStatus, { box: string; number: string }> = {
+  pending: { box: 'bg-amber-500', number: 'text-amber-700' },
+  'in-progress': { box: 'bg-blue-500', number: 'text-blue-700' },
+  'completion-requested': { box: 'bg-purple-500', number: 'text-purple-700' },
+  completed: { box: 'bg-emerald-500', number: 'text-emerald-700' },
+  cancelled: { box: 'bg-neutral-400', number: 'text-neutral-700' },
 }
 
-type LeaderboardUser = {
-  _id: string
-  name: string
-  profileImage?: string
-  completedTasks: number
-  totalTasks: number
-  completionRate: number
+// Today and `offset` days on, as the browser's calendar day (YYYY-MM-DD)
+const calendarDay = (offset = 0) => {
+  const date = new Date()
+  date.setDate(date.getDate() + offset)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
-type SocialPost = {
-  _id: string
-  content: string
-  author?: { _id: string; name: string; profileImage?: string }
-  likes: string[]
-  comments: unknown[]
-  createdAt: string
+const greeting = () => {
+  const hour = new Date().getHours()
+  if (hour < 12) return 'Good morning'
+  if (hour < 17) return 'Good afternoon'
+  return 'Good evening'
 }
 
-type PersonalTodo = {
-  _id: string
-  title: string
-  description?: string
-  status: 'todo' | 'in_progress' | 'completed'
-  createdAt: string
-}
-
-const priorityConfig = {
-  urgent: { bg: 'bg-red-100', text: 'text-red-700', border: 'border-red-200' },
-  high: { bg: 'bg-orange-100', text: 'text-orange-700', border: 'border-orange-200' },
-  medium: { bg: 'bg-blue-100', text: 'text-blue-700', border: 'border-blue-200' },
-  low: { bg: 'bg-neutral-100', text: 'text-neutral-600', border: 'border-neutral-200' },
-}
-
-const statusConfig = {
-  pending: { bg: 'bg-amber-100', text: 'text-amber-700', icon: '⏳' },
-  'in-progress': { bg: 'bg-blue-100', text: 'text-blue-700', icon: '🔄' },
-  'completion-requested': { bg: 'bg-purple-100', text: 'text-purple-700', icon: '📤' },
-  completed: { bg: 'bg-emerald-100', text: 'text-emerald-700', icon: '✅' },
-  cancelled: { bg: 'bg-neutral-200', text: 'text-neutral-600', icon: '❌' },
+function Avatar({ name, image, className = 'h-8 w-8 text-xs' }: { name?: string; image?: string; className?: string }) {
+  return image ? (
+    <img src={image} alt="" className={`${className} shrink-0 rounded-full object-cover`} />
+  ) : (
+    <div aria-hidden="true" className={`${className} flex shrink-0 items-center justify-center rounded-full bg-purple-100 font-bold text-purple-700`}>
+      {initials(name)}
+    </div>
+  )
 }
 
 export default function UserDashboard() {
   const { notify } = useFeedback()
   const { user } = useAuth()
   const navigate = useNavigate()
-  const [tasks, setTasks] = useState<Task[]>([])
-  const [leaderboard, setLeaderboard] = useState<LeaderboardUser[]>([])
-  const [socialPosts, setSocialPosts] = useState<SocialPost[]>([])
-  const [personalTodos, setPersonalTodos] = useState<PersonalTodo[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-  // A completed todo's share draft, waiting for the owner to confirm it
-  const [shareOffer, setShareOffer] = useState<ShareOffer | null>(null)
   // Admins have their own dashboard
   const isAdminUser = user?.role === 'admin'
+  const enabled = !isAdminUser && !!user?._id
 
-  const loadData = useCallback(async () => {
-    setIsLoading(true)
-    try {
-      // The leaderboard is computed on the server: a regular user's task list
-      // only contains their own tasks, so it can't be built from that
-      const [taskRes, leaderboardRes, postsRes, todosRes] = await Promise.all([
-        taskAPI.getTasks(),
-        taskAPI.getLeaderboard().catch(() => ({ data: [] })),
-        socialV2API.getFeed().catch(() => ({ data: [] })),
-        socialV2API.getPersonalTasks().catch(() => ({ data: [] })),
-      ])
+  // A completed to-do's share draft, waiting for the owner to confirm it
+  const [shareOffer, setShareOffer] = useState<ShareOffer | null>(null)
+  const [togglingId, setTogglingId] = useState<string | null>(null)
+  const [period, setPeriod] = useState<Period>('month')
 
-      setTasks(Array.isArray(taskRes?.data) ? taskRes.data : [])
-      setLeaderboard(Array.isArray(leaderboardRes?.data) ? (leaderboardRes.data as LeaderboardUser[]) : [])
-      setSocialPosts(Array.isArray(postsRes?.data) ? (postsRes.data as SocialPost[]).slice(0, 5) : [])
-      setPersonalTodos(Array.isArray(todosRes?.data) ? (todosRes.data as PersonalTodo[]) : [])
-    } catch (error) {
-      console.error('Failed to load user dashboard', error)
-    } finally {
-      setIsLoading(false)
-    }
+  const loadSummary = useCallback(async () => (await taskAPI.getSummary()).data, [])
+  const loadRecent = useCallback(async () => (await taskAPI.listTasks({ page: 1, limit: 5, sort: '-createdAt' })).data ?? [], [])
+  const loadOverdue = useCallback(async () => (await taskAPI.listTasks({ page: 1, limit: 3, sort: 'dueDate', overdue: true })).data ?? [], [])
+  const loadDueSoon = useCallback(async () => {
+    const response = await taskAPI.listTasks({ page: 1, limit: 25, sort: 'dueDate', dueFrom: calendarDay(0), dueTo: calendarDay(3) })
+    return (response.data ?? []).filter((task) => OPEN_STATUSES.includes(task.status) && !task.isOverdue)
   }, [])
+  const loadBoard = useCallback(async () => ({ period, rows: (await taskAPI.getLeaderboard(period)).data ?? [] }), [period])
+  const loadFeed = useCallback(async () => (await taskAPI.getFeed()).slice(0, 5), [])
+  const loadTodos = useCallback(async () => taskAPI.getPersonalTodos(), [])
 
-  useEffect(() => {
-    if (!isAdminUser && user?._id) {
-      loadData()
-    }
-  }, [isAdminUser, user?._id, loadData])
+  const summary = useSection(loadSummary, enabled)
+  const recent = useSection(loadRecent, enabled)
+  const overdue = useSection(loadOverdue, enabled)
+  const dueSoon = useSection(loadDueSoon, enabled)
+  const board = useSection(loadBoard, enabled)
+  const feed = useSection(loadFeed, enabled)
+  const todos = useSection(loadTodos, enabled)
 
-  const pendingTasks = tasks.filter((task) => task.status === 'pending')
-  const inProgressTasks = tasks.filter((task) => task.status === 'in-progress')
-  const completedTasks = tasks.filter((task) => task.status === 'completed')
+  // After an action on a task, everything that counts or lists tasks catches up
+  const reloadTasks = useCallback(() => {
+    summary.reload(true)
+    recent.reload(true)
+    overdue.reload(true)
+    dueSoon.reload(true)
+  }, [summary, recent, overdue, dueSoon])
 
+  const actions = useTaskActions({ report: notify, onChanged: reloadTasks, onDeleted: reloadTasks })
 
-  
-  // Calculate completion rate
-  const completionRate = tasks.length > 0 ? Math.round((completedTasks.length / tasks.length) * 100) : 0
-  
-  // Get urgent/overdue tasks
-  const overdueTasks = tasks.filter((task) => {
-    if (!task.dueDate || task.status === 'completed' || task.status === 'cancelled') return false
-    return new Date(task.dueDate) < new Date()
-  })
-  
-  // Get upcoming tasks (due in next 3 days)
-  const upcomingTasks = tasks.filter((task) => {
-    if (!task.dueDate || task.status === 'completed' || task.status === 'cancelled') return false
-    const dueDate = new Date(task.dueDate)
-    const threeDaysFromNow = new Date()
-    threeDaysFromNow.setDate(threeDaysFromNow.getDate() + 3)
-    return dueDate >= new Date() && dueDate <= threeDaysFromNow
-  })
-
-  // Get greeting based on time
-  const getGreeting = () => {
-    const hour = new Date().getHours()
-    if (hour < 12) return 'Good morning'
-    if (hour < 17) return 'Good afternoon'
-    return 'Good evening'
-  }
-
-  // Swap in the task the API sends back; it carries everyone's progress
-  const replaceTask = (updated: Task) => {
-    setTasks((prev) => prev.map((task) => (task._id === updated._id ? updated : task)))
-  }
-
-  const handleCompleteTask = async (taskId: string) => {
+  const toggleTodo = async (todo: PersonalTodo) => {
+    if (togglingId) return
+    setTogglingId(todo._id)
     try {
-      const response = await taskAPI.requestCompletion(taskId)
-      replaceTask(response.data)
-    } catch (error) {
-      console.error('Unable to request task completion', error)
-      notify(getErrorMessage(error, 'Unable to request task completion'), 'error')
-    }
-  }
-
-  const handleStartTask = async (taskId: string) => {
-    try {
-      const response = await taskAPI.updateTask(taskId, { status: 'in-progress' })
-      replaceTask(response.data)
-    } catch (error) {
-      console.error('Unable to start task', error)
-      notify(getErrorMessage(error, 'Unable to start task'), 'error')
-    }
-  }
-
-  const handleToggleTodo = async (todoId: string) => {
-    try {
-      const response = await socialV2API.togglePersonalTask(todoId)
-      const updated = response?.data as PersonalTodo | undefined
-      if (updated) {
-        setPersonalTodos((prev) => prev.map((todo) => (todo._id === todoId ? updated : todo)))
-      }
+      const response = await taskAPI.togglePersonalTodo(todo._id)
+      todos.reload(true)
       // With auto-share on, nothing is posted until the owner confirms the draft
-      if (response?.autoShare?.suggested) {
-        setShareOffer({ taskId: todoId, draft: response.autoShare.draft })
+      if (response.autoShare?.suggested && response.autoShare.draft) {
+        setShareOffer({ taskId: todo._id, draft: response.autoShare.draft })
       }
     } catch (error) {
-      notify(getErrorMessage(error, 'Unable to update todo'), 'error')
+      notify(getErrorMessage(error, "Couldn't update the to-do."), 'error')
+    } finally {
+      setTogglingId(null)
     }
   }
 
+  if (isAdminUser) return <Navigate to="/admin" replace />
 
+  const counts = summary.data
+  const open = counts ? (counts.byStatus.pending ?? 0) + (counts.byStatus['in-progress'] ?? 0) + (counts.byStatus['completion-requested'] ?? 0) : null
+  const myTodos = todos.data ?? []
+  const boardRows: LeaderboardRow[] = board.data?.period === period ? board.data.rows : []
+  const boardLoading = board.loading || (board.data !== null && board.data.period !== period && !board.error)
 
-  if (isAdminUser) {
-    return <Navigate to="/admin" replace />
+  const dueText = (task: Task) => {
+    const day = formatDay(dueDayOf(task))
+    return day ? `Due ${day}` : ''
   }
 
-  if (isLoading) {
+  // The list of tasks behind an alert, each opening its details
+  const alertList = (tasks: Task[] | null, total: number, tone: 'red' | 'amber') => {
+    const text = tone === 'red' ? 'text-red-700' : 'text-amber-700'
     return (
-      <div className="flex min-h-screen items-center justify-center bg-neutral-50 text-sm text-neutral-600">
-        Loading dashboard...
-      </div>
+      <ul className="mt-2 space-y-1">
+        {(tasks ?? []).slice(0, 3).map((task) => (
+          <li key={task._id} className={`text-sm ${text}`}>
+            <Link to={`/tasks?task=${task._id}`} className="font-medium underline-offset-2 hover:underline">
+              {task.title}
+            </Link>{' '}
+            <span className="whitespace-nowrap">({dueText(task)})</span>
+          </li>
+        ))}
+        {total > 3 && (
+          <li className={`text-sm ${text}`}>
+            <Link to={tone === 'red' ? '/tasks?overdue=true' : '/tasks'} className="underline-offset-2 hover:underline">
+              +{total - 3} more
+            </Link>
+          </li>
+        )}
+      </ul>
     )
   }
 
-  const renderDashboard = (
-    <div className="space-y-6">
-      {/* Welcome Header */}
-      <div className="rounded-xl bg-linear-to-r from-emerald-600 to-teal-600 p-6 text-white">
-        <h1 className="text-2xl font-bold">{getGreeting()}, {user?.name?.split(' ')[0] || 'User'}! 👋</h1>
-        <p className="mt-1 text-emerald-100">Here's what's happening with your tasks today.</p>
-        
-        {/* Quick Stats in Header */}
-        <div className="mt-4 flex flex-wrap gap-4">
-          <div className="rounded-lg bg-white/20 px-4 py-2">
-            <span className="text-sm opacity-90">Active Tasks</span>
-            <span className="ml-2 text-lg font-bold">{pendingTasks.length + inProgressTasks.length}</span>
-          </div>
-          <div className="rounded-lg bg-white/20 px-4 py-2">
-            <span className="text-sm opacity-90">Completion Rate</span>
-            <span className="ml-2 text-lg font-bold">{completionRate}%</span>
-          </div>
-
-        </div>
-      </div>
-
-      {/* Anyone outside a team can start one, or join one by invite */}
-      {user?.role === 'user' && (
-        <div className="flex flex-col gap-3 rounded-xl border bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="font-semibold text-neutral-900">You're not in a team yet</p>
-            <p className="text-sm text-neutral-600">Start your own team and invite people to it, or accept an invite you've received.</p>
-          </div>
-          <button
-            onClick={() => navigate('/teams')}
-            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
-          >
-            Start or join a team
-          </button>
-        </div>
-      )}
-
-      {/* Quick Actions */}
-
-      {/* Stats Grid */}
-      <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
-        <div className="rounded-xl border bg-white p-4 shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100 text-xl">📋</div>
-            <div>
-              <p className="text-2xl font-bold text-neutral-900">{tasks.length}</p>
-              <p className="text-xs text-neutral-500">Total Tasks</p>
-            </div>
-          </div>
-        </div>
-        <div className="rounded-xl border bg-white p-4 shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-100 text-xl">⏳</div>
-            <div>
-              <p className="text-2xl font-bold text-amber-600">{pendingTasks.length}</p>
-              <p className="text-xs text-neutral-500">Pending</p>
-            </div>
-          </div>
-        </div>
-        <div className="rounded-xl border bg-white p-4 shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100 text-xl">🔄</div>
-            <div>
-              <p className="text-2xl font-bold text-blue-600">{inProgressTasks.length}</p>
-              <p className="text-xs text-neutral-500">In Progress</p>
-            </div>
-          </div>
-        </div>
-        <div className="rounded-xl border bg-white p-4 shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-100 text-xl">✅</div>
-            <div>
-              <p className="text-2xl font-bold text-emerald-600">{completedTasks.length}</p>
-              <p className="text-xs text-neutral-500">Completed</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Alerts Section */}
-      {(overdueTasks.length > 0 || upcomingTasks.length > 0) && (
-        <div className="grid gap-4 md:grid-cols-2">
-          {overdueTasks.length > 0 && (
-            <div className="rounded-xl border border-red-200 bg-red-50 p-4">
-              <div className="flex items-center gap-2 text-red-700">
-                <span className="text-lg">⚠️</span>
-                <h3 className="font-semibold">Overdue Tasks ({overdueTasks.length})</h3>
-              </div>
-              <ul className="mt-2 space-y-1">
-                {overdueTasks.slice(0, 3).map(task => (
-                  <li key={task._id} className="text-sm text-red-600">
-                    • {task.title} (Due: {new Date(task.dueDate!).toLocaleDateString()})
-                  </li>
-                ))}
-                {overdueTasks.length > 3 && (
-                  <li className="text-sm text-red-500">+{overdueTasks.length - 3} more...</li>
-                )}
-              </ul>
-            </div>
-          )}
-          {upcomingTasks.length > 0 && (
-            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
-              <div className="flex items-center gap-2 text-amber-700">
-                <span className="text-lg">📌</span>
-                <h3 className="font-semibold">Due Soon ({upcomingTasks.length})</h3>
-              </div>
-              <ul className="mt-2 space-y-1">
-                {upcomingTasks.slice(0, 3).map(task => (
-                  <li key={task._id} className="text-sm text-amber-600">
-                    • {task.title} (Due: {new Date(task.dueDate!).toLocaleDateString()})
-                  </li>
-                ))}
-                {upcomingTasks.length > 3 && (
-                  <li className="text-sm text-amber-500">+{upcomingTasks.length - 3} more...</li>
-                )}
-              </ul>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Leaderboard & Recent Tasks Grid */}
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* Social Feed Section */}
-        <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
-          <div className="border-b bg-linear-to-r from-purple-500 to-pink-500 px-5 py-4">
-            <div className="flex items-center gap-2 text-white">
-              <span className="text-2xl">📱</span>
-              <h3 className="font-bold text-lg">Social Feed</h3>
-            </div>
-            <p className="text-purple-100 text-sm mt-1">Updates from your network</p>
-          </div>
-          {socialPosts.length === 0 ? (
-            <div className="p-8 text-center">
-              <div className="text-4xl mb-3">🌐</div>
-              <p className="text-sm text-neutral-500">No posts yet. Visit the Social Hub to get started!</p>
-              <button
-                onClick={() => navigate('/social')}
-                className="mt-3 text-sm text-purple-600 hover:text-purple-700 font-medium"
-              >
-                Go to Social Hub →
-              </button>
-            </div>
-          ) : (
-            <div className="divide-y max-h-96 overflow-y-auto">
-              {socialPosts.map((post) => (
-                <div key={post._id} className="p-4 hover:bg-neutral-50 transition-colors">
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-purple-100 text-xs font-bold text-purple-600">
-                      {(post.author?.name || '?').split(' ').map((n: string) => n[0]).join('').slice(0, 2)}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-neutral-900">{post.author?.name || 'Unknown'}</p>
-                      <p className="text-sm text-neutral-600 mt-1 line-clamp-2">{post.content}</p>
-                      <div className="flex gap-4 mt-2 text-xs text-neutral-500">
-                        <span>👍 {post.likes?.length ?? 0}</span>
-                        <span>💬 {post.comments?.length ?? 0}</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Personal Todos Section */}
-        <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
-          <div className="border-b bg-linear-to-r from-teal-500 to-cyan-500 px-5 py-4">
-            <div className="flex items-center gap-2 text-white">
-              <span className="text-2xl">✅</span>
-              <h3 className="font-bold text-lg">Personal Todos</h3>
-            </div>
-            <p className="text-teal-100 text-sm mt-1 flex items-center gap-1">
-              {personalTodos.filter(t => t.status !== 'completed').length} of {personalTodos.length} remaining
-            </p>
-          </div>
-          {personalTodos.length === 0 ? (
-            <div className="p-8 text-center">
-              <div className="text-4xl mb-3">📝</div>
-              <p className="text-sm text-neutral-500">No todos yet. Create one in the Social Hub!</p>
-              <button
-                onClick={() => navigate('/social')}
-                className="mt-3 text-sm text-teal-600 hover:text-teal-700 font-medium"
-              >
-                Go to Social Hub →
-              </button>
-            </div>
-          ) : (
-            <div className="divide-y max-h-96 overflow-y-auto">
-              {personalTodos.map((todo) => (
-                <div
-                  key={todo._id}
-                  className={`p-4 flex items-start gap-3 hover:bg-neutral-50 transition-colors ${
-                    todo.status === 'completed' ? 'bg-neutral-50' : ''
-                  }`}
-                >
-                  <button
-                    onClick={() => handleToggleTodo(todo._id)}
-                    className={`mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded border-2 transition-all ${
-                      todo.status === 'completed'
-                        ? 'bg-teal-500 border-teal-500'
-                        : 'border-neutral-300 hover:border-teal-500'
-                    }`}
-                  >
-                    {todo.status === 'completed' && <span className="text-white text-xs">✓</span>}
-                  </button>
-                  <div className="flex-1 min-w-0">
-                    <p
-                      className={`text-sm font-medium ${
-                        todo.status === 'completed' ? 'line-through text-neutral-400' : 'text-neutral-900'
-                      }`}
-                    >
-                      {todo.title}
-                    </p>
-                    {todo.description && (
-                      <p className="text-xs text-neutral-500 mt-1">{todo.description}</p>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Leaderboard & Recent Tasks Grid */}
-      <div className="grid gap-6 lg:grid-cols-2">
-        {/* Leaderboard */}
-        <div className="rounded-xl border bg-white shadow-sm overflow-hidden">
-          <div className="border-b bg-linear-to-r from-amber-500 to-orange-500 px-5 py-4">
-            <div className="flex items-center gap-2 text-white">
-              <span className="text-2xl">🏆</span>
-              <h3 className="font-bold text-lg">Leaderboard</h3>
-            </div>
-            <p className="text-amber-100 text-sm mt-1">Top performers this month</p>
-          </div>
-          {leaderboard.length === 0 ? (
-            <div className="p-8 text-center">
-              <div className="text-4xl mb-3">👥</div>
-              <p className="text-sm text-neutral-500">No team members yet</p>
-            </div>
-          ) : (
-            <div className="divide-y">
-              {leaderboard.slice(0, 5).map((member, index) => {
-                const isCurrentUser = member._id === user?._id
-                const rankEmoji = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `#${index + 1}`
-                return (
-                  <div 
-                    key={member._id} 
-                    className={`flex items-center gap-4 px-5 py-3 ${isCurrentUser ? 'bg-emerald-50' : 'hover:bg-neutral-50'} transition-colors`}
-                  >
-                    {/* Rank */}
-                    <div className={`flex h-8 w-8 items-center justify-center rounded-full text-sm font-bold ${
-                      index === 0 ? 'bg-amber-100 text-amber-700' :
-                      index === 1 ? 'bg-neutral-200 text-neutral-700' :
-                      index === 2 ? 'bg-orange-100 text-orange-700' :
-                      'bg-neutral-100 text-neutral-600'
-                    }`}>
-                      {typeof rankEmoji === 'string' && rankEmoji.startsWith('#') ? rankEmoji : rankEmoji}
-                    </div>
-                    
-                    {/* Avatar */}
-                    <div className="relative">
-                      {member.profileImage ? (
-                        <img 
-                          src={member.profileImage} 
-                          alt={member.name} 
-                          className="h-10 w-10 rounded-full object-cover border-2 border-white shadow"
-                        />
-                      ) : (
-                        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100 text-sm font-bold text-emerald-600 border-2 border-white shadow">
-                          {member.name.split(' ').map((n: string) => n[0]).join('').toUpperCase().slice(0, 2)}
-                        </div>
-                      )}
-                      {isCurrentUser && (
-                        <div className="absolute -bottom-1 -right-1 h-4 w-4 rounded-full bg-emerald-500 border-2 border-white flex items-center justify-center">
-                          <span className="text-[8px] text-white">✓</span>
-                        </div>
-                      )}
-                    </div>
-                    
-                    {/* Info */}
-                    <div className="flex-1 min-w-0">
-                      <p className={`font-medium truncate ${isCurrentUser ? 'text-emerald-700' : 'text-neutral-900'}`}>
-                        {member.name}
-                        {isCurrentUser && <span className="ml-2 text-xs text-emerald-600">(You)</span>}
-                      </p>
-                      <p className="text-xs text-neutral-500">{member.completedTasks} tasks completed</p>
-                    </div>
-                    
-                    {/* Stats */}
-                    <div className="text-right">
-                      <div className="flex items-center gap-1">
-                        <div className="h-1.5 w-16 rounded-full bg-neutral-100 overflow-hidden">
-                          <div 
-                            className="h-full bg-emerald-500 rounded-full transition-all" 
-                            style={{ width: `${member.completionRate}%` }}
-                          ></div>
-                        </div>
-                        <span className="text-xs font-medium text-neutral-600 w-8">{member.completionRate}%</span>
-                      </div>
-                      <p className="text-[10px] text-neutral-400 mt-0.5">{member.totalTasks} total</p>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-          {leaderboard.length > 5 && (
-            <div className="border-t px-5 py-3 text-center">
-              <span className="text-xs text-neutral-500">+{leaderboard.length - 5} more team members</span>
-            </div>
-          )}
-        </div>
-
-        {/* Recent Tasks */}
-        <div className="rounded-xl border bg-white p-5 shadow-sm">
-          <div className="mb-4 flex items-center justify-between">
-            <h3 className="font-semibold text-neutral-900">Recent Tasks</h3>
-          </div>
-          {tasks.length === 0 ? (
-            <p className="text-center text-sm text-neutral-500 py-8">No tasks assigned yet.</p>
-          ) : (
-            <div className="space-y-3">
-              {tasks.slice(0, 5).map((task) => {
-                const config = statusConfig[task.status] || statusConfig.pending
-                const pConfig = priorityConfig[task.priority || 'medium']
-                return (
-                  <div key={task._id} className="flex items-center justify-between rounded-lg border p-3 hover:bg-neutral-50 transition-colors">
-                    <div className="flex items-center gap-3">
-                      <span className="text-lg">{config.icon}</span>
-                      <div>
-                      <p className="font-medium text-neutral-900">{task.title}</p>
-                      <div className="mt-1 flex items-center gap-2">
-                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${pConfig.bg} ${pConfig.text}`}>
-                          {task.priority || 'medium'}
-                        </span>
-                        {task.dueDate && (
-                          <span className="text-xs text-neutral-500">
-                            Due: {new Date(task.dueDate).toLocaleDateString()}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${config.bg} ${config.text}`}>
-                      {task.status.replace('-', ' ')}
-                    </span>
-                    {canStart(task, user?._id) && (
-                      <button
-                        onClick={() => handleStartTask(task._id)}
-                        className="rounded-lg bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700"
-                      >
-                        Start
-                      </button>
-                    )}
-                    {!canStart(task, user?._id) && canRequestCompletion(task, user?._id) && (
-                      <button
-                        onClick={() => handleCompleteTask(task._id)}
-                        className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700"
-                      >
-                        Complete
-                      </button>
-                    )}
-                    {isWaitingForTeammates(task, user?._id) && (
-                      <span className="text-xs text-purple-600">Waiting for teammates</span>
-                    )}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        )}
-        </div>
-      </div>
-    </div>
-  )
-
   return (
     <div className="min-h-screen bg-neutral-50">
-      {/* Content */}
       <div className="mx-auto max-w-6xl px-4 py-6">
-        {renderDashboard}
+        <div className="space-y-6">
+          {/* Welcome Header */}
+          <div className="rounded-xl bg-linear-to-r from-emerald-600 to-teal-600 p-6 text-white">
+            <h1 className="text-2xl font-bold">{greeting()}, {user?.name?.split(' ')[0] || 'User'}!</h1>
+            <p className="mt-1 text-emerald-50">Here's what's happening with your tasks today.</p>
+
+            <div className="mt-4 flex flex-wrap gap-4">
+              <div className="rounded-lg bg-white/20 px-4 py-2">
+                <span className="text-sm">Active Tasks</span>
+                <span className="ml-2 text-lg font-bold">{open ?? '–'}</span>
+              </div>
+              <div className="rounded-lg bg-white/20 px-4 py-2">
+                <span className="text-sm">Completion Rate</span>
+                <span className="ml-2 text-lg font-bold">{counts ? `${counts.completionRate}%` : '–'}</span>
+              </div>
+              <Link to="/tasks" className="rounded-lg bg-white px-4 py-2 text-sm font-semibold text-emerald-700 hover:bg-emerald-50">
+                View all tasks
+              </Link>
+            </div>
+          </div>
+
+          {/* Anyone outside a team can start one, or join one by invite */}
+          {user?.role === 'user' && (
+            <div className="flex flex-col gap-3 rounded-xl border border-neutral-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="font-semibold text-neutral-900">You're not in a team yet</p>
+                <p className="text-sm text-neutral-600">Start your own team and invite people to it, or accept an invite you've received.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate('/teams')}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+              >
+                Start or join a team
+              </button>
+            </div>
+          )}
+
+          {/* Stats: one card per status, so they add up to the total */}
+          {summary.error && !counts ? (
+            <InlineError title="Your task counts didn't load" message={summary.error} onRetry={() => summary.reload()} />
+          ) : (
+            <section aria-label="Task counts" className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
+              <Link to="/tasks" className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm transition-shadow hover:shadow-md">
+                <p className="text-2xl font-bold text-neutral-900">{counts?.total ?? '–'}</p>
+                <p className="text-xs text-neutral-600">Total tasks</p>
+              </Link>
+              {TASK_STATUSES.map((status) => (
+                <Link
+                  key={status}
+                  to={`/tasks?status=${status}`}
+                  className="rounded-xl border border-neutral-200 bg-white p-4 shadow-sm transition-shadow hover:shadow-md"
+                >
+                  <div className="flex items-center gap-2">
+                    <span aria-hidden="true" className={`h-2.5 w-2.5 shrink-0 rounded-full ${STAT_STYLE[status].box}`} />
+                    <p className={`text-2xl font-bold ${STAT_STYLE[status].number}`}>{counts?.byStatus[status] ?? '–'}</p>
+                  </div>
+                  <p className="text-xs text-neutral-600">{STATUS_LABEL[status]}</p>
+                </Link>
+              ))}
+            </section>
+          )}
+
+          {/* Alerts */}
+          {counts && (counts.overdue > 0 || counts.dueSoon > 0) && (
+            <div className="grid gap-4 md:grid-cols-2">
+              {counts.overdue > 0 && (
+                <div className="rounded-xl border border-red-200 bg-red-50 p-4">
+                  <div className="flex items-center gap-2 text-red-700">
+                    <AlertTriangle aria-hidden="true" className="h-5 w-5" />
+                    <h2 className="font-semibold">Overdue tasks ({counts.overdue})</h2>
+                  </div>
+                  {overdue.error && !overdue.data ? (
+                    <p className="mt-2 text-sm text-red-700">
+                      The list didn't load.{' '}
+                      <button type="button" onClick={() => overdue.reload()} className="font-medium underline">Retry</button>
+                    </p>
+                  ) : (
+                    alertList(overdue.data, counts.overdue, 'red')
+                  )}
+                </div>
+              )}
+              {counts.dueSoon > 0 && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+                  <div className="flex items-center gap-2 text-amber-700">
+                    <CalendarClock aria-hidden="true" className="h-5 w-5" />
+                    <h2 className="font-semibold">Due soon ({counts.dueSoon})</h2>
+                  </div>
+                  {dueSoon.error && !dueSoon.data ? (
+                    <p className="mt-2 text-sm text-amber-800">
+                      The list didn't load.{' '}
+                      <button type="button" onClick={() => dueSoon.reload()} className="font-medium underline">Retry</button>
+                    </p>
+                  ) : (
+                    alertList(dueSoon.data, counts.dueSoon, 'amber')
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="grid gap-6 lg:grid-cols-2">
+            {/* Social Feed */}
+            <section aria-labelledby="dash-feed" className="overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-sm">
+              <div className="border-b border-neutral-200 bg-linear-to-r from-purple-600 to-pink-600 px-5 py-4 text-white">
+                <div className="flex items-center gap-2">
+                  <Globe aria-hidden="true" className="h-6 w-6" />
+                  <h2 id="dash-feed" className="text-lg font-bold">Social Feed</h2>
+                </div>
+                <p className="mt-1 text-sm text-white/90">Updates from your network</p>
+              </div>
+              {feed.loading && !feed.data ? (
+                <p role="status" className="p-6 text-center text-sm text-neutral-600">Loading the feed…</p>
+              ) : feed.error && !feed.data ? (
+                <div className="p-4"><InlineError title="The feed didn't load" message={feed.error} onRetry={() => feed.reload()} /></div>
+              ) : (feed.data ?? []).length === 0 ? (
+                <div className="p-8 text-center">
+                  <p className="text-sm text-neutral-600">No posts yet. Visit the Social Hub to get started.</p>
+                  <Link to="/social" className="mt-3 inline-block text-sm font-medium text-purple-700 hover:underline">Go to Social Hub →</Link>
+                </div>
+              ) : (
+                <ul className="max-h-96 divide-y divide-neutral-200 overflow-y-auto">
+                  {(feed.data ?? []).map((post: FeedPost) => (
+                    <li key={post._id} className="p-4 transition-colors hover:bg-neutral-50">
+                      <div className="flex items-start gap-3">
+                        <Avatar name={post.author?.name} image={post.author?.profileImage} />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium text-neutral-900">{post.author?.name || 'Unknown'}</p>
+                          <Link to={`/social?post=${post._id}`} className="mt-1 line-clamp-2 block text-sm text-neutral-700 hover:underline">
+                            {post.title ? `${post.title}: ${post.content}` : post.content}
+                          </Link>
+                          <div className="mt-2 flex gap-4 text-xs text-neutral-600">
+                            <span className="inline-flex items-center gap-1">
+                              <ThumbsUp aria-hidden="true" className="h-3.5 w-3.5" />
+                              {post.likes?.length ?? 0}
+                              <span className="sr-only"> likes</span>
+                            </span>
+                            <span className="inline-flex items-center gap-1">
+                              <MessageCircle aria-hidden="true" className="h-3.5 w-3.5" />
+                              {post.comments?.length ?? 0}
+                              <span className="sr-only"> comments</span>
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            {/* Personal Todos */}
+            <section aria-labelledby="dash-todos" className="overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-sm">
+              <div className="border-b border-neutral-200 bg-linear-to-r from-teal-600 to-cyan-600 px-5 py-4 text-white">
+                <div className="flex items-center gap-2">
+                  <ListTodo aria-hidden="true" className="h-6 w-6" />
+                  <h2 id="dash-todos" className="text-lg font-bold">Personal Todos</h2>
+                </div>
+                <p className="mt-1 text-sm text-white/90">
+                  {todos.data ? `${myTodos.filter((todo) => todo.status !== 'completed').length} of ${myTodos.length} remaining` : 'Your own to-do list'}
+                </p>
+              </div>
+              {todos.loading && !todos.data ? (
+                <p role="status" className="p-6 text-center text-sm text-neutral-600">Loading your to-dos…</p>
+              ) : todos.error && !todos.data ? (
+                <div className="p-4"><InlineError title="Your to-dos didn't load" message={todos.error} onRetry={() => todos.reload()} /></div>
+              ) : myTodos.length === 0 ? (
+                <div className="p-8 text-center">
+                  <p className="text-sm text-neutral-600">No to-dos yet. Create one in the Social Hub.</p>
+                  <Link to="/social" className="mt-3 inline-block text-sm font-medium text-teal-700 hover:underline">Go to Social Hub →</Link>
+                </div>
+              ) : (
+                <ul className="max-h-96 divide-y divide-neutral-200 overflow-y-auto">
+                  {myTodos.map((todo) => {
+                    const done = todo.status === 'completed'
+                    return (
+                      <li key={todo._id} className={`flex items-start gap-3 p-4 transition-colors hover:bg-neutral-50 ${done ? 'bg-neutral-50' : ''}`}>
+                        <input
+                          type="checkbox"
+                          checked={done}
+                          disabled={togglingId === todo._id}
+                          onChange={() => toggleTodo(todo)}
+                          aria-label={done ? `Mark "${todo.title}" as not done` : `Mark "${todo.title}" as done`}
+                          className="mt-0.5 h-5 w-5 shrink-0 cursor-pointer rounded border-neutral-300 accent-teal-600 disabled:cursor-wait"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className={`wrap-break-word text-sm font-medium ${done ? 'text-neutral-500 line-through' : 'text-neutral-900'}`}>{todo.title}</p>
+                          {todo.description && <p className="mt-1 wrap-break-word text-xs text-neutral-600">{todo.description}</p>}
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </section>
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-2">
+            {/* Leaderboard */}
+            <section aria-labelledby="dash-board" className="overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-sm">
+              <div className="border-b border-neutral-200 bg-linear-to-r from-amber-600 to-orange-600 px-5 py-4 text-white">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Trophy aria-hidden="true" className="h-6 w-6" />
+                    <h2 id="dash-board" className="text-lg font-bold">Leaderboard</h2>
+                  </div>
+                  <div role="group" aria-label="Leaderboard period" className="flex rounded-lg bg-white/20 p-0.5 text-xs font-semibold">
+                    {(['month', 'all'] as const).map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setPeriod(value)}
+                        aria-pressed={period === value}
+                        className={`rounded-md px-3 py-1.5 transition-colors ${period === value ? 'bg-white text-orange-700' : 'text-white hover:bg-white/10'}`}
+                      >
+                        {value === 'month' ? 'This month' : 'All time'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <p className="mt-1 text-sm text-white/90">Top performers in your team</p>
+              </div>
+              {boardLoading && boardRows.length === 0 ? (
+                <p role="status" className="p-6 text-center text-sm text-neutral-600">Loading the leaderboard…</p>
+              ) : board.error ? (
+                <div className="p-4"><InlineError title="The leaderboard didn't load" message={board.error} onRetry={() => board.reload()} /></div>
+              ) : boardRows.length === 0 ? (
+                <div className="p-8 text-center">
+                  <p className="text-sm text-neutral-600">
+                    {period === 'month' ? 'No finished or open tasks this month yet.' : 'Nobody has any tasks yet.'}
+                  </p>
+                </div>
+              ) : (
+                <ol aria-busy={boardLoading} className={`divide-y divide-neutral-200 ${boardLoading ? 'opacity-60' : ''}`}>
+                  {boardRows.slice(0, 5).map((member, index) => {
+                    const isCurrentUser = member._id === user?._id
+                    return (
+                      <li key={member._id} className={`flex items-center gap-3 px-5 py-3 transition-colors ${isCurrentUser ? 'bg-emerald-50' : 'hover:bg-neutral-50'}`}>
+                        <div
+                          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-bold ${
+                            index === 0 ? 'bg-amber-100 text-amber-800' : index === 1 ? 'bg-neutral-200 text-neutral-700' : index === 2 ? 'bg-orange-100 text-orange-800' : 'bg-neutral-100 text-neutral-600'
+                          }`}
+                        >
+                          <span className="sr-only">Rank </span>
+                          {index + 1}
+                        </div>
+                        <Avatar name={member.name} image={member.profileImage} className="h-10 w-10 text-sm" />
+                        <div className="min-w-0 flex-1">
+                          <p className={`truncate font-medium ${isCurrentUser ? 'text-emerald-800' : 'text-neutral-900'}`}>
+                            {member.name}
+                            {isCurrentUser && <span className="ml-2 text-xs text-emerald-700">(You)</span>}
+                          </p>
+                          <p className="text-xs text-neutral-600">{member.completedTasks} of {member.totalTasks} completed</p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <div className="hidden h-1.5 w-16 overflow-hidden rounded-full bg-neutral-100 sm:block" aria-hidden="true">
+                            <div className="h-full rounded-full bg-emerald-500" style={{ width: `${member.completionRate}%` }} />
+                          </div>
+                          <span className="w-10 text-right text-xs font-medium text-neutral-700">{member.completionRate}%</span>
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ol>
+              )}
+              {boardRows.length > 5 && (
+                <div className="border-t border-neutral-200 px-5 py-3 text-center text-xs text-neutral-600">+{boardRows.length - 5} more team members</div>
+              )}
+            </section>
+
+            {/* Recent Tasks */}
+            <section aria-labelledby="dash-recent" className="rounded-xl border border-neutral-200 bg-white p-5 shadow-sm">
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <h2 id="dash-recent" className="flex items-center gap-2 font-semibold text-neutral-900">
+                  <ClipboardList aria-hidden="true" className="h-5 w-5 text-neutral-500" />
+                  Recent Tasks
+                </h2>
+                <Link to="/tasks" className="text-sm font-medium text-emerald-700 hover:underline">View all tasks</Link>
+              </div>
+              {recent.loading && !recent.data ? (
+                <p role="status" className="py-8 text-center text-sm text-neutral-600">Loading your tasks…</p>
+              ) : recent.error && !recent.data ? (
+                <InlineError title="Your tasks didn't load" message={recent.error} onRetry={() => recent.reload()} />
+              ) : (recent.data ?? []).length === 0 ? (
+                <p className="py-8 text-center text-sm text-neutral-600">No tasks assigned yet.</p>
+              ) : (
+                <ul className="space-y-3">
+                  {(recent.data ?? []).map((task) => {
+                    const busy = actions.busyId === task._id
+                    const due = dueText(task)
+                    return (
+                      <li key={task._id} className="flex flex-col gap-2 rounded-lg border border-neutral-200 p-3 transition-colors hover:bg-neutral-50 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="min-w-0">
+                          <Link to={`/tasks?task=${task._id}`} className="block wrap-break-word font-medium text-neutral-900 hover:underline">
+                            {task.title}
+                          </Link>
+                          <div className="mt-1 flex flex-wrap items-center gap-2">
+                            <PriorityBadge priority={task.priority} />
+                            <StatusBadge status={task.status} />
+                            {due && <span className={`text-xs ${task.isOverdue ? 'font-semibold text-red-700' : 'text-neutral-600'}`}>{due}{task.isOverdue ? ' (overdue)' : ''}</span>}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 flex-wrap items-center gap-2">
+                          {canStart(task, user?._id) && (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => actions.start(task)}
+                              className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                            >
+                              Start
+                            </button>
+                          )}
+                          {canRequestCompletion(task, user?._id) && (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => actions.requestCompletion(task)}
+                              className="rounded-lg bg-purple-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-700 disabled:opacity-50"
+                            >
+                              Request completion
+                            </button>
+                          )}
+                          {isWaitingForTeammates(task, user?._id) && <span className="text-xs text-purple-700">Waiting for teammates</span>}
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </section>
+          </div>
+        </div>
       </div>
 
       {shareOffer && (
         <ShareTaskDialog
           offer={shareOffer}
           onClose={() => setShareOffer(null)}
-          onShared={(summary) => {
+          onShared={(text) => {
             setShareOffer(null)
-            notify(summary, 'success')
+            notify(text, 'success')
           }}
         />
       )}
+
+      {actions.dialogs}
     </div>
   )
 }
-

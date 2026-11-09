@@ -66,6 +66,13 @@ export const formatDay = (day?: string | null, style: 'medium' | 'short' = 'medi
   return date.toLocaleDateString(undefined, style === 'short' ? { day: 'numeric', month: 'short' } : { dateStyle: 'medium' })
 }
 
+// A day from a timestamp, in local time
+export const formatDate = (value?: string | null) => {
+  if (!value) return ''
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined, { dateStyle: 'medium' })
+}
+
 // A moment in local time, without seconds
 export const formatDateTime = (value?: string | null) => {
   if (!value) return ''
