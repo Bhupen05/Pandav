@@ -1,7 +1,11 @@
 # Remaining Work
 
-What is still open after Phase 9, as of 2026-11-10. Phase 9 is on the branch `phase-9`. It is **not
-merged into `main` and not deployed**. `main` holds Phases 1–8 (through PR #4).
+What is still open after Phase 9, as of 2026-11-10. The Phase 9 **backend** and the frontend
+groundwork reached `main` through PR #5 (2026-10-24), and Vercel's production deployment is that
+commit (`0f83d48`). The eight Phase 9 **screens**, LinkedIn posting and the fixes after them are on
+the branch `phase-9` only: not merged into `main`, not deployed. Until they are, production pairs the
+new backend (if Render deployed it) with the old screens, and the new pages (Approvals,
+Notifications, People, Audit log, Reports, password reset, email check) are empty placeholders.
 
 Phase 9 is three pieces of work:
 - the backend: accounts, tasks, attendance, teams, chat, the Social Hub and admin
@@ -29,7 +33,12 @@ fix. What is left is in sections 3–6. The owner's part is sections 1 and 2.
 These happen on GitHub, Render and Vercel, outside the code.
 
 **Phase 9 (branch `phase-9`)**
-- [ ] Merge `phase-9` into `main` once CI (backend, frontend, e2e) passes.
+- [ ] On 2026-11-10 the Render backend didn't answer at all (no response in 60–100 seconds, direct
+      or through Vercel), while the Vercel frontend did. Check Render's dashboard and logs first:
+      the service may be suspended or failing to start (on 2026-10-18 the Atlas login in
+      `MONGODB_URI` failed with `bad auth`).
+- [ ] Merge `phase-9` into `main` once CI (backend, frontend, e2e) passes. Vercel then deploys the
+      new screens to production; Render deploys the backend if it auto-deploys from `main`.
 - [ ] Deploy the backend and the frontend together. The API changed in places the old screens don't
       expect (for example the feed's `next` cursor, `data.postId` on a share conflict, one account
       payload for register and login), and the new screens call endpoints the old backend doesn't
