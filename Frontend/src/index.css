@@ -4,7 +4,7 @@
 @theme {
   --font-headline: "Manrope", sans-serif;
   --font-body: "Inter", sans-serif;
-  
+
   --color-primary: #00386c;
   --color-primary-light: #1a4f8b;
   --color-secondary: #515f74;
@@ -19,8 +19,40 @@
   body {
     @apply font-body bg-surface text-slate-900;
   }
+
+  /* Tailwind 4 draws a bare "border" in the text colour (near-black); a
+     border without a colour class gets this soft grey instead */
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-slate-200);
+  }
+
+  /* One visible focus ring for every control that can be reached by keyboard */
+  :focus-visible {
+    outline: 2px solid var(--color-emerald-600);
+    outline-offset: 2px;
+  }
 }
 
 .bg-primary-gradient {
   background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-light) 100%);
+}
+
+/* People who ask their system for less motion get (almost) none. Loading
+   spinners keep turning: they show that the page is working. */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *:not(.animate-spin),
+  *:not(.animate-spin)::before,
+  *:not(.animate-spin)::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -16,6 +16,9 @@ interface OpenDialog {
   finish: (value: string | null) => void;
 }
 
+// A popover is closed (display: none) until it is shown, hence the open: variant
+const POPOVER_SUPPORTED = typeof HTMLElement !== 'undefined' && 'popover' in HTMLElement.prototype;
+
 const NOTICE_DURATION_MS: Record<NoticeTone, number> = { success: 4000, info: 4000, error: 7000 };
 
 const NOTICE_CLASSES: Record<NoticeTone, string> = {
@@ -30,6 +33,7 @@ export const FeedbackProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const [dialog, setDialog] = useState<OpenDialog | null>(null);
   const openDialog = useRef<OpenDialog | null>(null);
   const nextId = useRef(0);
+  const toastsRef = useRef<HTMLDivElement>(null);
 
   const dismiss = useCallback((id: number) => {
     setNotices((prev) => prev.filter((notice) => notice.id !== id));
@@ -69,11 +73,27 @@ export const FeedbackProvider: FC<{ children: ReactNode }> = ({ children }) => {
 
   const value = useMemo(() => ({ notify, confirm, prompt }), [notify, confirm, prompt]);
 
+  // The toasts live in the browser's top layer, so a dialog opened with
+  // showModal() can't cover them. Showing the popover again after a dialog
+  // opened (or a toast was added) puts it back above whatever is on top.
+  // It is a manual popover: it never takes focus and nothing closes it.
+  useEffect(() => {
+    const element = toastsRef.current;
+    if (!element || typeof element.showPopover !== 'function') return;
+    if (element.matches(':popover-open')) element.hidePopover();
+    element.showPopover();
+  }, [notices, dialog]);
+
   return (
     <FeedbackContext.Provider value={value}>
       {children}
 
-      <div aria-live="polite" className="pointer-events-none fixed inset-x-0 bottom-0 z-[60] flex flex-col items-center gap-2 p-4 sm:items-end">
+      <div
+        ref={toastsRef}
+        popover={POPOVER_SUPPORTED ? 'manual' : undefined}
+        aria-live="polite"
+        className={`pointer-events-none fixed inset-x-0 bottom-0 top-auto z-[60] m-0 h-auto w-auto flex-col items-center gap-2 overflow-visible border-0 bg-transparent p-4 sm:items-end ${POPOVER_SUPPORTED ? 'open:flex' : 'flex'}`}
+      >
         {notices.map((notice) => (
           <div
             key={notice.id}
@@ -103,9 +123,14 @@ function DialogBox({ dialog }: { dialog: OpenDialog }) {
   const [input, setInput] = useState('');
   const ref = useRef<HTMLDialogElement>(null);
 
-  // showModal keeps focus inside the dialog and closes it on Escape
+  // showModal keeps focus inside the dialog and closes it on Escape. Closing
+  // it (rather than just removing it) puts focus back where it was.
   useEffect(() => {
-    if (ref.current && !ref.current.open) ref.current.showModal();
+    const element = ref.current;
+    if (element && !element.open) element.showModal();
+    return () => {
+      if (element?.open) element.close();
+    };
   }, []);
 
   const onSubmit = (e: FormEvent) => {
@@ -117,6 +142,7 @@ function DialogBox({ dialog }: { dialog: OpenDialog }) {
     <dialog
       ref={ref}
       aria-labelledby="feedback-dialog-title"
+      aria-describedby={options.message ? 'feedback-dialog-message' : undefined}
       onCancel={(e) => {
         e.preventDefault();
         finish(null);
@@ -125,20 +151,29 @@ function DialogBox({ dialog }: { dialog: OpenDialog }) {
     >
       <form onSubmit={onSubmit}>
         <h3 id="feedback-dialog-title" className="text-lg font-bold text-neutral-900">{options.title}</h3>
-        {options.message && <p className="mt-1 text-sm text-neutral-600">{options.message}</p>}
+        {options.message && <p id="feedback-dialog-message" className="mt-1 text-sm text-neutral-600">{options.message}</p>}
 
         {asksForInput && 'label' in options && (
-          <label className="mt-4 block">
-            <span className="mb-2 block text-sm font-medium text-neutral-700">{options.label}</span>
-            <input
-              type={options.type ?? 'text'}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              minLength={options.minLength}
-              required
-              className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/10"
-            />
-          </label>
+          <div className="mt-4">
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-neutral-700">{options.label}</span>
+              <input
+                type={options.type ?? 'text'}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                minLength={options.minLength}
+                maxLength={options.maxLength}
+                required={options.required ?? true}
+                aria-describedby={options.maxLength !== undefined ? 'feedback-dialog-count' : undefined}
+                className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/10"
+              />
+            </label>
+            {options.maxLength !== undefined && (
+              <p id="feedback-dialog-count" className="mt-1 text-right text-xs text-neutral-500">
+                {input.length}/{options.maxLength}
+              </p>
+            )}
+          </div>
         )}
 
         <div className="mt-6 flex gap-3">

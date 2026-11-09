@@ -3,9 +3,13 @@ import api from './axios';
 interface UpdateUserData {
   name?: string;
   email?: string;
+  // Needed when changing your own email
+  currentPassword?: string;
   phone?: string;
   department?: string;
-  profileImage?: string;
+  // null removes the photo
+  profileImage?: string | null;
+  emailNotifications?: boolean;
 }
 
 export const userAPI = {
@@ -48,6 +52,24 @@ export const userAPI = {
   // Set a new password for a user who forgot theirs (Admin only)
   resetPassword: async (id: string, newPassword: string) => {
     const response = await api.put(`/users/${id}/reset-password`, { newPassword });
+    return response.data;
+  },
+
+  // Delete your own account. The code is needed when two-step sign-in is on.
+  deleteMe: async (password: string, code?: string) => {
+    const response = await api.delete('/users/me', { data: { password, ...(code ? { code: code.trim() } : {}) } });
+    return response.data;
+  },
+
+  // These two feed the profile page's figures. Tasks and attendance belong to
+  // other screens, so this page reads them with its own calls.
+  getTasksOf: async (userId: string) => {
+    const response = await api.get('/tasks', { params: { assignedTo: userId } });
+    return response.data;
+  },
+
+  getAttendanceOf: async (userId: string) => {
+    const response = await api.get('/attendance', { params: { user: userId } });
     return response.data;
   },
 

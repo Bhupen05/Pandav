@@ -4,7 +4,9 @@ import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import Navbar from './components/Navbar'
 import RequireAuth from './components/RequireAuth'
 import { ChatProvider } from './context/ChatContext'
+import { NotificationProvider } from './context/NotificationContext'
 import { useAuth } from './context/useAuth'
+import { isPublicPath } from './utils/appPaths'
 
 // Each page is downloaded the first time it is opened, so visitors to the
 // landing page don't load the dashboards, chat and Social Hub
@@ -50,9 +52,9 @@ function AppRoutes() {
   const location = useLocation()
   const { isAuthenticated } = useAuth()
 
-  const publicPaths = ['/', '/about', '/service', '/pricing', '/login', '/register', '/contact', '/forgot-password', '/reset-password', '/verify-email']
-  const isPublicRoute = publicPaths.includes(location.pathname)
-  const showAppShell = isAuthenticated && !isPublicRoute
+  // Signed-in visitors on a public page see the public header (with a "Go to
+  // dashboard" button), not the app shell; a 404 gets the shell if signed in
+  const showAppShell = isAuthenticated && !isPublicPath(location.pathname)
 
   return (
     <div className={showAppShell ? 'app-shell' : 'public-shell'}>
@@ -115,9 +117,11 @@ function AppRoutes() {
 function App() {
   return (
     <ChatProvider>
-      <BrowserRouter>
-        <AppRoutes />
-      </BrowserRouter>
+      <NotificationProvider>
+        <BrowserRouter>
+          <AppRoutes />
+        </BrowserRouter>
+      </NotificationProvider>
     </ChatProvider>
   )
 }
