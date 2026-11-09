@@ -17,6 +17,10 @@ export default defineConfig(({ mode }) => {
     // first opens and re-bundle mid-session: an on-demand import fails, or a
     // page gets a second copy of React ("Invalid hook call"). Scan every source
     // file at start-up instead, and name the two late finds outright.
+    // Kept next to the project, not in node_modules: git worktrees link
+    // node_modules to one shared folder, and parallel dev servers would
+    // overwrite each other's bundles there
+    cacheDir: '.vite',
     optimizeDeps: {
       entries: ['index.html', 'src/**/*.{ts,tsx}'],
       include: ['qrcode', 'motion/react'],
