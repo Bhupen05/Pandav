@@ -1,432 +1,458 @@
-import { useState, useRef, useEffect } from 'react';
-import { participantId, useChat, type Message, type Participant } from '../context/useChat';
-import { useAuth } from '../context/useAuth';
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { ArrowLeft, Ban, Snowflake, Users } from 'lucide-react';
 import { getErrorMessage } from '../api/axios';
+import { useAuth } from '../context/useAuth';
+import { useChat, isDeleted, participantId, type Message } from '../context/useChat';
+import { useFeedback } from '../context/useFeedback';
+import Avatar from './chat/Avatar';
+import Composer from './chat/Composer';
+import ConnectionStrip from './chat/ConnectionStrip';
+import MessageInfoDialog from './chat/MessageInfoDialog';
+import MessageItem from './chat/MessageItem';
+import { useBlocking } from './chat/useBlocking';
+import { describePerson, dayKey, dayLabel, EDIT_WINDOW_MS, messageDate, participantLabel } from './chat/format';
 
-interface ChatProps {
-  receiverId: string;
-  receiverName: string;
-  teamId?: string;
-  // Shown instead of the message box when nothing can be sent (a frozen team)
-  readOnlyNote?: string;
+// The person on the other side of a direct conversation
+export interface ChatPerson {
+  _id: string;
+  name: string;
+  profileImage?: string | null;
+  role?: string | null;
+  department?: string | null;
+  // A deleted account: nothing is shown about it and nobody can write to it
+  deleted?: boolean;
+  // Whether the server says this person can be written to right now
+  canMessage?: boolean;
 }
 
-type ChatMessage = Message;
+interface ChatProps {
+  // The person (direct chat) ...
+  receiverId: string;
+  receiverName: string;
+  person?: ChatPerson | null;
+  // ... or the team room
+  teamId?: string;
+  // Under the team's name, e.g. who leads it
+  subtitle?: string;
+  // The team is frozen: readable, but nothing in it changes
+  frozen?: boolean;
+  // May delete other people's messages in this team (its leaders)
+  canModerate?: boolean;
+  // Shown on phones, where the conversation replaces the list
+  onBack?: () => void;
+  // Extra buttons for the header
+  actions?: ReactNode;
+}
 
-const getMessageDate = (message: ChatMessage) => {
-  const rawValue = message.timestamp || message.createdAt;
+const NEAR_BOTTOM_PX = 120;
+const ANNOUNCEMENT_MS = 5000;
 
-  if (!rawValue) return null;
-
-  const parsed = new Date(rawValue);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-};
-
-const formatMessageTime = (message: ChatMessage) => {
-  const date = getMessageDate(message);
-  return date ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null;
-};
-
-const formatMessageDateTime = (message: ChatMessage) => {
-  const date = getMessageDate(message);
-  return date
-    ? date.toLocaleString([], {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      })
-    : 'Not available';
-};
-
-const getSenderName = (message: ChatMessage, fallbackName: string) => {
-  if (typeof message.sender === 'object' && message.sender.name) {
-    return message.sender.name;
-  }
-
-  return fallbackName;
-};
-
-const getTeamReaders = (message: ChatMessage, currentUserId?: string) => {
-  const readByList = Array.isArray(message.readBy) ? message.readBy : [];
-
-  return readByList
-    .map((entry) => entry?.user)
-    .filter((reader): reader is Exclude<Participant, string> =>
-      typeof reader === 'object' && reader !== null && reader._id !== currentUserId);
-};
-
-const getMessageStatus = (message: ChatMessage, isMine: boolean, isTeamChat: boolean) => {
-  if (!isMine) return null;
-  if (isTeamChat) {
-    const readerCount = getTeamReaders(message, participantId(message.sender)).length;
-    return readerCount > 0 ? `Seen by ${readerCount}` : 'Team sent';
-  }
-  return message.isRead ? 'Read' : 'Sent';
-};
-
-const getReadByLabel = (
-  message: ChatMessage,
-  isMine: boolean,
-  isTeamChat: boolean,
-  receiverName: string,
-  currentUserId?: string,
-) => {
-  if (!isMine) return null;
-
-  if (isTeamChat) {
-    const readers = getTeamReaders(message, currentUserId);
-
-    if (readers.length === 0) {
-      return 'No team members have read this yet.';
-    }
-
-    return readers.map((reader) => reader.name || reader.email || 'Unknown user').join(', ');
-  }
-
-  return message.isRead ? `Read by ${receiverName}` : `Not read by ${receiverName} yet`;
-};
-
-export default function Chat({ receiverId, receiverName, teamId, readOnlyNote }: ChatProps) {
+export default function Chat({
+  receiverId,
+  receiverName,
+  person,
+  teamId,
+  subtitle,
+  frozen,
+  canModerate,
+  onBack,
+  actions,
+}: ChatProps) {
+  const { user, isAdmin } = useAuth();
+  const { notify, confirm, prompt } = useFeedback();
   const {
     messages,
-    sendMessage,
-    fetchMessages,
-    closeChat,
     loadingMessages,
+    messagesError,
     hasMoreMessages,
+    latestIncoming,
+    fetchMessages,
+    fetchTeamMessages,
     loadOlderMessages,
+    closeChat,
+    sendMessage,
+    sendTeamMessage,
+    editMessage,
+    deleteMessage,
+    reportMessage,
     typingUsers,
     setTyping,
-    sendTeamMessage,
-    fetchTeamMessages,
+    activeUsers,
+    blocked,
+    blocksStatus,
   } = useChat();
-  const [loadingOlder, setLoadingOlder] = useState(false);
-  const { user } = useAuth();
-  const [inputMessage, setInputMessage] = useState('');
-  const [sending, setSending] = useState(false);
-  const [sendError, setSendError] = useState<string | null>(null);
-  const [isTypingLocally, setIsTypingLocally] = useState(false);
-  const [selectedMessage, setSelectedMessage] = useState<ChatMessage | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { block, unblock, busy: blockBusy } = useBlocking();
   const isTeamChat = Boolean(teamId);
+  const currentUserId = user?._id;
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [olderError, setOlderError] = useState('');
+  const [infoId, setInfoId] = useState<string | null>(null);
+  // Moves on, so that edit windows and "Today" stay right in a long-open tab
+  const [now, setNow] = useState(() => Date.now());
+  // The message whose announcement has been read out by now
+  const [announcedId, setAnnouncedId] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const heightBeforeOlderRef = useRef<number | null>(null);
+
+  const loadConversation = () => {
+    if (teamId) void fetchTeamMessages(teamId);
+    else if (receiverId) void fetchMessages(receiverId);
+  };
 
   useEffect(() => {
-    if (teamId) {
-      fetchTeamMessages(teamId);
-    } else if (receiverId) {
-      fetchMessages(receiverId);
-    }
+    if (teamId) void fetchTeamMessages(teamId);
+    else if (receiverId) void fetchMessages(receiverId);
     // Leaving the conversation makes new messages from it count as unread
     return () => closeChat();
   }, [fetchMessages, fetchTeamMessages, closeChat, receiverId, teamId]);
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value;
-    setInputMessage(value);
-    if (isTeamChat) return;
-
-    if (!isTypingLocally && value.length > 0) {
-      setIsTypingLocally(true);
-      setTyping(true, receiverId);
-    }
-
-    // Stop showing as typing after a pause
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    typingTimeoutRef.current = setTimeout(() => {
-      setIsTypingLocally(false);
-      setTyping(false, receiverId);
-    }, 1500);
-  };
-
-  const handleSend = async () => {
-    if (!inputMessage.trim() || sending) return;
-    setSending(true);
-    setSendError(null);
-    setIsTypingLocally(false);
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    if (!isTeamChat) setTyping(false, receiverId);
-
-    try {
-      if (teamId) {
-        await sendTeamMessage(teamId, inputMessage);
-      } else {
-        await sendMessage(receiverId, inputMessage);
-      }
-      setInputMessage('');
-    } catch (error) {
-      setSendError(getErrorMessage(error, 'Message not sent. Please try again.'));
-    } finally {
-      setSending(false);
-    }
-  };
-
-  // Scroll to the bottom for new messages, but not when older ones are prepended
-  const newestMessageId = messages[messages.length - 1]?._id;
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [newestMessageId]);
+    const timer = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // An announcement is not left in the page once it has been read out
+  const incomingId = latestIncoming?._id;
+  useEffect(() => {
+    if (!incomingId) return;
+    const timer = setTimeout(() => setAnnouncedId(incomingId), ANNOUNCEMENT_MS);
+    return () => clearTimeout(timer);
+  }, [incomingId]);
+
+  // ── Scrolling ────────────────────────────────────────────────────────────
+
+  const oldestId = messages[0]?._id;
+  const newestMessage = messages[messages.length - 1];
+  const newestId = newestMessage?._id;
+  const newestIsMine = participantId(newestMessage?.sender) === currentUserId;
+
+  // Keep what the reader was looking at in place when older messages arrive
+  useLayoutEffect(() => {
+    const list = scrollRef.current;
+    if (list && heightBeforeOlderRef.current !== null) {
+      list.scrollTop += list.scrollHeight - heightBeforeOlderRef.current;
+      heightBeforeOlderRef.current = null;
+    }
+  }, [oldestId]);
+
+  // Follow new messages, unless the reader scrolled up to read older ones
+  useEffect(() => {
+    const list = scrollRef.current;
+    if (!list || loadingMessages) return;
+    if (stickToBottomRef.current || newestIsMine) list.scrollTop = list.scrollHeight;
+  }, [newestId, newestIsMine, loadingMessages]);
+
+  const handleScroll = () => {
+    const list = scrollRef.current;
+    if (list) stickToBottomRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < NEAR_BOTTOM_PX;
+  };
 
   const handleLoadOlder = async () => {
     setLoadingOlder(true);
-    await loadOlderMessages();
-    setLoadingOlder(false);
+    setOlderError('');
+    heightBeforeOlderRef.current = scrollRef.current?.scrollHeight ?? null;
+    try {
+      await loadOlderMessages();
+    } catch (error) {
+      heightBeforeOlderRef.current = null;
+      setOlderError(getErrorMessage(error, 'Could not load earlier messages.'));
+    } finally {
+      setLoadingOlder(false);
+    }
   };
 
-  const currentUserId = user?._id;
-  const remoteTypingUsers = isTeamChat ? [] : typingUsers.filter((t) => t.userId === receiverId);
+  // ── What may be done with each message ───────────────────────────────────
 
-  useEffect(() => {
-    if (!selectedMessage?._id) return;
+  // In a frozen team only an admin can still change anything
+  const canChangeTeam = !isTeamChat || !frozen || isAdmin;
+  const canWriteToPerson = !isTeamChat && person?.canMessage !== false && !person?.deleted;
+  const blockedByMe = !isTeamChat && blocked.some((entry) => entry._id === receiverId);
 
-    const updatedSelectedMessage = messages.find((message) => message._id === selectedMessage._id);
-    if (updatedSelectedMessage) {
-      setSelectedMessage(updatedSelectedMessage);
+  const isMineMessage = (message: Message) => participantId(message.sender) === currentUserId;
+
+  const canEdit = (message: Message) => {
+    if (isDeleted(message) || !isMineMessage(message) || !canChangeTeam) return false;
+    if (!isTeamChat && (!canWriteToPerson || blockedByMe)) return false;
+    const sent = messageDate(message);
+    return Boolean(sent) && now - (sent as Date).getTime() < EDIT_WINDOW_MS;
+  };
+
+  const canDelete = (message: Message) => {
+    if (isDeleted(message) || !canChangeTeam) return false;
+    return isMineMessage(message) || Boolean(isTeamChat && (canModerate || isAdmin));
+  };
+
+  // Messages sent to you, and other people's messages in your team. Admins
+  // are in no team, so they review reports instead of making them.
+  const canReport = (message: Message) =>
+    !isDeleted(message) && !isMineMessage(message) && !(isTeamChat && isAdmin);
+
+  const handleSend = (text: string) => (teamId ? sendTeamMessage(teamId, text) : sendMessage(receiverId, text));
+
+  const handleDelete = async (message: Message) => {
+    const mine = isMineMessage(message);
+    const ok = await confirm({
+      title: 'Delete this message?',
+      message: mine
+        ? 'It will show as "Message deleted" for everyone in this conversation.'
+        : 'It will show as "Message deleted" for everyone in the team.',
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await deleteMessage(message);
+      notify('Deleted for everyone.', 'success');
+    } catch (error) {
+      notify(getErrorMessage(error, 'Could not delete the message.'), 'error');
     }
-  }, [messages, selectedMessage?._id]);
+  };
+
+  const handleReport = async (message: Message) => {
+    const reason = await prompt({
+      title: 'Report this message?',
+      message: 'An admin will look at it. The sender is not told.',
+      label: 'What is wrong with it?',
+      confirmLabel: 'Report',
+    });
+    if (reason === null) return;
+    const text = reason.trim();
+    if (text.length > 500) {
+      notify('Please keep the reason under 500 characters.', 'error');
+      return;
+    }
+    try {
+      notify(await reportMessage(message, text), 'success');
+    } catch (error) {
+      notify(getErrorMessage(error, 'Could not report the message.'), 'error');
+    }
+  };
+
+  const handleBlock = () => block({ _id: receiverId, name: receiverName, profileImage: person?.profileImage });
+  const handleUnblock = () => unblock({ _id: receiverId, name: receiverName });
+
+  // ── Rendering ────────────────────────────────────────────────────────────
+
+  const remoteTypingUsers = isTeamChat ? [] : typingUsers.filter((t) => t.userId === receiverId);
+  const infoMessage = infoId ? messages.find((message) => message._id === infoId) : undefined;
+  const announcement = latestIncoming && latestIncoming._id !== announcedId
+    ? `New message from ${participantLabel(latestIncoming.sender, receiverName)}: ${latestIncoming.message}`
+    : '';
+  const canBlock = !isTeamChat && !person?.deleted && person?.role !== 'admin';
+  const subline = isTeamChat ? subtitle || 'Team conversation' : person ? describePerson(person) : '';
+
+  const today = new Date(now);
 
   return (
-    <>
-      <div className="flex h-full flex-col overflow-hidden rounded-2xl border bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b bg-neutral-50 px-4 py-3">
-          <div>
-            <p className="font-semibold text-neutral-800">{receiverName}</p>
-            <p className="mt-0.5 text-xs text-neutral-500">
-              {isTeamChat ? 'Team conversation' : 'Direct conversation'}
-            </p>
-          </div>
-          <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
-            Tap a message for info
-          </div>
-        </div>
-
-        <div className="flex-1 space-y-3 overflow-y-auto bg-slate-50/60 p-4">
-          {!loadingMessages && hasMoreMessages && (
-            <div className="flex justify-center">
-              <button
-                onClick={handleLoadOlder}
-                disabled={loadingOlder}
-                className="rounded-full border bg-white px-3 py-1 text-xs text-neutral-600 hover:bg-neutral-50 disabled:opacity-50"
-              >
-                {loadingOlder ? 'Loading...' : 'Load earlier messages'}
-              </button>
-            </div>
-          )}
-          {loadingMessages ? (
-            <div className="flex animate-pulse flex-col gap-3">
-              {[...Array(4)].map((_, i) => (
-                <div key={i} className={`flex ${i % 2 === 0 ? 'justify-start' : 'justify-end'}`}>
-                  <div className={`h-12 rounded-2xl bg-gray-200 ${i % 2 === 0 ? 'w-48' : 'w-36'}`} />
-                </div>
-              ))}
-            </div>
-          ) : messages.length === 0 ? (
-            <p className="mt-8 text-center text-sm text-neutral-400">No messages yet. Say hello!</p>
-          ) : (
-            messages.map((msg, idx) => {
-              const isMine = participantId(msg.sender) === currentUserId;
-              const messageTime = formatMessageTime(msg);
-              const messageStatus = getMessageStatus(msg, isMine, isTeamChat);
-              const senderName = getSenderName(msg, receiverName);
-
-              return (
-                <div key={msg._id || idx} className={`flex ${isMine ? 'justify-end' : 'justify-start'}`}>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedMessage(msg)}
-                    className={`max-w-md rounded-2xl px-4 py-3 text-left shadow-sm transition-transform hover:scale-[1.01] ${
-                      isMine
-                        ? 'bg-emerald-600 text-white'
-                        : 'border border-slate-200 bg-white text-gray-900'
-                    }`}
-                  >
-                    {isTeamChat && !isMine ? (
-                      <p className={`mb-1 text-xs font-semibold ${isMine ? 'text-emerald-100' : 'text-emerald-700'}`}>
-                        {senderName}
-                      </p>
-                    ) : null}
-                    <p className="whitespace-pre-wrap text-sm leading-6">{msg.message}</p>
-                    <div className="mt-2 flex items-center justify-end gap-2 text-[11px]">
-                      {messageTime ? (
-                        <span className={isMine ? 'text-emerald-100' : 'text-slate-500'}>{messageTime}</span>
-                      ) : null}
-                      {messageStatus ? (
-                        <span
-                          className={`rounded-full px-2 py-0.5 font-semibold ${
-                            isMine
-                              ? msg.isRead
-                                ? 'bg-emerald-500/30 text-white'
-                                : 'bg-white/20 text-emerald-50'
-                              : 'bg-slate-100 text-slate-600'
-                          }`}
-                        >
-                          {messageStatus}
-                        </span>
-                      ) : null}
-                    </div>
-                  </button>
-                </div>
-              );
-            })
-          )}
-
-          {remoteTypingUsers.length > 0 && (
-            <div className="flex justify-start">
-              <div className="flex items-center gap-1 rounded-2xl border border-slate-200 bg-white px-4 py-2 text-gray-900 shadow-sm">
-                <span className="text-xs text-gray-600">
-                  {remoteTypingUsers.map((t) => t.userName).join(', ')}{' '}
-                  {remoteTypingUsers.length === 1 ? 'is' : 'are'} typing
-                </span>
-                <span className="flex gap-0.5">
-                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-400" />
-                  <span
-                    className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-400"
-                    style={{ animationDelay: '0.2s' }}
-                  />
-                  <span
-                    className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-400"
-                    style={{ animationDelay: '0.4s' }}
-                  />
-                </span>
-              </div>
-            </div>
-          )}
-
-          <div ref={messagesEndRef} />
-        </div>
-
-        {sendError && (
-          <p className="border-t bg-red-50 px-4 py-2 text-sm text-red-700">{sendError}</p>
+    <section
+      aria-label={isTeamChat ? `Team chat: ${receiverName}` : `Conversation with ${receiverName}`}
+      className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
+    >
+      <header className="flex items-center gap-3 border-b border-slate-200 bg-neutral-50 px-3 py-3 sm:px-4">
+        {onBack && (
+          <button
+            type="button"
+            onClick={onBack}
+            aria-label="Back to conversations"
+            className="-ml-1 flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-slate-700 hover:bg-slate-200 lg:hidden"
+          >
+            <ArrowLeft className="h-5 w-5" aria-hidden="true" />
+          </button>
         )}
-        {readOnlyNote ? (
-          <p role="status" className="border-t bg-sky-50 px-4 py-3 text-sm text-sky-900">{readOnlyNote}</p>
+        {isTeamChat ? (
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-700">
+            <Users className="h-5 w-5" aria-hidden="true" />
+          </div>
         ) : (
-        <div className="border-t bg-white p-4">
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={inputMessage}
-              onChange={handleInputChange}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSend();
-                }
-              }}
-              placeholder={`Message ${receiverName}...`}
-              className="flex-1 rounded-xl border px-3 py-3 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-            />
+          <Avatar
+            name={receiverName}
+            src={person?.profileImage}
+            online={person?.deleted ? undefined : activeUsers.includes(receiverId)}
+          />
+        )}
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate font-semibold text-neutral-900">{receiverName}</h2>
+          <p className="truncate text-xs text-slate-600">
+            {remoteTypingUsers.length > 0 ? 'typing...' : subline || (isTeamChat ? 'Team conversation' : 'Direct conversation')}
+          </p>
+        </div>
+        {actions}
+        {canBlock && (
+          <button
+            type="button"
+            onClick={blockedByMe ? handleUnblock : handleBlock}
+            disabled={blockBusy || (blocksStatus.loading && !blocksStatus.loaded)}
+            aria-label={blockedByMe ? 'Unblock this person' : 'Block this person'}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-60"
+          >
+            <Ban className="h-4 w-4" aria-hidden="true" />
+            <span className="hidden sm:inline">{blockedByMe ? 'Unblock' : 'Block'}</span>
+          </button>
+        )}
+      </header>
+
+      <ConnectionStrip />
+
+      <div
+        ref={scrollRef}
+        data-chat-scroll
+        onScroll={handleScroll}
+        className="min-h-0 flex-1 overflow-y-auto bg-slate-50/60 p-3 sm:p-4"
+      >
+        {!loadingMessages && !messagesError && hasMoreMessages && (
+          <div className="mb-3 flex flex-col items-center gap-1">
             <button
-              onClick={handleSend}
-              disabled={sending || !inputMessage.trim()}
-              className="rounded-xl bg-emerald-600 px-5 py-3 font-semibold text-white transition-opacity hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-              title="Send message (Enter)"
+              type="button"
+              onClick={handleLoadOlder}
+              disabled={loadingOlder}
+              className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"
             >
-              {sending ? 'Sending...' : 'Send'}
+              {loadingOlder ? 'Loading...' : 'Load earlier messages'}
+            </button>
+            {olderError && (
+              <p role="alert" className="text-xs text-red-700">
+                {olderError}
+              </p>
+            )}
+          </div>
+        )}
+
+        {loadingMessages ? (
+          <div className="flex animate-pulse flex-col gap-3" role="status" aria-label="Loading messages">
+            {[...Array(4)].map((_, i) => (
+              <div key={i} className={`flex ${i % 2 === 0 ? 'justify-start' : 'justify-end'}`}>
+                <div className={`h-12 rounded-2xl bg-gray-200 ${i % 2 === 0 ? 'w-48' : 'w-36'}`} />
+              </div>
+            ))}
+          </div>
+        ) : messagesError ? (
+          <div role="alert" className="mx-auto mt-8 max-w-sm rounded-xl border border-red-200 bg-red-50 p-4 text-center text-sm text-red-800">
+            <p>{messagesError}</p>
+            <button
+              type="button"
+              onClick={loadConversation}
+              className="mt-3 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700"
+            >
+              Retry
             </button>
           </div>
-        </div>
+        ) : messages.length === 0 ? (
+          <p className="mt-8 text-center text-sm text-slate-600">
+            {isTeamChat || canWriteToPerson ? 'No messages yet. Say hello!' : 'No messages yet.'}
+          </p>
+        ) : (
+          <ol aria-label="Messages" className="space-y-3">
+            {messages.map((message, index) => {
+              const date = messageDate(message);
+              const previous = index > 0 ? messageDate(messages[index - 1]) : null;
+              const newDay = Boolean(date) && (!previous || dayKey(previous) !== dayKey(date as Date));
+
+              return (
+                <Fragment key={message._id}>
+                  {newDay && date ? (
+                    <li className="flex justify-center py-1">
+                      <span className="rounded-full bg-slate-200 px-3 py-1 text-xs font-medium text-slate-700">
+                        {dayLabel(date, today)}
+                      </span>
+                    </li>
+                  ) : null}
+                  <MessageItem
+                    message={message}
+                    isMine={isMineMessage(message)}
+                    isTeam={isTeamChat}
+                    senderName={participantLabel(message.sender, receiverName)}
+                    canEdit={canEdit(message)}
+                    canDelete={canDelete(message)}
+                    canReport={canReport(message)}
+                    onInfo={() => setInfoId(message._id)}
+                    onEdit={(text) => editMessage(message, text)}
+                    onDelete={() => void handleDelete(message)}
+                    onReport={() => void handleReport(message)}
+                  />
+                </Fragment>
+              );
+            })}
+          </ol>
+        )}
+
+        {remoteTypingUsers.length > 0 && (
+          <div className="mt-3 flex justify-start">
+            <div className="flex items-center gap-1 rounded-2xl border border-slate-200 bg-white px-4 py-2 text-slate-900 shadow-sm">
+              <span className="text-xs text-slate-700">
+                {remoteTypingUsers.map((t) => t.userName).join(', ')} {remoteTypingUsers.length === 1 ? 'is' : 'are'}{' '}
+                typing
+              </span>
+              <span className="flex gap-0.5" aria-hidden="true">
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-400 motion-reduce:animate-none" />
+                <span
+                  className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-400 motion-reduce:animate-none"
+                  style={{ animationDelay: '0.2s' }}
+                />
+                <span
+                  className="h-1.5 w-1.5 animate-bounce rounded-full bg-gray-400 motion-reduce:animate-none"
+                  style={{ animationDelay: '0.4s' }}
+                />
+              </span>
+            </div>
+          </div>
         )}
       </div>
 
-      {selectedMessage ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4">
-          <div className="w-full max-w-md rounded-3xl border bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b px-5 py-4">
-              <div>
-                <h3 className="text-base font-semibold text-slate-900">Message info</h3>
-                <p className="mt-1 text-xs text-slate-500">
-                  {isTeamChat ? 'Team chat details' : 'Direct chat details'}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setSelectedMessage(null)}
-                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"
-              >
-                Close
-              </button>
-            </div>
+      {/* New messages are read out as they arrive, without moving the focus */}
+      <p className="sr-only" aria-live="polite" aria-atomic="true">
+        <span key={latestIncoming?._id}>{announcement}</span>
+      </p>
 
-            <div className="space-y-4 p-5">
-              <div className="rounded-2xl bg-slate-50 p-4">
-                <p className="text-sm leading-6 text-slate-900">{selectedMessage.message}</p>
-              </div>
-
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border p-4">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Sender</p>
-                  <p className="mt-2 text-sm text-slate-900">
-                    {getSenderName(selectedMessage, receiverName)}
-                  </p>
-                </div>
-                <div className="rounded-2xl border p-4">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Status</p>
-                  <p className="mt-2 text-sm text-slate-900">
-                    {getMessageStatus(
-                      selectedMessage,
-                      participantId(selectedMessage.sender) === currentUserId,
-                      isTeamChat,
-                    ) || 'Received'}
-                  </p>
-                </div>
-                <div className="rounded-2xl border p-4">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Read by</p>
-                  <p className="mt-2 text-sm text-slate-900">
-                    {getReadByLabel(
-                      selectedMessage,
-                      participantId(selectedMessage.sender) === currentUserId,
-                      isTeamChat,
-                      receiverName,
-                      currentUserId,
-                    ) || 'You received this message'}
-                  </p>
-                </div>
-                <div className="rounded-2xl border p-4">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Sent at</p>
-                  <p className="mt-2 text-sm text-slate-900">{formatMessageDateTime(selectedMessage)}</p>
-                </div>
-                <div className="rounded-2xl border p-4">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Message type</p>
-                  <p className="mt-2 text-sm text-slate-900">
-                    {isTeamChat ? 'Team message' : 'Direct message'}
-                  </p>
-                </div>
-              </div>
-
-              {selectedMessage.isEdited ? (
-                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                  Edited {selectedMessage.editedAt ? formatMessageDateTime(selectedMessage) : 'after sending'}.
-                </div>
-              ) : null}
-
-              {!isTeamChat && participantId(selectedMessage.sender) === currentUserId ? (
-                <div
-                  className={`rounded-2xl px-4 py-3 text-sm ${
-                    selectedMessage.isRead
-                      ? 'border border-emerald-200 bg-emerald-50 text-emerald-800'
-                      : 'border border-slate-200 bg-slate-50 text-slate-700'
-                  }`}
-                >
-                  {selectedMessage.isRead
-                    ? `This message has been read by ${receiverName}.`
-                    : `This message has been sent, but ${receiverName} has not read it yet.`}
-                </div>
-              ) : null}
-
-              {isTeamChat && participantId(selectedMessage.sender) === currentUserId ? (
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-                  {getTeamReaders(selectedMessage, currentUserId).length > 0
-                    ? `Read by ${getReadByLabel(selectedMessage, true, true, receiverName, currentUserId)}`
-                    : 'No team members have read this message yet.'}
-                </div>
-              ) : null}
-            </div>
-          </div>
+      {isTeamChat ? (
+        frozen ? (
+          <p role="status" className="flex items-start gap-2 border-t border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900">
+            <Snowflake className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            This team is frozen. You can read its chat, but nothing can be sent or changed until an admin unfreezes it.
+          </p>
+        ) : (
+          <Composer
+            placeholder={`Message ${receiverName}...`}
+            label={`Message the team ${receiverName}`}
+            onSend={handleSend}
+          />
+        )
+      ) : blockedByMe ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-slate-100 px-4 py-3 text-sm text-slate-800">
+          <p role="status">You blocked {receiverName}. You can't message each other until you unblock them.</p>
+          <button
+            type="button"
+            onClick={handleUnblock}
+            disabled={blockBusy}
+            className="rounded-lg border border-slate-400 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 hover:bg-slate-50 disabled:opacity-60"
+          >
+            Unblock
+          </button>
         </div>
+      ) : !canWriteToPerson ? (
+        <p role="status" className="border-t border-slate-200 bg-slate-100 px-4 py-3 text-sm text-slate-800">
+          {person?.deleted
+            ? 'This account no longer exists, so it cannot be messaged.'
+            : `You can't send messages to ${receiverName} at the moment. You can still read your conversation.`}
+        </p>
+      ) : (
+        <Composer
+          placeholder={`Message ${receiverName}...`}
+          label={`Message ${receiverName}`}
+          onSend={handleSend}
+          onTyping={(typing) => setTyping(typing, receiverId)}
+        />
+      )}
+
+      {infoMessage ? (
+        <MessageInfoDialog
+          message={infoMessage}
+          isTeam={isTeamChat}
+          currentUserId={currentUserId}
+          receiverName={receiverName}
+          onClose={() => setInfoId(null)}
+        />
       ) : null}
-    </>
+    </section>
   );
 }
