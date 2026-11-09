@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { socialV2API } from '../api/socialV2API'
 import { getErrorMessage } from '../api/axios'
 
@@ -13,14 +13,17 @@ type Props = {
   onShared: (summary: string) => void
 }
 
-type Integration = { provider: string; isConnected?: boolean }
+type Integration = { provider: string; isConnected?: boolean; needsRelink?: boolean }
 
-// Shown when a personal task with auto-share on is completed: nothing is
-// posted until the owner reads (and can edit) the text and confirms
+// Shown when a personal task with auto-share on is completed (or when its
+// owner shares a finished one): nothing is posted until the owner reads (and
+// can edit) the text and confirms. LinkedIn is never ticked for them.
 export default function ShareTaskDialog({ offer, onClose, onShared }: Props) {
   const ref = useRef<HTMLDialogElement>(null)
+  const id = useId()
   const [content, setContent] = useState(offer.draft.content)
-  const [linkedinLinked, setLinkedinLinked] = useState(false)
+  // 'checking' until the linked accounts are known
+  const [linkedin, setLinkedin] = useState<'checking' | 'linked' | 'expired' | 'none'>('checking')
   const [toLinkedin, setToLinkedin] = useState(false)
   const [sharing, setSharing] = useState(false)
   const [error, setError] = useState('')
@@ -35,32 +38,35 @@ export default function ShareTaskDialog({ offer, onClose, onShared }: Props) {
       .getIntegrations()
       .then((response) => {
         const list: Integration[] = Array.isArray(response?.data) ? response.data : []
-        const linked = list.some((item) => item.provider === 'linkedin' && item.isConnected)
-        setLinkedinLinked(linked)
-        setToLinkedin(linked)
+        const account = list.find((item) => item.provider === 'linkedin')
+        setLinkedin(!account ? 'none' : account.isConnected && !account.needsRelink ? 'linked' : 'expired')
       })
-      .catch(() => setLinkedinLinked(false))
+      .catch(() => setLinkedin('none'))
   }, [])
+
+  const canUseLinkedin = linkedin === 'linked'
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault()
+    if (sharing) return
     setSharing(true)
     setError('')
+    const withLinkedin = toLinkedin && canUseLinkedin
     try {
-      const response = await socialV2API.sharePersonalTask(offer.taskId, { content: content.trim(), linkedin: toLinkedin })
+      const response = await socialV2API.sharePersonalTask(offer.taskId, { content: content.trim(), linkedin: withLinkedin })
       const result = response?.data
       const linkedinStatus = result?.publishResult?.linkedin?.status
       onShared(
         result?.pendingApproval
-          ? 'Posted to the Pandav feed. The LinkedIn post waits for your team leader to approve it.'
-          : toLinkedin && linkedinStatus !== 'published'
-            ? `Posted to the Pandav feed, but LinkedIn refused it: ${result?.publishResult?.linkedin?.message || 'unknown error'}`
-            : toLinkedin
+          ? 'Shared. It waits for your team leader or an admin to approve it; until then only you and admins see it. Then it appears in the feed and goes to LinkedIn.'
+          : withLinkedin && linkedinStatus !== 'published'
+            ? `Posted to the Pandav feed, but LinkedIn didn’t take it: ${result?.publishResult?.linkedin?.message || 'no reason given'}. Pandav tries again by itself.`
+            : withLinkedin
               ? 'Posted to the Pandav feed and LinkedIn.'
               : 'Posted to the Pandav feed.',
       )
     } catch (shareError) {
-      setError(getErrorMessage(shareError, 'Unable to share this task'))
+      setError(getErrorMessage(shareError, 'Couldn’t share this task. Try again.'))
       setSharing(false)
     }
   }
@@ -68,39 +74,44 @@ export default function ShareTaskDialog({ offer, onClose, onShared }: Props) {
   return (
     <dialog
       ref={ref}
-      aria-labelledby="share-task-title"
+      aria-labelledby={`${id}-title`}
       onCancel={(event) => {
         event.preventDefault()
-        onClose()
+        if (!sharing) onClose()
       }}
-      className="m-auto w-[calc(100%-2rem)] max-w-lg rounded-2xl bg-white p-6 shadow-2xl backdrop:bg-black/50 backdrop:backdrop-blur-sm"
+      className="m-auto max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-lg overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl backdrop:bg-black/50 backdrop:backdrop-blur-sm"
     >
       <form onSubmit={onSubmit}>
-        <h3 id="share-task-title" className="text-lg font-bold text-neutral-900">Share this task?</h3>
+        <h3 id={`${id}-title`} className="text-lg font-bold text-neutral-900">Share this task?</h3>
         <p className="mt-1 text-sm text-neutral-600">
           Everyone in Pandav will see this post. Check the text first and remove anything private.
         </p>
 
-        <label className="mt-4 block">
+        <label className="mt-4 block" htmlFor={`${id}-content`}>
           <span className="mb-2 block text-sm font-medium text-neutral-700">Post</span>
-          <textarea
-            value={content}
-            onChange={(event) => setContent(event.target.value)}
-            rows={7}
-            maxLength={5000}
-            required
-            className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/10"
-          />
         </label>
+        <textarea
+          id={`${id}-content`}
+          value={content}
+          onChange={(event) => setContent(event.target.value)}
+          rows={7}
+          maxLength={5000}
+          required
+          className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-4 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/10"
+        />
 
-        <label className={`mt-3 flex items-center gap-2 text-sm ${linkedinLinked ? 'text-neutral-700' : 'text-neutral-400'}`}>
+        <label className={`mt-3 flex items-center gap-2 text-sm ${canUseLinkedin ? 'text-neutral-700' : 'text-neutral-400'}`}>
           <input
             type="checkbox"
-            checked={toLinkedin}
-            disabled={!linkedinLinked}
+            checked={toLinkedin && canUseLinkedin}
+            disabled={!canUseLinkedin}
             onChange={(event) => setToLinkedin(event.target.checked)}
           />
-          Also post on LinkedIn{linkedinLinked ? '' : ' (link your LinkedIn account in the Social Hub first)'}
+          <span>
+            Also post on LinkedIn
+            {linkedin === 'none' ? ' (connect LinkedIn first, in the Social Hub under Integrations)' : ''}
+            {linkedin === 'expired' ? ' (your LinkedIn sign-in has expired: connect it again in the Social Hub)' : ''}
+          </span>
         </label>
 
         {error && <p role="alert" className="mt-3 text-sm text-red-600">{error}</p>}
@@ -109,13 +120,15 @@ export default function ShareTaskDialog({ offer, onClose, onShared }: Props) {
           <button
             type="button"
             onClick={onClose}
-            className="flex-1 rounded-lg border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-700 transition-colors hover:bg-neutral-50"
+            disabled={sharing}
+            className="flex-1 rounded-lg border border-neutral-200 px-4 py-2 text-sm font-medium text-neutral-700 transition-colors hover:bg-neutral-50 disabled:opacity-50"
           >
             Don't share
           </button>
           <button
             type="submit"
             disabled={sharing || !content.trim()}
+            aria-busy={sharing || undefined}
             className="flex-1 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
           >
             {sharing ? 'Sharing…' : 'Share'}

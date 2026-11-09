@@ -11,6 +11,7 @@ import TeamInvite from '../models/TeamInvite.js';
 import SocialPost from '../models/SocialPostV2.js';
 import SocialIntegration from '../models/SocialIntegrationV2.js';
 import SocialPublishJob from '../models/SocialPublishJobV2.js';
+import SocialImage from '../models/SocialImageV2.js';
 import PersonalTask from '../models/PersonalTaskV2.js';
 import NetworkConnection from '../models/NetworkConnectionV2.js';
 import {
@@ -104,9 +105,11 @@ const deleteAccount = async (user) => {
     // Invites to them go; invites they sent stay in their team's history
     TeamInvite.deleteMany({ invitedUser: id }),
     TeamInvite.updateMany({ invitedBy: id, status: 'pending' }, { $set: { status: 'withdrawn' } }),
-    // Social Hub: their posts, linked accounts (and stored tokens), jobs,
-    // personal tasks and connections go; their likes and comments too
+    // Social Hub: their posts and images, linked accounts (and stored
+    // tokens), jobs, personal tasks and connections go; their likes and
+    // comments too
     SocialPost.deleteMany({ author: id }),
+    SocialImage.deleteMany({ owner: id }),
     SocialPost.updateMany(
       { $or: [{ likes: id }, { 'comments.user': id }] },
       { $pull: { likes: id, comments: { user: id } } }

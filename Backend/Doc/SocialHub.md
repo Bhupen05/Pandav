@@ -1,8 +1,9 @@
 # Social Hub API
 
-The Social Hub is Pandav's internal social network. Users write posts to a shared feed, like and
-comment on them, edit and delete their own posts, and can publish a post to their own LinkedIn
-account or, as an issue, to a GitHub repository. Posts by `user` and `team_member` accounts that
+The Social Hub is Pandav's internal social network. Users write posts to a shared feed, with up to
+four images, like and comment on them, edit and delete their own posts, and can publish a post to
+their own LinkedIn account (straight away, at a time they choose, or as soon as it is approved) or,
+as an issue, to a GitHub repository. Posts by `user` and `team_member` accounts that
 target LinkedIn or GitHub wait for approval by an admin or their team leader. Publishing runs either
 directly or through publish jobs, which a background job runs every minute; each target of a post is
 published at most once. The module also covers connections between users and the messages they
@@ -45,7 +46,7 @@ Social Hub routes have their own per-user limits on top of those in the README:
 
 | Bucket | Limit | Routes |
 |---|---|---|
-| Writes | 30 requests per minute | Every `POST`, `PATCH` and `DELETE` below except messages and linked accounts |
+| Writes | 30 requests per minute | Every `POST`, `PUT`, `PATCH` and `DELETE` below except messages and linked accounts |
 | Messages | 45 requests per minute | `POST /messages`, counted together with `POST /api/v2/chat/send` |
 | Linked accounts | 10 requests per minute | `POST /integrations/:provider/link`, `DELETE /integrations/:provider`, `GET /integrations/:provider/oauth/start`, `POST /integrations/:provider/oauth/callback` |
 
@@ -79,6 +80,9 @@ Fields as clients send and receive them. "Server-set" fields are ignored if sent
 | `title` | string | Optional, at most 180 characters |
 | `content` | string | Required, trimmed, at most 5000 characters |
 | `mediaUrls` | string[] | Up to 10 `http`/`https` links of at most 2048 characters. Stored and returned only; never sent to LinkedIn or GitHub |
+| `images` | id[] or image[] | Up to 4 [uploaded images](#image-socialimagev2), in the order they show. Fixed at creation. Populated as `{ _id, type, width, height, altText }` wherever posts are returned; the bytes are at [`GET /images/:imageId`](#get-imagesimageid). Sent to LinkedIn with the post |
+| `autoPublish` | boolean | Default `false`. `true`: the post goes to LinkedIn by itself, at `publishAt` or as soon as it may. See [Posting to LinkedIn by itself](#posting-to-linkedin-by-itself) |
+| `publishAt` | date or `null` | When an `autoPublish` post goes to LinkedIn; `null` means as soon as it may |
 | `tags` | string[] | Up to 20, each non-empty and at most 40 characters |
 | `visibility` | string | `public` (default), `team` or `connections`. See [Who sees a post](#who-sees-a-post) |
 | `targets` | object | `{ pandav, linkedin, github }` booleans, at least one `true`. Default `{ "pandav": true, "linkedin": false, "github": false }`. Fixed at creation. `pandav: false` keeps the post out of everyone else's feed |
@@ -91,7 +95,26 @@ Fields as clients send and receive them. "Server-set" fields are ignored if sent
 | `likes` | id[] | Users who like the post |
 | `comments` | comment[] | `{ _id, user, text, createdAt, updatedAt }`. `text` is trimmed, 1 to 600 characters. `user` is populated as `{ _id, name, profileImage }` in lists (`{ _id, name, email, role, profileImage }` in the add-comment response) |
 | `viewer` | object | Only in responses: what the caller may do with the post now. See [What the caller may do](#what-the-caller-may-do) |
+| `queuedJobs` | object | Only in responses, and only for the post's [publishers](#who-may-call) (`{}` for everyone else): the post's publish jobs still to run (`queued` or `processing`), by provider, each `{ _id, status, attempts, maxAttempts, nextRetryAt, lastError }`. `{}` when there are none. A queued LinkedIn job with `attempts: 0` is a scheduled post; one with `attempts` above 0 failed and tries again at `nextRetryAt` |
 | `createdAt`, `updatedAt` | date | |
+
+### Image (`SocialImageV2`)
+
+An image uploaded for a post. It is uploaded first and belongs to no post until a post is created
+with it.
+
+| Field | Type | Notes |
+|---|---|---|
+| `_id` | id | |
+| `owner` | id | Server-set to the uploader. Only they can put it in a post |
+| `post` | id or `null` | The post it is in; `null` until then |
+| `type` | string | `image/png`, `image/jpeg` or `image/gif` (the types LinkedIn takes) |
+| `size` | number | Bytes, at most 2 MB |
+| `width`, `height` | number | Pixels, read from the file. Fewer than 36,152,320 pixels in all (LinkedIn's limit) |
+| `altText` | string | A description for screen readers, here and on LinkedIn. Spaces collapsed, at most 300 characters, default `""` |
+| `createdAt`, `updatedAt` | date | |
+| `data` | bytes | Never returned as a field; served by `GET /images/:imageId` |
+| `linkedin` | object | Server-set, not returned by the API: LinkedIn's id for the image once uploaded there, and the member it was uploaded for |
 
 ### Publish job (`SocialPublishJobV2`)
 
@@ -222,8 +245,10 @@ active leader.
 
 An approver approves or rejects a pending post once with `PATCH /posts/:postId/approve`; two
 reviewers can't both decide it. An author without a team, or in a frozen team, can only be approved
-by an admin. The author is told (`post_approved` or `post_rejected`). Approving publishes nothing:
-a publisher then publishes the post or queues jobs for it. A rejected post can never be published
+by an admin. The author is told (`post_approved` or `post_rejected`). Approving publishes nothing, except a post
+set to go to LinkedIn by itself (`autoPublish`), which goes then or is queued for its `publishAt`
+(see [Posting to LinkedIn by itself](#posting-to-linkedin-by-itself)); otherwise a publisher then
+publishes the post or queues jobs for it. A rejected post can never be published
 or queued; the author has to create a new post.
 
 Editing an approved post by a `user` or `team_member` sends it back to `pending` when one of its
@@ -258,7 +283,7 @@ jobs are deleted and the approvers are asked again. See [`PATCH /posts/:postId`]
 | Target | What publishing does |
 |---|---|
 | `pandav` | Sends nothing. Marks `publishResults.pandav` as published; the post has been in the feed since it was created. Can be repeated |
-| `linkedin` | Creates a public LinkedIn post as the author (`POST /v2/ugcPosts`) whose text is `content`. `title`, `tags` and `mediaUrls` are not sent. `externalId` is LinkedIn's id for the post |
+| `linkedin` | Creates a public LinkedIn post as the author with LinkedIn's Posts API (`POST /rest/posts`, `LinkedIn-Version: LINKEDIN_API_VERSION`). Its text is the [LinkedIn text](#the-text-on-linkedin). Its images are uploaded first (`POST /rest/images?action=initializeUpload`, then the bytes to the upload link LinkedIn gives) and attached with their `altText`: one as `content.media`, two to four as `content.multiImage`. `mediaUrls` are not sent. `externalId` is LinkedIn's id for the post (`urn:li:share:...` or `urn:li:ugcPost:...`); `https://www.linkedin.com/feed/update/<externalId>/` opens it |
 | `github` | Opens an issue in `githubRepo`, or in `GITHUB_DEFAULT_REPO` when none is given. The issue title is the post's `title`, or `Pandav update by <author name>`; the body is `content`. `externalId` is the issue's URL |
 
 `githubRepo` must look like `owner/repo`: the owner made of letters, digits and `-`, the repository
@@ -310,6 +335,74 @@ LinkedIn or GitHub, the task's `autoPostStatus` becomes `published`.
 `process` refuses a `failed` job (retry it first) and a `processing` one, and, for everyone but
 admins, a queued job whose `nextRetryAt` hasn't come yet.
 
+### The text on LinkedIn
+
+A post's text on LinkedIn is its `title` (when it has one), a blank line, its `content`, a blank
+line, and its `tags` as hashtags. A tag becomes a hashtag of its letters, digits and underscores
+(`team work` → `#teamwork`); tags the content already uses as `#hashtags` are left out, and so is
+a tag that is left empty.
+
+That text is at most 3000 characters (LinkedIn's limit). Creating a post for LinkedIn, editing one
+that isn't on LinkedIn yet, and sharing a task with LinkedIn refuse a longer one:
+`400 Too long for LinkedIn: <n> of 3000 characters, counting the title and tags`.
+
+LinkedIn reads the text in its "little" format, so it is sent with `\ | { } @ [ ] ( ) < > # * _ ~`
+escaped by a backslash, except that each `#word` in the content (and each tag) is sent as a hashtag
+template, `{hashtag|\#|word}`, so it stays a hashtag. The app has a copy of these rules for its
+preview and character count (`Frontend/src/components/social/linkedin.ts`).
+
+### Posting to LinkedIn by itself
+
+A post for LinkedIn can go there without anyone pressing publish: create it with
+`autoPublish: true` (and a `publishAt` to choose the time), or set its time later with
+[`PUT /posts/:postId/schedule`](#put-postspostidschedule). It goes through an ordinary
+[publish job](#publish-jobs) for LinkedIn, so a failure is retried with the usual backoff and a
+failure for good sends `publish_failed`.
+
+- **When.** As soon as the post may be published (its approval is `none` or `approved`, and it
+  isn't hidden or removed): its job is queued due at `publishAt`, or due now when `publishAt` is
+  `null` or past. A job due now runs during the request, so the response already holds the
+  outcome in `publishResults.linkedin` (and, after a failure, the retry in `queuedJobs.linkedin`).
+  A job due later is run by the background job at its time.
+- **Waiting for approval.** A post that needs approval keeps its time and gets its job when it is
+  approved; approved after its `publishAt`, it goes at once. An edit that sends it back for
+  approval deletes its queued jobs, and approving it again queues them again.
+- **Whose account.** The author's, as always. Asking for it (`POST /posts`, the schedule
+  endpoint, sharing a task with LinkedIn) needs the author's LinkedIn account to be connected and
+  usable: otherwise `400 Connect your LinkedIn account first` (or, for an admin or leader acting
+  for the author, `400 The author hasn't connected a LinkedIn account`), and
+  `400 Your LinkedIn sign-in has expired. Connect LinkedIn again first.` when it has to be linked
+  again.
+- **Moving and stopping.** `PUT /posts/:postId/schedule` moves the queued job to the new time,
+  with all its attempts again (`null` runs it now: "post now", also after a failure).
+  `DELETE /posts/:postId/schedule` sets `autoPublish` to `false` and deletes the queued job; the
+  post can still be published by hand. A running job is never moved or deleted.
+- **How far ahead.** `publishAt` must not be more than a minute in the past
+  (`400 Choose a time that is still to come`) nor more than 90 days ahead
+  (`400 A post can be scheduled at most 90 days ahead`). LinkedIn sign-ins usually last about 60
+  days; a post due after the author's sign-in ends fails unless they connect LinkedIn again first.
+
+GitHub is never published by itself: `autoPublish` is about LinkedIn only.
+
+### Images
+
+Images are uploaded one at a time with [`POST /images`](#post-images), as base64 in a JSON body
+(requests up to 3 MB are taken there), and then named in `POST /posts` (`images: [{ id, altText }]`).
+
+- **What.** PNG, JPEG or GIF, at most 2 MB, with fewer than 36,152,320 pixels. The file must start
+  the way its type does, and its size is read from it.
+- **Whose.** Only the uploader can put an image in a post, and an image goes in one post only.
+  Images are fixed when the post is created.
+- **Who sees it.** The uploader, always; anyone else once it is in a post they may see (see
+  [Who sees a post](#who-sees-a-post)), or that they may publish, so an approver sees the images of
+  a post waiting for approval (not once an admin removed it). It is served as the image it is, never run as a page
+  (`X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`),
+  and browsers may keep it for a day (`Cache-Control: private, max-age=86400`).
+- **How many.** Up to 4 per post, and at most 12 uploaded but not posted yet per person
+  (`409 You have <n> images that aren't in a post yet. Post them or remove some first.`). The
+  [background job](#background-job) removes images not posted within a day.
+- **Going.** An image goes with its post. Before that, its uploader can remove it.
+
 ### Linked accounts and stored tokens
 
 - Each user can link one LinkedIn and one GitHub account; linking again replaces the earlier one.
@@ -340,7 +433,8 @@ admins, a queued job whose `nextRetryAt` hasn't come yet.
    signed `state`.
 2. The client sends the user to `authUrl`. After consent, the provider sends the browser to the
    configured redirect URI (`GITHUB_REDIRECT_URI` or `LINKEDIN_REDIRECT_URI`) with `code` and
-   `state` in the query.
+   `state` in the query. The app serves `<app origin>/integrations/<provider>/callback` for this,
+   so that is what the redirect URI should be, and what the provider's app must allow.
 3. Whatever serves that URI posts `code` and `state` to `POST /integrations/:provider/oauth/callback`
    while the user is signed in. The server exchanges the code for a token, fetches the profile and
    stores the linked account.
@@ -504,8 +598,8 @@ and `moderatedAt`. The author is told (`post_moderated`, with the reason, also e
 
 ### When a user is deleted
 
-Deleting a user (see [Users.md](Users.md)) also deletes their posts, publish jobs, linked accounts
-and tokens, personal tasks, connections and messages, and removes their likes and comments from
+Deleting a user (see [Users.md](Users.md)) also deletes their posts, images, publish jobs, linked
+accounts and tokens, personal tasks, connections and messages, and removes their likes and comments from
 other posts. Anything left that points at a deleted account is handled too: such posts are left out
 of the feed and the approval queue, and deleted accounts are left out of `GET /users/discover` and
 `GET /connections`.
@@ -540,12 +634,14 @@ notification and its email are still sent.
 
 1. puts jobs stuck in `processing` for more than 10 minutes back in the queue, or fails them when
    their attempts are used up (see [Publish jobs](#publish-jobs), step 8);
-2. runs up to 20 queued jobs whose `nextRetryAt` has passed, oldest first, one after another.
+2. runs up to 20 queued jobs whose `nextRetryAt` has passed, oldest first, one after another
+   (scheduled LinkedIn posts among them);
+3. deletes [images](#images) uploaded more than a day before that are in no post.
 
 Its result, shown to an admin who runs it by hand with `POST /api/v2/admin/jobs/social-publish/run`:
 
 ```json
-{ "requeued": 0, "failedStuck": 0, "processed": 2, "published": 1, "retrying": 1, "failed": 0 }
+{ "requeued": 0, "failedStuck": 0, "processed": 2, "published": 1, "retrying": 1, "failed": 0, "unusedImagesRemoved": 0 }
 ```
 
 Passes are safe to repeat: a job is claimed before it runs, and a target already published is never
@@ -562,11 +658,12 @@ actually ran (see [Publish jobs](#publish-jobs), step 3).
 | `GITHUB_REDIRECT_URI` | Where GitHub sends the browser after consent; used in the consent URL and the code exchange |
 | `GITHUB_OAUTH_SCOPE` | Space-separated scopes requested from GitHub. Optional; the code has a default |
 | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET` | Credentials of the LinkedIn app. Also needed to refresh expired LinkedIn tokens |
-| `LINKEDIN_REDIRECT_URI` | Where LinkedIn sends the browser after consent |
+| `LINKEDIN_REDIRECT_URI` | Where LinkedIn sends the browser after consent: the app's `/integrations/linkedin/callback` page, e.g. `https://pandav-nine.vercel.app/integrations/linkedin/callback`. The LinkedIn app must list it as an authorized redirect URL |
+| `LINKEDIN_API_VERSION` | The version of LinkedIn's versioned API (Posts, Images) to call, `YYYYMM`. Optional; defaults to `202610`. LinkedIn keeps each version for about a year: move it on before the one in use is retired |
 | `LINKEDIN_OAUTH_SCOPE` | Space-separated scopes requested from LinkedIn, also stored as the linked account's `scopes`. Optional; the code has a default |
 | `GITHUB_DEFAULT_REPO` | `owner/repo` for GitHub publishing when the request or job names no `githubRepo`. Optional; without it every GitHub publish or job has to name one |
 | `GITHUB_API_BASE` | Base URL for GitHub REST calls (profile, public events, issue creation). Optional; defaults to `https://api.github.com`. The tests point it at a fake server |
-| `LINKEDIN_API_BASE` | Base URL for LinkedIn REST calls (profile, shares, posts). Optional; defaults to `https://api.linkedin.com` |
+| `LINKEDIN_API_BASE` | Base URL for LinkedIn REST calls (profile, shares, images, posts). Optional; defaults to `https://api.linkedin.com`. A member's token is only sent to an image upload link on this origin or on `linkedin.com` |
 | `GITHUB_OAUTH_BASE` | Base URL of GitHub's OAuth pages (`/login/oauth/authorize`, `/login/oauth/access_token`). Optional; defaults to `https://github.com` |
 | `LINKEDIN_OAUTH_BASE` | Base URL of LinkedIn's OAuth pages (`/oauth/v2/authorization`, `/oauth/v2/accessToken`, also used for refreshing tokens). Optional; defaults to `https://www.linkedin.com` |
 
@@ -583,13 +680,15 @@ Each event has `actor` (the caller), `action`, `targetType`, `targetId`, `status
 
 | Action | Written by | `details` |
 |---|---|---|
-| `social_post_created` | `POST /posts`, `POST /posts/from-task/:taskId`, `POST /personal-tasks/:taskId/share` | `targets`, `visibility`; `sourceTask` when a task is shared |
+| `social_post_created` | `POST /posts`, `POST /posts/from-task/:taskId`, `POST /personal-tasks/:taskId/share` | `targets`, `visibility`; `images` (how many), `autoPublish` and `publishAt` from `POST /posts`; `sourceTask` when a task is shared |
 | `social_post_updated` | `PATCH /posts/:postId` | `fields` (the fields sent), `backToApproval`, `cancelledJobs` |
 | `social_post_deleted` | `DELETE /posts/:postId` | `author`, `byAuthor`, `jobsRemoved`, and the post's `moderationStatus` and `moderationReason` when it was deleted |
 | `social_comment_deleted` | `DELETE /posts/:postId/comments/:commentId` | `commentId`, `commenter`, `byCommenter` |
 | `social_post_approval_updated` | `PATCH /posts/:postId/approve` | `action` |
 | `social_post_publish_triggered` | `POST /posts/:postId/publish` | `targets` |
 | `social_publish_jobs_created` | `POST /posts/:postId/publish/jobs` | `providers` |
+| `social_post_scheduled` | `PUT /posts/:postId/schedule` | `publishAt` (`null` for now) |
+| `social_post_unscheduled` | `DELETE /posts/:postId/schedule` | `jobsRemoved` |
 | `social_publish_job_processed` | `POST /publish-jobs/:jobId/process`; `status` says how the run went | `provider`, `error` |
 | `social_publish_job_retried` | `POST /publish-jobs/:jobId/retry` | `provider` |
 | `social_publish_due_jobs_processed` | `POST /publish-jobs/process-due` | `processed`, `recovered` (`{ requeued, failed }`) |
@@ -604,7 +703,7 @@ Each event has `actor` (the caller), `action`, `targetType`, `targetId`, `status
 | `social_integration_unlinked` | `DELETE /integrations/:provider` | `provider` |
 | `social_oauth_completed` | `POST /integrations/:provider/oauth/callback` | `provider` |
 
-Likes, new comments, answers to connection requests and reads are not audited.
+Likes, new comments, answers to connection requests, image uploads and reads are not audited.
 
 ## Feed and posts
 
@@ -743,11 +842,17 @@ Body:
 | `mediaUrls` | No | Up to 10 `http`/`https` links |
 | `tags` | No | Up to 20 strings of 1 to 40 characters |
 | `sourceTask` | No | Id of one of the caller's personal tasks, or `null` |
+| `images` | No | Up to 4 `{ id, altText }`: images the caller [uploaded](#post-images) that are in no post yet, each once, in the order they show. `altText` (at most 300 characters) replaces the description given at upload |
+| `autoPublish` | No | `true` to send the post to LinkedIn by itself; needs `targets.linkedin` and a usable LinkedIn account. See [Posting to LinkedIn by itself](#posting-to-linkedin-by-itself) |
+| `publishAt` | No | With `autoPublish`: an ISO date and time up to 90 days ahead, or `null` (default) for now |
 
 Creates the post with `approvalStatus` `pending` or `none` (see
 [Approval](#approval-for-linkedin-and-github)); a pending post asks its approvers
-(`post_approval_needed`). Nothing is published to LinkedIn or GitHub yet. Returns `201` with the
-post populated like the feed and with `viewer`.
+(`post_approval_needed`). The images become the post's. Nothing is published to GitHub. LinkedIn
+gets it only with `autoPublish`: when the post needs no approval, at once (during the request) or
+queued for `publishAt`. Returns `201` with the post populated like the feed, with `viewer` and
+`queuedJobs`; a failed LinkedIn publish still returns `201`, so check
+`publishResults.linkedin`.
 
 ```json
 {
@@ -794,6 +899,17 @@ Errors:
 - `400 tags must be up to 20 words of at most 40 characters`
 - `400 Invalid sourceTask` (not an id), `400 sourceTask must be one of your personal tasks`
 - `400 Invalid title`, `400 Invalid content` (too long)
+- `400 Too long for LinkedIn: <n> of 3000 characters, counting the title and tags` (for LinkedIn)
+- `400 images must be a list of at most 4 images`, `400 Each image needs the id of an uploaded image`,
+  `400 The same image is in the list twice`, `400 An image description can be at most 300 characters`
+- `400 One of the images isn't there any more. Add it again.` (not the caller's, already in a post,
+  or removed); no image is taken then
+- `400 autoPublish must be true or false`, `400 publishAt needs autoPublish`,
+  `400 Only a post for LinkedIn can be posted there automatically`
+- `400 publishAt must be a date and time`, `400 Choose a time that is still to come`,
+  `400 A post can be scheduled at most 90 days ahead`
+- `400 Connect your LinkedIn account first`,
+  `400 Your LinkedIn sign-in has expired. Connect LinkedIn again first.`
 
 ### `POST /posts/from-task/:taskId`
 
@@ -861,6 +977,8 @@ Errors:
 - `404 Post not found` (also when the caller may not see it)
 - `403 Only the author can edit a post`
 - `409 This post was removed by an admin and can't be changed`
+- `400 Too long for LinkedIn: <n> of 3000 characters, counting the title and tags` (a post for
+  LinkedIn that isn't there yet)
 
 ### `DELETE /posts/:postId`
 
@@ -956,6 +1074,8 @@ Errors:
 |---|---|---|---|
 | `POST` | `/posts/:postId/publish` | Publisher of the post | Writes |
 | `POST` | `/posts/:postId/publish/jobs` | Publisher of the post | Writes |
+| `PUT` | `/posts/:postId/schedule` | Publisher of the post | Writes |
+| `DELETE` | `/posts/:postId/schedule` | Publisher of the post | Writes |
 | `GET` | `/publish-jobs` | Any user (see below); admins see all | |
 | `POST` | `/publish-jobs/:jobId/process` | Publisher of the job's post | Writes |
 | `POST` | `/publish-jobs/:jobId/retry` | Publisher of the job's post | Writes |
@@ -1081,6 +1201,67 @@ Errors:
 - `400 Choose the GitHub repository to open the issue in (owner/name)`
 - `400 At least one external target (linkedin/github) is required`
 - `409 This post has already been published to GitHub` (already published, or a completed job)
+
+### `PUT /posts/:postId/schedule`
+
+Publisher of the post.
+
+Body:
+
+| Field | Required | Notes |
+|---|---|---|
+| `publishAt` | No | An ISO date and time up to 90 days ahead, or `null` (default) for now |
+
+Sets the post to [go to LinkedIn by itself](#posting-to-linkedin-by-itself) at `publishAt`, or now.
+A post with a queued LinkedIn job has it moved there, with all its attempts again; "now" runs it
+during the request, so this is also how a failed or waiting post is posted at once. A post waiting
+for approval keeps the time and goes once it is approved. Returns the post populated like the feed,
+with `viewer` and `queuedJobs`; a failed LinkedIn publish still returns `200`, so check
+`publishResults.linkedin`.
+
+```json
+{
+  "success": true,
+  "data": {
+    "_id": "66a1b2c3d4e5f60718292006",
+    "content": "Version 2.5 is live.",
+    "targets": { "pandav": true, "linkedin": true, "github": false },
+    "autoPublish": true,
+    "publishAt": "2026-11-02T04:30:00.000Z",
+    "queuedJobs": {
+      "linkedin": { "_id": "66a1b2c3d4e5f60718293009", "status": "queued", "attempts": 0, "maxAttempts": 3, "nextRetryAt": "2026-11-02T04:30:00.000Z", "lastError": null }
+    }
+  }
+}
+```
+
+Errors:
+
+- `400 publishAt must be a date and time`, `400 Choose a time that is still to come`,
+  `400 A post can be scheduled at most 90 days ahead`
+- `404 Post not found`
+- `403 Not allowed to schedule this post`
+- `400 This post isn't for LinkedIn`
+- `409 This post has already been published to LinkedIn`
+- `409 This post is hidden and can't be published` (or `removed`)
+- `409 Post approval was rejected for external publish`
+- `400 Connect your LinkedIn account first`, `400 Your LinkedIn sign-in has expired. Connect LinkedIn again first.`
+  (the caller's own post), `400 The author hasn't connected a LinkedIn account`,
+  `400 The author's LinkedIn account has to be connected again` (someone else's)
+
+### `DELETE /posts/:postId/schedule`
+
+Publisher of the post.
+
+Stops the post going to LinkedIn by itself: `autoPublish` becomes `false`, `publishAt` `null`, and
+its queued LinkedIn job is deleted (also one waiting to try again after a failure). The post can
+still be published by hand or scheduled again. Returns the post like `PUT` does.
+
+Errors:
+
+- `404 Post not found`, `403 Not allowed to schedule this post`, `400 This post isn't for LinkedIn`,
+  `409 This post has already been published to LinkedIn`
+- `409 It is being posted to LinkedIn right now` (its job is running)
 
 ### `GET /publish-jobs`
 
@@ -1229,6 +1410,79 @@ Errors:
 
 - `403 Only admin can process due jobs`
 
+## Images
+
+| Method | Path | Who may call | Limit |
+|---|---|---|---|
+| `POST` | `/images` | Any user | Writes |
+| `GET` | `/images/:imageId` | The uploader; once posted, any viewer or publisher of the post | |
+| `DELETE` | `/images/:imageId` | The uploader, while it is in no post | Writes |
+
+See [Images](#images) for the rules.
+
+### `POST /images`
+
+Any user. Requests up to 3 MB are taken here, so a 2 MB image fits as base64.
+
+Body:
+
+| Field | Required | Notes |
+|---|---|---|
+| `type` | Yes | `image/png`, `image/jpeg` (also `image/jpg`) or `image/gif` |
+| `data` | Yes | The file as base64; a `data:` URL prefix is allowed |
+| `altText` | No | A description for screen readers, at most 300 characters |
+
+Stores the image for a post still to be created. Returns `201`:
+
+```json
+{
+  "success": true,
+  "data": {
+    "_id": "66a1b2c3d4e5f60718294001",
+    "type": "image/png",
+    "size": 48213,
+    "width": 1200,
+    "height": 627,
+    "altText": "Launch banner",
+    "post": null,
+    "createdAt": "2026-10-24T10:00:00.000Z"
+  }
+}
+```
+
+Errors:
+
+- `400 Add a PNG, JPEG or GIF image`
+- `400 Send the image as base64 in data`, `400 The image data is not valid base64`, `400 The image is empty`
+- `400 An image can be at most 2 MB`
+- `400 The file's contents don't match its type`, `400 The image couldn't be read`
+- `400 The image is too large: use one of fewer than 36 million pixels`
+- `400 altText must be text`, `400 An image description can be at most 300 characters`
+- `409 You have <n> images that aren't in a post yet. Post them or remove some first.` (12)
+
+### `GET /images/:imageId`
+
+The uploader; once the image is in a post, anyone who may see that post (see
+[Who sees a post](#who-sees-a-post)) and its publishers, unless an admin removed it.
+
+Answers with the image itself, with its `Content-Type`, `Cache-Control: private, max-age=86400`,
+`X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`. The
+app shows it with `<img src="/api/v2/social/images/<id>">`: the browser sends the session cookie.
+
+Errors: `404 Image not found` (also when the caller may not see it).
+
+### `DELETE /images/:imageId`
+
+The uploader.
+
+Removes an image that is in no post yet. An image in a post goes with the post.
+
+```json
+{ "success": true, "message": "Image removed" }
+```
+
+Errors: `404 Image not found`, `409 This image is in a post. Delete the post to remove it.`
+
 ## Approvals and moderation
 
 | Method | Path | Who may call | Limit |
@@ -1281,8 +1535,11 @@ Body:
 
 Decides a pending post (see [Approval](#approval-for-linkedin-and-github)), records who decided and
 when, moves a shared personal task's `autoPostStatus` to `approved` or `rejected`, and tells the
-author. Publishes nothing. Returns the post populated like the feed (the author with `name` and
-`role`) and with `viewer`.
+author. An approved post set to go to LinkedIn by itself goes now, during the request (or is queued
+for its `publishAt`), with the author's account; the author's `post_approved` says so ("It is on
+LinkedIn now.", "It goes to LinkedIn on <date>.", or "It is being posted to LinkedIn." after a
+failure that will be retried). Nothing else is published. Returns the post populated like the feed
+(the author with `name` and `role`), with `viewer` and `queuedJobs`.
 
 ```json
 {
@@ -1793,13 +2050,19 @@ task, title `Task completed: <task title>`, tags `task`, `progress` and `auto-ge
 targets `{ "pandav": true, "linkedin": <linkedin>, "github": false }`. Approval works as for
 `POST /posts`:
 
+With `linkedin: true` the post is set to [go to LinkedIn by itself](#posting-to-linkedin-by-itself)
+(`autoPublish`), which needs the owner's LinkedIn account to be connected and the
+[LinkedIn text](#the-text-on-linkedin) to fit.
+
 - With `linkedin: true`, a `user` or `team_member` post is `pending` and its approvers are asked.
   Nothing is published; the task's `autoPostStatus` becomes `pending_approval` and `publishResult`
-  is `null`.
-- Otherwise the post is published at once to its targets, LinkedIn with the owner's linked
-  account. The task's `autoPostStatus` becomes `published` or `failed` (LinkedIn's outcome when it
-  was asked for, otherwise Pandav's) and `autoPostMessage` holds that outcome's message.
-  `publishResult` has the shape of `result` in the [publish response](#post-postspostidpublish).
+  is `null`. Once approved, it goes to LinkedIn.
+- Otherwise the post is published at once: to the Pandav feed, and to LinkedIn through a publish
+  job run during the request, with the owner's linked account. The task's `autoPostStatus` becomes
+  `published` or `failed` (LinkedIn's outcome when it was asked for, otherwise Pandav's) and
+  `autoPostMessage` holds that outcome's message. A LinkedIn failure is retried like any job, and
+  the task becomes `published` when a retry works. `publishResult` has the shape of `result` in
+  the [publish response](#post-postspostidpublish).
 
 Either way the task's `lastAutoGeneratedPost` is set to the new post. Returns `201`; a failed
 LinkedIn publish still returns `201`, so check `publishResult`.
@@ -1824,6 +2087,9 @@ Errors:
 - `400 content must be text` (not a string, or blank)
 - `400 content cannot be longer than 5000 characters`
 - `400 linkedin must be true or false`
+- `400 Too long for LinkedIn: <n> of 3000 characters, counting the title and tags`
+- `400 Connect your LinkedIn account first`,
+  `400 Your LinkedIn sign-in has expired. Connect LinkedIn again first.`
 - `404 Personal task not found`
 - `400 Only completed personal tasks can be shared`
 - `409 This task has already been shared`, with `data.postId`, the newest post made from the task:
@@ -1978,7 +2244,9 @@ Any user, for their own linked account.
 
 Fetches recent activity from the provider and returns it as the provider sent it: for GitHub the
 account's latest 20 public events (`GET /users/<login>/events/public`), for LinkedIn up to 20 shares
-owned by the member (`GET /v2/shares?q=owners`).
+owned by the member (`GET /v2/shares?q=owners`). LinkedIn only answers that for apps it has granted
+`r_member_social`, which it restricts; with the usual scopes the answer is a `502` with LinkedIn's
+refusal. The app doesn't use it.
 
 ```json
 {

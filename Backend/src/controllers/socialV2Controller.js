@@ -5,6 +5,7 @@ import NetworkConnection from '../models/NetworkConnectionV2.js';
 import PersonalTask from '../models/PersonalTaskV2.js';
 import SocialIntegration from '../models/SocialIntegrationV2.js';
 import SocialPublishJobV2 from '../models/SocialPublishJobV2.js';
+import SocialImage, { MAX_UNUSED_IMAGES, checkImage, cleanAltText } from '../models/SocialImageV2.js';
 import Chat from '../models/Chat.js';
 import Team from '../models/Team.js';
 import User from '../models/User.js';
@@ -16,6 +17,7 @@ import { escapeRegex, pick, sendServerError } from '../utils/http.js';
 import { contactsChanged, directMessageProblem } from '../utils/messaging.js';
 import { adminIds, notify } from '../utils/notify.js';
 import { canReviewFor, ledUserIds, teamUserIds } from '../utils/teams.js';
+import { LINKEDIN_TEXT_MAX, linkedInText, toLittleText } from '../utils/linkedinText.js';
 
 const MAX_MESSAGE_LENGTH = 2000;
 // SocialPostV2 content limit
@@ -37,6 +39,8 @@ const participants = [
 const authorPopulate = { path: 'author', select: 'name role profileImage teamId', match: { deletedAt: null } };
 const sourceTaskPopulate = { path: 'sourceTask', select: 'title status completedAt' };
 const commenterPopulate = { path: 'comments.user', select: 'name profileImage' };
+// What the app needs to show a post's images; GET /images/:imageId has the bytes
+const imagePopulate = { path: 'images', select: 'type width height altText' };
 
 const idOf = (ref) => String(ref?._id ?? ref);
 const toIso = (value) => (value ? new Date(value).toISOString() : null);
@@ -401,24 +405,92 @@ const markTaskPublished = async (post, message) => {
   );
 };
 
-const publishToLinkedIn = async (integration, token, text) => {
-  const { data, response } = await providerCall('linkedin', `${linkedinApiBase()}/v2/ugcPosts`, {
+// LinkedIn's versioned API (Posts, Images) wants the version it is called
+// as, YYYYMM. Each version works for about a year after it comes out.
+const linkedinVersion = () => process.env.LINKEDIN_API_VERSION || '202610';
+const linkedinRestHeaders = () => ({
+  'Content-Type': 'application/json',
+  'X-Restli-Protocol-Version': '2.0.0',
+  'LinkedIn-Version': linkedinVersion(),
+});
+
+// The member's token goes along with an image upload, so only ever to
+// LinkedIn's own hosts (or the fake provider the tests point the API at)
+const isLinkedInUploadUrl = (value) => {
+  try {
+    const url = new URL(value);
+    if (url.origin === new URL(linkedinApiBase()).origin) return true;
+    return url.protocol === 'https:' && (url.hostname === 'linkedin.com' || url.hostname.endsWith('.linkedin.com'));
+  } catch {
+    return false;
+  }
+};
+
+// Uploads one of the post's images for the member (initializeUpload, then
+// the bytes) and returns LinkedIn's image id. An image already uploaded for
+// this member is used again, so a retried publish doesn't upload it twice.
+const uploadImageToLinkedIn = async (owner, token, image) => {
+  if (image.linkedin?.image && image.linkedin.owner === owner) return image.linkedin.image;
+
+  const { data } = await providerCall('linkedin', `${linkedinApiBase()}/rest/images?action=initializeUpload`, {
     method: 'POST',
     token,
-    headers: { 'Content-Type': 'application/json', 'X-Restli-Protocol-Version': '2.0.0' },
+    headers: linkedinRestHeaders(),
+    body: JSON.stringify({ initializeUploadRequest: { owner } }),
+  }, 'LinkedIn image upload failed');
+  const uploadUrl = data?.value?.uploadUrl;
+  const imageUrn = data?.value?.image;
+  if (!imageUrn || !isLinkedInUploadUrl(uploadUrl)) {
+    throw new ProviderError('LinkedIn had a problem: it sent no place to upload the image');
+  }
+
+  const stored = await SocialImage.findById(image._id).select('+data');
+  if (!stored) throw new Error("One of the post's images no longer exists");
+  await providerCall('linkedin', uploadUrl, {
+    method: 'PUT',
+    token,
+    headers: { 'Content-Type': stored.type },
+    body: stored.data,
+  }, 'LinkedIn image upload failed');
+  await SocialImage.updateOne({ _id: image._id }, { $set: { linkedin: { image: imageUrn, owner } } });
+  return imageUrn;
+};
+
+// A public post on the member's LinkedIn (Posts API): the post's text with
+// its title and tags (utils/linkedinText.js), and its images. externalId
+// is LinkedIn's id for the post (urn:li:share:... or urn:li:ugcPost:...).
+const publishToLinkedIn = async (integration, token, post) => {
+  const owner = `urn:li:person:${integration.providerUserId}`;
+  const imageIds = (post.images || []).map(idOf);
+  const found = imageIds.length > 0 ? await SocialImage.find({ _id: { $in: imageIds } }).lean() : [];
+  const images = imageIds.map((id) => found.find((image) => String(image._id) === id)).filter(Boolean);
+
+  const media = [];
+  for (const image of images) {
+    media.push({ id: await uploadImageToLinkedIn(owner, token, image), ...(image.altText ? { altText: image.altText } : {}) });
+  }
+
+  let content = {};
+  if (media.length === 1) content = { content: { media: media[0] } };
+  if (media.length > 1) content = { content: { multiImage: { images: media } } };
+
+  const { data, response } = await providerCall('linkedin', `${linkedinApiBase()}/rest/posts`, {
+    method: 'POST',
+    token,
+    headers: linkedinRestHeaders(),
     body: JSON.stringify({
-      author: `urn:li:person:${integration.providerUserId}`,
+      author: owner,
+      commentary: toLittleText(linkedInText(post)),
+      visibility: 'PUBLIC',
+      distribution: { feedDistribution: 'MAIN_FEED', targetEntities: [], thirdPartyDistributionChannels: [] },
+      ...content,
       lifecycleState: 'PUBLISHED',
-      specificContent: {
-        'com.linkedin.ugc.ShareContent': {
-          shareCommentary: { text },
-          shareMediaCategory: 'NONE',
-        },
-      },
-      visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' },
+      isReshareDisabledByAuthor: false,
     }),
   }, 'LinkedIn publish failed');
-  return { externalId: data?.id || response.headers.get('x-restli-id') || null, raw: data };
+  // The new post's id comes in a header; the body is empty
+  const externalId = response.headers.get('x-restli-id') || data?.id || null;
+  return { externalId, raw: data ?? { id: externalId } };
 };
 
 const publishToGithub = async (token, post, githubRepo) => {
@@ -453,7 +525,7 @@ const publishTarget = async (post, provider, { githubRepo = null } = {}) => {
     if (problem) throw error;
 
     const published = provider === 'linkedin'
-      ? await publishToLinkedIn(integration, token, post.content)
+      ? await publishToLinkedIn(integration, token, post)
       : await publishToGithub(token, post, githubRepo);
     raw = published.raw;
     entry = {
@@ -659,6 +731,97 @@ export const publishDueJobs = async (now = new Date(), limit = 20, req = null) =
   return { recovered, outcomes };
 };
 
+// Images uploaded for a post that was never created go after a day. Run by
+// the social-publish background job.
+const UNUSED_IMAGE_TTL_MS = 24 * 60 * 60 * 1000;
+export const removeUnusedImages = async (now = new Date()) =>
+  (await SocialImage.deleteMany({ post: null, createdAt: { $lt: new Date(now.getTime() - UNUSED_IMAGE_TTL_MS) } })).deletedCount;
+
+// ---------- LinkedIn: posting without a publish button ----------
+//
+// A post with autoPublish goes to LinkedIn through a publish job: due at
+// publishAt, or now. "Now" runs the job during the request, so the answer
+// already says whether it worked; a failure is retried like any job. A post
+// that needs approval gets its job when it is approved.
+
+// How far ahead a post can be scheduled
+const MAX_SCHEDULE_AHEAD_MS = 90 * 24 * 60 * 60 * 1000;
+// A time this little in the past (a slow click) still means "now"
+const SCHEDULE_SKEW_MS = 60 * 1000;
+
+// publishAt as sent: null or nothing for "now", or an ISO date. Returns
+// { publishAt } (a Date, or null for now) or { error }.
+const readPublishAt = (value, now = new Date()) => {
+  if (value === undefined || value === null || value === '') return { publishAt: null };
+  const at = typeof value === 'string' ? new Date(value) : new Date(NaN);
+  if (Number.isNaN(at.getTime())) return { error: 'publishAt must be a date and time' };
+  if (at.getTime() < now.getTime() - SCHEDULE_SKEW_MS) return { error: 'Choose a time that is still to come' };
+  if (at.getTime() > now.getTime() + MAX_SCHEDULE_AHEAD_MS) return { error: 'A post can be scheduled at most 90 days ahead' };
+  return { publishAt: at <= now ? null : at };
+};
+
+// Why the author's LinkedIn account can't post for them, or null when it can
+const linkedInAccountProblem = async (authorId, { self }) => {
+  const integration = await SocialIntegration.findOne({ user: authorId, provider: 'linkedin' }).select('+accessToken +refreshToken');
+  if (!integration) {
+    return self ? 'Connect your LinkedIn account first' : "The author hasn't connected a LinkedIn account";
+  }
+  const { isConnected, needsRelink } = describeIntegration(integration);
+  if (!isConnected || needsRelink) {
+    return self ? 'Your LinkedIn sign-in has expired. Connect LinkedIn again first.' : "The author's LinkedIn account has to be connected again";
+  }
+  return null;
+};
+
+// Queues the post's LinkedIn job to run at `at`, or moves its queued job
+// there (as a fresh try, with all its attempts). Returns the job, or null
+// when the post is on LinkedIn already. A job that is running is left alone.
+const queueLinkedInJob = async (post, queuedBy, at) => {
+  if (post.publishResults?.linkedin?.status === 'published') return null;
+  const existing = await SocialPublishJobV2.findOne({ post: post._id, provider: 'linkedin', status: { $in: ['queued', 'processing'] } });
+  if (existing?.status === 'processing') return existing;
+  if (existing) {
+    return (await SocialPublishJobV2.findOneAndUpdate(
+      { _id: existing._id, status: 'queued' },
+      { $set: { nextRetryAt: at, attempts: 0, lastError: null } },
+      { new: true },
+    )) || existing;
+  }
+  return SocialPublishJobV2.create({
+    owner: idOf(post.author),
+    queuedBy,
+    post: post._id,
+    provider: 'linkedin',
+    status: 'queued',
+    attempts: 0,
+    nextRetryAt: at,
+    payload: { githubRepo: null },
+  });
+};
+
+// Starts a post's automatic LinkedIn publishing, if it has it and may go out
+// now: queues its job for publishAt, or runs it now. `queuedBy` is who asked
+// for it. Returns the job as it stands afterwards (completed when it went
+// out), or null.
+const startAutoPublish = async (req, post, queuedBy) => {
+  if (!post.autoPublish || !post.targets?.linkedin) return null;
+  if (!['none', 'approved'].includes(post.approvalStatus) || !isPublishable(post)) return null;
+  const now = new Date();
+  const due = !post.publishAt || post.publishAt <= now;
+  const job = await queueLinkedInJob(post, queuedBy, due ? now : post.publishAt);
+  if (!job || !due || job.status !== 'queued') return job;
+  try {
+    const run = await runPublishJob(job._id, { req });
+    return run.job || job;
+  } catch (error) {
+    // The post (or approval) the caller asked for is saved already: answer
+    // for that, and leave the job to the queue, which picks up a run that
+    // stopped part-way
+    console.error('LinkedIn publish failed to run:', error);
+    return job;
+  }
+};
+
 // Answers for a ProviderError (LinkedIn or GitHub failed us), and for a
 // linked account whose token can't be used
 const sendProviderError = (res, error) =>
@@ -787,9 +950,39 @@ const postActions = (post, ctx) => {
 
 const withViewer = (post, ctx) => ({ ...post.toObject(), viewer: postActions(post, ctx) });
 
+// Posts as responses show them: withViewer, plus `queuedJobs`, the publish
+// jobs each post still has to run (queued or running) by provider, so the
+// app can say when it goes out or tries again. Only the post's publishers
+// see its jobs (their errors can say things about the author's account);
+// for everyone else it is {}.
+const presentPosts = async (posts, ctx) => {
+  const publishable = posts.filter((post) => {
+    const authorId = post.author ? idOf(post.author) : null;
+    return authorId !== null && (authorId === ctx.userId || ctx.isAdmin || ctx.ledIds.has(authorId));
+  });
+  const jobs = publishable.length === 0 ? [] : await SocialPublishJobV2.find({
+    post: { $in: publishable.map((post) => post._id) },
+    status: { $in: ['queued', 'processing'] },
+  }).select('post provider status attempts maxAttempts nextRetryAt lastError').sort({ createdAt: 1 }).lean();
+
+  const byPost = new Map();
+  for (const { post, provider, ...job } of jobs) {
+    const queued = byPost.get(String(post)) || {};
+    queued[provider] = job;
+    byPost.set(String(post), queued);
+  }
+  return posts.map((post) => ({ ...withViewer(post, ctx), queuedJobs: byPost.get(String(post._id)) || {} }));
+};
+
+const presentPost = async (post, ctx) => (await presentPosts([post], ctx))[0];
+
 // A post loaded as the feed shows it
 const findPostForView = (postId) =>
-  SocialPost.findById(postId).populate(authorPopulate).populate(sourceTaskPopulate).populate(commenterPopulate);
+  SocialPost.findById(postId)
+    .populate(authorPopulate)
+    .populate(sourceTaskPopulate)
+    .populate(commenterPopulate)
+    .populate(imagePopulate);
 
 // Who is asked to approve an author's LinkedIn/GitHub post: the active
 // leaders of the author's team, unless it is frozen or has none; otherwise
@@ -881,6 +1074,35 @@ const suggestTaskShare = async (task, user) => {
 
 // ---------- Posts ----------
 
+// Refuses a post for LinkedIn whose text there would be too long. Sends the
+// refusal and returns true, or returns false.
+const refuseLongForLinkedIn = (res, post) => {
+  const length = linkedInText(post).length;
+  if (length <= LINKEDIN_TEXT_MAX) return false;
+  res.status(400).json({
+    success: false,
+    message: `Too long for LinkedIn: ${length} of ${LINKEDIN_TEXT_MAX} characters, counting the title and tags`,
+  });
+  return true;
+};
+
+// Gives the caller's uploaded images (not posted yet) to a new post, one at a
+// time, so one image can't go to two posts. Returns true, or false (with
+// every image it took given back) when one of them isn't there.
+const claimImages = async (images, ownerId, postId) => {
+  const claimed = [];
+  for (const { id, altText } of images) {
+    const set = { post: postId, ...(altText !== undefined ? { altText: cleanAltText(altText) } : {}) };
+    const image = await SocialImage.findOneAndUpdate({ _id: id, owner: ownerId, post: null }, { $set: set });
+    if (!image) {
+      await SocialImage.updateMany({ _id: { $in: claimed } }, { $set: { post: null } });
+      return false;
+    }
+    claimed.push(image._id);
+  }
+  return true;
+};
+
 export const createPost = async (req, res) => {
   try {
     const {
@@ -891,6 +1113,8 @@ export const createPost = async (req, res) => {
       visibility = 'public',
       targets = { pandav: true, linkedin: false, github: false },
       sourceTask = null,
+      images = [],
+      autoPublish = false,
     } = req.body;
 
     if (!content || !content.trim()) {
@@ -901,26 +1125,53 @@ export const createPost = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Select at least one target: pandav, linkedin, or github' });
     }
 
+    if (targets.linkedin && refuseLongForLinkedIn(res, { title, content, tags })) return undefined;
+
+    const schedule = readPublishAt(req.body.publishAt);
+    if (schedule.error) return res.status(400).json({ success: false, message: schedule.error });
+    if (autoPublish) {
+      if (!targets.linkedin) {
+        return res.status(400).json({ success: false, message: 'Only a post for LinkedIn can be posted there automatically' });
+      }
+      const problem = await linkedInAccountProblem(req.user._id, { self: true });
+      if (problem) return res.status(400).json({ success: false, message: problem });
+    }
+
     // The feed shows the linked task, so it must be the author's own
     if (sourceTask && !(await PersonalTask.exists({ _id: sourceTask, user: req.user._id }))) {
       return res.status(400).json({ success: false, message: 'sourceTask must be one of your personal tasks' });
     }
 
-    const post = await SocialPost.create({
-      author: req.user._id,
-      sourceTask,
-      title,
-      content,
-      mediaUrls,
-      tags,
-      visibility,
-      targets: {
-        pandav: Boolean(targets.pandav),
-        linkedin: Boolean(targets.linkedin),
-        github: Boolean(targets.github),
-      },
-      approvalStatus: needsExternalApproval(req.user.role, targets) ? 'pending' : 'none',
-    });
+    const postId = new mongoose.Types.ObjectId();
+    if (!(await claimImages(images, req.user._id, postId))) {
+      return res.status(400).json({ success: false, message: "One of the images isn't there any more. Add it again." });
+    }
+
+    let post;
+    try {
+      post = await SocialPost.create({
+        _id: postId,
+        author: req.user._id,
+        sourceTask,
+        title,
+        content,
+        mediaUrls,
+        images: images.map((image) => image.id),
+        tags,
+        visibility,
+        targets: {
+          pandav: Boolean(targets.pandav),
+          linkedin: Boolean(targets.linkedin),
+          github: Boolean(targets.github),
+        },
+        autoPublish: Boolean(autoPublish),
+        publishAt: autoPublish ? schedule.publishAt : null,
+        approvalStatus: needsExternalApproval(req.user.role, targets) ? 'pending' : 'none',
+      });
+    } catch (error) {
+      await SocialImage.updateMany({ post: postId }, { $set: { post: null } });
+      throw error;
+    }
 
     if (post.approvalStatus === 'pending') await askForApproval(req, post);
 
@@ -928,10 +1179,14 @@ export const createPost = async (req, res) => {
       action: 'social_post_created',
       targetType: 'SocialPostV2',
       targetId: post._id,
-      details: { targets: post.targets, visibility: post.visibility },
+      details: { targets: post.targets, visibility: post.visibility, images: post.images.length, autoPublish: post.autoPublish, publishAt: post.publishAt },
     });
+
+    // Straight to LinkedIn, or queued for its time
+    await startAutoPublish(req, post, req.user._id);
+
     const [populatedPost, ctx] = await Promise.all([findPostForView(post._id), viewerContext(req.user)]);
-    return res.status(201).json({ success: true, data: withViewer(populatedPost, ctx) });
+    return res.status(201).json({ success: true, data: await presentPost(populatedPost, ctx) });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -983,7 +1238,7 @@ export const generatePostFromPersonalTask = async (req, res) => {
       details: { targets: post.targets, visibility: post.visibility },
     });
     const [populatedPost, ctx] = await Promise.all([findPostForView(post._id), viewerContext(req.user)]);
-    return res.status(201).json({ success: true, data: withViewer(populatedPost, ctx) });
+    return res.status(201).json({ success: true, data: await presentPost(populatedPost, ctx) });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -1022,6 +1277,7 @@ export const getFeed = async (req, res) => {
         .populate(authorPopulate)
         .populate(sourceTaskPopulate)
         .populate(commenterPopulate)
+        .populate(imagePopulate)
         .sort({ createdAt: -1, _id: -1 })
         .limit(FEED_PAGE_SIZE + 1),
       viewerContext(req.user),
@@ -1030,7 +1286,7 @@ export const getFeed = async (req, res) => {
     const hasMore = newestFirst.length > FEED_PAGE_SIZE;
     const page = newestFirst.slice(0, FEED_PAGE_SIZE);
     // Skip posts left behind by a deleted account
-    const posts = page.filter((post) => post.author).map((post) => withViewer(post, ctx));
+    const posts = await presentPosts(page.filter((post) => post.author), ctx);
     const oldest = page.at(-1);
 
     return res.json({
@@ -1054,7 +1310,7 @@ export const getPost = async (req, res) => {
     if (!post || !(isAuthor || (await canUserViewPost(post, req.user)))) {
       return res.status(404).json({ success: false, message: 'Post not found' });
     }
-    return res.json({ success: true, data: withViewer(post, await viewerContext(req.user)) });
+    return res.json({ success: true, data: await presentPost(post, await viewerContext(req.user)) });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -1067,11 +1323,12 @@ export const getMyPosts = async (req, res) => {
         .populate(authorPopulate)
         .populate(sourceTaskPopulate)
         .populate(commenterPopulate)
+        .populate(imagePopulate)
         .sort({ createdAt: -1 }),
       viewerContext(req.user),
     ]);
 
-    return res.json({ success: true, count: posts.length, data: posts.map((post) => withViewer(post, ctx)) });
+    return res.json({ success: true, count: posts.length, data: await presentPosts(posts, ctx) });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -1092,11 +1349,12 @@ export const getPendingApprovalPosts = async (req, res) => {
       SocialPost.find(filter)
         .populate(authorPopulate)
         .populate(sourceTaskPopulate)
+        .populate(imagePopulate)
         .sort({ createdAt: -1 })
         .limit(200),
       viewerContext(req.user),
     ]);
-    const data = posts.filter((post) => post.author).map((post) => withViewer(post, ctx));
+    const data = await presentPosts(posts.filter((post) => post.author), ctx);
     return res.json({ success: true, count: data.length, data });
   } catch (error) {
     return sendServerError(res, error);
@@ -1126,6 +1384,9 @@ export const updatePost = async (req, res) => {
     if (typeof updates.title === 'string') updates.title = updates.title.trim();
     post.set(updates);
     post.editedAt = new Date();
+    if (post.targets?.linkedin && post.publishResults?.linkedin?.status !== 'published' && refuseLongForLinkedIn(res, post)) {
+      return undefined;
+    }
 
     const leftToPublish = EXTERNAL_PROVIDERS.some((provider) =>
       post.targets?.[provider] && post.publishResults?.[provider]?.status !== 'published');
@@ -1160,7 +1421,7 @@ export const updatePost = async (req, res) => {
     const [updated, ctx] = await Promise.all([findPostForView(post._id), viewerContext(req.user)]);
     return res.json({
       success: true,
-      data: withViewer(updated, ctx),
+      data: await presentPost(updated, ctx),
       ...(backToApproval ? { message: `Saved. The post needs approval again before it goes to ${targetNames(post.targets)}.` } : {}),
     });
   } catch (error) {
@@ -1191,6 +1452,7 @@ export const deletePost = async (req, res) => {
 
     await SocialPost.deleteOne({ _id: post._id });
     const { deletedCount: jobsRemoved } = await SocialPublishJobV2.deleteMany({ post: post._id, status: { $in: ['queued', 'failed'] } });
+    await SocialImage.deleteMany({ post: post._id });
     // A shared task whose post is gone can be shared again
     if (post.sourceTask) {
       await PersonalTask.updateOne(
@@ -1686,6 +1948,15 @@ const APPROVAL_STATE_MESSAGES = {
   rejected: 'This post has already been rejected',
 };
 
+// What an approved post's author is told happens next
+const approvedNoticeBody = (post, autoJob) => {
+  if (!autoJob) return `It can now be published to ${targetNames(post.targets)}.`;
+  const github = post.targets?.github ? ' It can now be published to GitHub too.' : '';
+  if (autoJob.status === 'completed') return `It is on LinkedIn now.${github}`;
+  if (post.publishAt && post.publishAt > new Date()) return `It goes to LinkedIn on ${formatWhen(post.publishAt)}.${github}`;
+  return `It is being posted to LinkedIn.${github}`;
+};
+
 export const approvePost = async (req, res) => {
   try {
     const { postId } = req.params;
@@ -1732,11 +2003,14 @@ export const approvePost = async (req, res) => {
     }
 
     const approved = action === 'approved';
+    // The author asked for it to go to LinkedIn by itself: it goes now, or
+    // waits for its time
+    const autoJob = approved ? await startAutoPublish(req, decided, post.author._id) : null;
     await tell(req, [post.author._id], {
       type: approved ? 'post_approved' : 'post_rejected',
       title: approved ? `${req.user.name} approved your post` : `${req.user.name} didn't approve your post`,
       body: approved
-        ? `It can now be published to ${targetNames(decided.targets)}.`
+        ? approvedNoticeBody(decided, autoJob)
         : `It won't be published to ${targetNames(decided.targets)}.`,
       link: postLink(decided._id),
       data: { postId: String(decided._id) },
@@ -1749,7 +2023,7 @@ export const approvePost = async (req, res) => {
       details: { action },
     });
     const [populated, ctx] = await Promise.all([findPostForView(decided._id), viewerContext(req.user)]);
-    return res.json({ success: true, data: withViewer(populated, ctx) });
+    return res.json({ success: true, data: await presentPost(populated, ctx) });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -1912,29 +2186,47 @@ export const sharePersonalTask = async (req, res) => {
 
     const draft = taskShareDraft(task, req.user);
     const targets = { pandav: true, linkedin, github: false };
-    const post = await SocialPost.create({
-      author: req.user._id,
-      sourceTask: task._id,
+    const postFields = {
       title: draft.title,
       content: content?.trim() ?? draft.content,
       tags: ['task', 'progress', 'auto-generated'],
+    };
+    if (linkedin) {
+      if (refuseLongForLinkedIn(res, postFields)) return undefined;
+      const problem = await linkedInAccountProblem(req.user._id, { self: true });
+      if (problem) return res.status(400).json({ success: false, message: problem });
+    }
+    // On LinkedIn it goes by itself, like a post set to go there now: once
+    // approved when it needs approval, and retried when it fails
+    const post = await SocialPost.create({
+      author: req.user._id,
+      sourceTask: task._id,
+      ...postFields,
       visibility: 'public',
       targets,
+      autoPublish: linkedin,
       approvalStatus: needsExternalApproval(req.user.role, targets) ? 'pending' : 'none',
     });
 
+    // Saved first, so a publish that works marks the task as shared
     task.lastAutoGeneratedPost = post._id;
+    task.autoPostStatus = post.approvalStatus === 'pending' ? 'pending_approval' : 'none';
+    await task.save();
     let publishResult = null;
-    if (post.approvalStatus === 'pending') {
-      task.autoPostStatus = 'pending_approval';
-    } else {
+    if (post.approvalStatus !== 'pending') {
       await post.populate('author', 'name role teamId');
-      publishResult = await executePublishForPost(post, targets);
+      publishResult = await executePublishForPost(post, { pandav: true });
+      if (linkedin) {
+        await startAutoPublish(req, post, req.user._id);
+        const { publishResults } = await SocialPost.findById(post._id).select('publishResults').lean();
+        const { status = 'failed', message = null, externalId = null } = publishResults?.linkedin || {};
+        publishResult.linkedin = status === 'published' ? { status, externalId, message } : { status: 'failed', message };
+      }
       const external = linkedin ? publishResult.linkedin : publishResult.pandav;
       task.autoPostStatus = external.status === 'published' ? 'published' : 'failed';
       task.autoPostMessage = external.message || null;
+      await PersonalTask.updateOne({ _id: task._id }, { $set: { autoPostStatus: task.autoPostStatus, autoPostMessage: task.autoPostMessage } });
     }
-    await task.save();
     if (post.approvalStatus === 'pending') await askForApproval(req, post);
 
     await logAuditEventV2(req, {
@@ -2483,6 +2775,94 @@ export const retryPublishJob = async (req, res) => {
   }
 };
 
+// A post whose LinkedIn timing a publisher may change. Sends the refusal and
+// returns null, or returns the post (author populated).
+const loadPostToSchedule = async (req, res) => {
+  const post = await SocialPost.findById(req.params.postId).populate('author', 'name role teamId');
+  if (!post || !post.author) {
+    res.status(404).json({ success: false, message: 'Post not found' });
+    return null;
+  }
+  if (!(await canPublishFor(req.user, post.author._id))) {
+    res.status(403).json({ success: false, message: 'Not allowed to schedule this post' });
+    return null;
+  }
+  if (!post.targets?.linkedin) {
+    res.status(400).json({ success: false, message: "This post isn't for LinkedIn" });
+    return null;
+  }
+  if (post.publishResults?.linkedin?.status === 'published') {
+    alreadyPublished(res, ['linkedin']);
+    return null;
+  }
+  return post;
+};
+
+// Sets a post to go to LinkedIn by itself: at publishAt, or now when it is
+// null. A post with a queued job has it moved. One waiting for approval
+// keeps the time and goes once approved.
+export const schedulePost = async (req, res) => {
+  try {
+    const schedule = readPublishAt(req.body?.publishAt);
+    if (schedule.error) return res.status(400).json({ success: false, message: schedule.error });
+
+    const post = await loadPostToSchedule(req, res);
+    if (!post) return undefined;
+    if (!isPublishable(post)) {
+      return res.status(409).json({ success: false, message: `This post is ${post.moderationStatus} and can't be published` });
+    }
+    if (post.approvalStatus === 'rejected') {
+      return res.status(409).json({ success: false, message: 'Post approval was rejected for external publish' });
+    }
+    const problem = await linkedInAccountProblem(post.author._id, { self: idOf(post.author) === String(req.user._id) });
+    if (problem) return res.status(400).json({ success: false, message: problem });
+
+    post.autoPublish = true;
+    post.publishAt = schedule.publishAt;
+    await post.save();
+    await startAutoPublish(req, post, req.user._id);
+
+    await logAuditEventV2(req, {
+      action: 'social_post_scheduled',
+      targetType: 'SocialPostV2',
+      targetId: post._id,
+      details: { publishAt: post.publishAt },
+    });
+    const [populated, ctx] = await Promise.all([findPostForView(post._id), viewerContext(req.user)]);
+    return res.json({ success: true, data: await presentPost(populated, ctx) });
+  } catch (error) {
+    return sendServerError(res, error);
+  }
+};
+
+// Stops a post going to LinkedIn by itself: its queued LinkedIn job goes.
+// It can still be published by hand.
+export const unschedulePost = async (req, res) => {
+  try {
+    const post = await loadPostToSchedule(req, res);
+    if (!post) return undefined;
+    if (await SocialPublishJobV2.exists({ post: post._id, provider: 'linkedin', status: 'processing' })) {
+      return res.status(409).json({ success: false, message: 'It is being posted to LinkedIn right now' });
+    }
+
+    post.autoPublish = false;
+    post.publishAt = null;
+    await post.save();
+    const { deletedCount: jobsRemoved } = await SocialPublishJobV2.deleteMany({ post: post._id, provider: 'linkedin', status: 'queued' });
+
+    await logAuditEventV2(req, {
+      action: 'social_post_unscheduled',
+      targetType: 'SocialPostV2',
+      targetId: post._id,
+      details: { jobsRemoved },
+    });
+    const [populated, ctx] = await Promise.all([findPostForView(post._id), viewerContext(req.user)]);
+    return res.json({ success: true, data: await presentPost(populated, ctx) });
+  } catch (error) {
+    return sendServerError(res, error);
+  }
+};
+
 // What the social-publish background job does, on request: recover jobs
 // stuck part-way, then run the queued jobs that are due
 export const processDuePublishJobs = async (req, res) => {
@@ -2501,6 +2881,89 @@ export const processDuePublishJobs = async (req, res) => {
     });
 
     return res.json({ success: true, count: outcomes.length, data: outcomes, recovered });
+  } catch (error) {
+    return sendServerError(res, error);
+  }
+};
+
+// ---------- Images ----------
+//
+// Images are uploaded before the post (POST /images, as base64 in JSON, like
+// task attachments), then named in POST /posts. models/SocialImageV2.js has
+// the rules for what may be uploaded.
+
+const imageJson = (image) => ({
+  _id: image._id,
+  type: image.type,
+  size: image.size,
+  width: image.width,
+  height: image.height,
+  altText: image.altText,
+  post: image.post,
+  createdAt: image.createdAt,
+});
+
+export const uploadImage = async (req, res) => {
+  try {
+    const image = checkImage(req.body || {});
+    if (image.error) return res.status(400).json({ success: false, message: image.error });
+
+    const unused = await SocialImage.countDocuments({ owner: req.user._id, post: null });
+    if (unused >= MAX_UNUSED_IMAGES) {
+      return res.status(409).json({
+        success: false,
+        message: `You have ${unused} images that aren't in a post yet. Post them or remove some first.`,
+      });
+    }
+
+    const { type, bytes, width, height, altText } = image;
+    const created = await SocialImage.create({ owner: req.user._id, type, size: bytes.length, width, height, altText, data: bytes });
+    return res.status(201).json({ success: true, data: imageJson(created) });
+  } catch (error) {
+    return sendServerError(res, error);
+  }
+};
+
+// The image itself: for its owner, for anyone who may see its post, and for
+// the post's publishers (so an approver sees the images of a post waiting
+// for approval) unless an admin removed the post
+export const getImage = async (req, res) => {
+  try {
+    const image = await SocialImage.findById(req.params.imageId).select('+data');
+    let allowed = Boolean(image) && String(image.owner) === String(req.user._id);
+    if (image && !allowed && image.post) {
+      const post = await SocialPost.findById(image.post).populate(authorPopulate);
+      allowed = Boolean(post) && ((await canUserViewPost(post, req.user))
+        || (Boolean(post.author) && post.moderationStatus !== 'removed' && (await canPublishFor(req.user, post.author._id))));
+    }
+    if (!allowed) return res.status(404).json({ success: false, message: 'Image not found' });
+
+    // An image never changes; it is checked to be what its type says, and is
+    // never run as a page
+    res.set({
+      'Content-Type': image.type,
+      'Cache-Control': 'private, max-age=86400',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+    });
+    return res.send(image.data);
+  } catch (error) {
+    return sendServerError(res, error);
+  }
+};
+
+// Removes an image the caller uploaded and hasn't posted. A posted image goes
+// with its post.
+export const deleteImage = async (req, res) => {
+  try {
+    const image = await SocialImage.findOne({ _id: req.params.imageId, owner: req.user._id }).select('post');
+    if (!image) return res.status(404).json({ success: false, message: 'Image not found' });
+
+    const { deletedCount } = await SocialImage.deleteOne({ _id: image._id, post: null });
+    if (deletedCount === 0) {
+      return res.status(409).json({ success: false, message: 'This image is in a post. Delete the post to remove it.' });
+    }
+    return res.json({ success: true, message: 'Image removed' });
   } catch (error) {
     return sendServerError(res, error);
   }

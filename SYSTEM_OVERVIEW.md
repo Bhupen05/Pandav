@@ -48,10 +48,13 @@ Rules that shape most screens:
 5. **Chat**: direct and team chat over Socket.io with read receipts, typing, unread counts,
    conversation previews, editing and deleting, blocking and reporting; presence shows only a
    person's contacts.
-6. **Social Hub**: posts to the feed (public, team or connections), likes and comments, editing
-   and deleting; approval for members' external posts; publishing to LinkedIn and GitHub through
-   queued jobs that a background worker runs and retries; linked accounts by token or OAuth;
-   connections; personal to-dos that can be shared when done (after confirming); moderation.
+6. **Social Hub**: posts to the feed (public, team or connections) with up to four images, likes
+   and comments, editing and deleting; approval for members' external posts; posting to your own
+   LinkedIn now, at a chosen time or as soon as it is approved, with a preview and LinkedIn's
+   3000-character limit (title and tags as hashtags, images attached); publishing to GitHub; both
+   through queued jobs that a background worker runs and retries; "Connect LinkedIn/GitHub" through
+   the provider's own sign-in (OAuth), or a pasted token; connections; personal to-dos that can be
+   shared when done (after confirming); moderation.
 7. **Notifications**: stored for 90 days, delivered live over the socket, and some emailed (task
    assigned or rejected, invites, leave decisions, failed publishing, contact messages, ...).
 8. **Admin**: dashboard figures, people management, the audit log of sensitive actions, reports
@@ -101,8 +104,8 @@ memory, so the backend runs as one instance.
 User, Team, TeamInvite, Task (with history, checklist and repeat settings), TaskComment,
 TaskAttachment, Attendance, AttendanceSettings, Holiday, Chat (direct messages),
 TeamChatMessage, Block, Notification, AuthToken (reset and verification links), Contact,
-AuditEventV2, and the Social Hub's SocialPostV2, SocialPublishJobV2, SocialIntegrationV2,
-NetworkConnectionV2 and PersonalTaskV2.
+AuditEventV2, and the Social Hub's SocialPostV2, SocialImageV2 (post images, stored in the
+database), SocialPublishJobV2, SocialIntegrationV2, NetworkConnectionV2 and PersonalTaskV2.
 
 ## 7. Operations
 

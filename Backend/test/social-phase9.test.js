@@ -60,13 +60,17 @@ const provider = http.createServer((req, res) => {
     if (method === 'GET' && url === '/v2/userinfo') {
       return auth === 'Bearer expired-li' ? reply(401, { message: 'Expired token' }) : reply(200, { sub: 'li-1', name: 'Li Person' });
     }
-    if (method === 'POST' && url === '/v2/ugcPosts') return reply(201, { id: `urn:li:share:${providerCalls.length}` });
+    // Posts API: the new post's id is in a header, the body is empty
+    if (method === 'POST' && url === '/rest/posts') {
+      res.writeHead(201, { 'x-restli-id': `urn:li:share:${providerCalls.length}` });
+      return res.end();
+    }
     if (method === 'GET' && url.startsWith('/v2/shares')) return reply(200, { elements: [] });
     return reply(404, { message: 'Not found' });
   });
 });
 const issueCalls = () => providerCalls.filter((c) => c.method === 'POST' && c.path.endsWith('/issues'));
-const linkedInPosts = () => providerCalls.filter((c) => c.method === 'POST' && c.path === '/v2/ugcPosts');
+const linkedInPosts = () => providerCalls.filter((c) => c.method === 'POST' && c.path === '/rest/posts');
 
 const OUTBOX = path.join(os.tmpdir(), `pandav-social9-outbox-${process.pid}.jsonl`);
 const outbox = () => (fs.existsSync(OUTBOX)
@@ -369,12 +373,13 @@ test('approvals: the queue, the answer, and the task that follows', async (t) =>
   await check('once approved, everyone does', await inFeed(people.ned));
   await check('approving answers with the author and her role',
     approved.status === 200 && approved.data.data.author?.role === 'team_member' && approved.data.data.author.name === 'Mia Member', JSON.stringify(approved.data).slice(0, 300));
-  await check('the task follows: approved', (await taskStatus()) === 'approved');
-  const before = linkedInPosts().length;
-  const published = await call('POST', `/social/posts/${sharedId}/publish`, { token: mia.token, body: { targets: { linkedin: true } } });
-  await check('she publishes it to LinkedIn', published.data.data?.result.linkedin.status === 'published' && linkedInPosts().length === before + 1,
-    JSON.stringify(published.data).slice(0, 300));
+  // She asked for LinkedIn when she shared it: approving sends it there
+  await check('approving sends it to LinkedIn', approved.data.data.publishResults?.linkedin?.status === 'published'
+    && linkedInPosts().at(-1)?.auth === 'Bearer mia-li', JSON.stringify(approved.data.data.publishResults));
   await check('and the task follows: published', (await taskStatus()) === 'published');
+  const again = await call('POST', `/social/posts/${sharedId}/publish`, { token: mia.token, body: { targets: { linkedin: true } } });
+  await check('publishing it by hand as well is refused', again.status === 409 && /already been published to LinkedIn/.test(again.data.message),
+    JSON.stringify(again.data));
   const sharedAgain = await call('POST', `/social/personal-tasks/${task._id}/share`, { token: mia.token, body: {} });
   await check('sharing it again is a 409 with the post id under data', sharedAgain.status === 409 && sharedAgain.data.data?.postId === sharedId,
     JSON.stringify(sharedAgain.data));

@@ -25,7 +25,10 @@ const provider = http.createServer((req, res) => {
       return reply(201, { id: providerCalls.length, html_url: `https://github.example/issues/${providerCalls.length}` });
     }
     if (req.method === 'GET' && req.url === '/userinfo') return reply(200, { sub: 'li-1', name: 'Li' });
-    if (req.method === 'POST' && req.url === '/ugcPosts') return reply(201, { id: 'urn:li:share:1' });
+    if (req.method === 'POST' && req.url === '/rest/posts') {
+      res.writeHead(201, { 'x-restli-id': 'urn:li:share:1' });
+      return res.end();
+    }
     return reply(404, { message: 'Not found' });
   });
 });

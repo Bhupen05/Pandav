@@ -41,6 +41,23 @@ const socialPostSchema = new mongoose.Schema({
     type: [String],
     default: [],
   },
+  // Uploaded images (models/SocialImageV2.js), in the order they show.
+  // Fixed when the post is created.
+  images: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'SocialImageV2',
+  }],
+  // Post it to LinkedIn without anyone pressing publish: at publishAt, or
+  // straight away when that is null; a post that needs approval goes once it
+  // is approved. It runs as a publish job, so failures are retried.
+  autoPublish: {
+    type: Boolean,
+    default: false,
+  },
+  publishAt: {
+    type: Date,
+    default: null,
+  },
   tags: {
     type: [String],
     default: [],
