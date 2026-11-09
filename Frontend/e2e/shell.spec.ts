@@ -66,8 +66,10 @@ test('navigation: the current section is marked, the account menu and the phone 
   await expect(page).toHaveURL(/\/tasks$/)
   await expect(rail.getByRole('link', { name: 'Tasks' })).toHaveAttribute('aria-current', 'page')
   await expect(rail.getByRole('link', { name: 'Home' })).not.toHaveAttribute('aria-current', 'page')
-  await expect(page.getByRole('button', { name: 'Refresh' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Profile', exact: true })).toHaveCount(0)
+  // The top bar lost its Refresh and Profile buttons (pages may have their own Refresh)
+  const topBar = page.getByRole('banner')
+  await expect(topBar.getByRole('button', { name: 'Refresh' })).toHaveCount(0)
+  await expect(topBar.getByRole('button', { name: 'Profile', exact: true })).toHaveCount(0)
 
   // Account menu: opens, Escape closes it and puts focus back, "Profile" leads to the profile
   const avatar = page.getByRole('button', { name: `${USER.name}, account menu` })

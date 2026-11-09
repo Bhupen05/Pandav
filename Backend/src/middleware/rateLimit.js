@@ -39,9 +39,11 @@ export const twoFactorAccountLimiter = limiter(
   }
 );
 
+// REGISTER_LIMIT_PER_HOUR is for the browser tests, which sign up many
+// accounts from one address; leave it unset in production
 export const registerLimiter = limiter(
   60,
-  10,
+  Number(process.env.REGISTER_LIMIT_PER_HOUR) || 10,
   'Too many accounts created from this network. Please try again later.'
 );
 

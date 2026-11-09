@@ -11,7 +11,8 @@ import { launchServer, resetDatabase, runScript } from './helpers.js';
 const SUITE = 'e2e';
 const port = Number(process.env.E2E_BACKEND_PORT || 5055);
 const controlPort = Number(process.env.E2E_CONTROL_PORT || 5056);
-const env = { CLIENT_URL: process.env.CLIENT_URL || '' };
+// The specs sign up their own accounts, all from 127.0.0.1: more than the usual 10 an hour
+const env = { CLIENT_URL: process.env.CLIENT_URL || '', REGISTER_LIMIT_PER_HOUR: '100' };
 
 await resetDatabase(SUITE);
 runScript(SUITE, 'create-users.js');

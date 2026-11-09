@@ -13,5 +13,10 @@ export default defineConfig(({ mode }) => {
     server: {
       proxy: { '/api': backendUrl },
     },
+    // Loaded on demand (two-step sign-in setup). Prepared at start-up, or the
+    // first import on a fresh dev server fails while Vite re-bundles
+    optimizeDeps: {
+      include: ['qrcode'],
+    },
   }
 })
