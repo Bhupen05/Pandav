@@ -41,7 +41,9 @@ test('an admin connects LinkedIn, posts there with an image, and schedules a pos
   // LinkedIn's consent page agrees and sends the browser back where it was
   await expect(page).toHaveURL(/\/social$/)
   await expect(page.getByText('LinkedIn connected as Pandav Tester.')).toBeVisible()
-  await expect(page.locator('#integrations').getByText('Connected as')).toContainText('Pandav Tester')
+  await page.goto('/integrations')
+  await expect(page.getByRole('region', { name: 'Linked accounts' }).getByText('Connected as')).toContainText('Pandav Tester')
+  await page.goto('/social')
 
   // ---------- Straight away, with an image ----------
   const form = composer(page)

@@ -35,7 +35,7 @@ export const approvalLabel: Record<ApprovalStatus, string> = {
 }
 
 export const moderationLabel: Record<ModerationStatus, string> = {
-  clean: 'No action',
+  clean: 'Normal',
   flagged: 'Flagged',
   hidden: 'Hidden',
   removed: 'Removed',
@@ -197,3 +197,10 @@ export const excerpt = (text: string | null | undefined, length = 80) => {
 }
 
 export const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`
+
+// How a linked account was connected, from the server's token hint
+export const linkLabelFor = (hint?: string) =>
+  hint?.includes('oauth') ? 'Linked through its own sign-in' : hint ? 'Linked with an access token' : 'Linked'
+
+// A list from an answer's `data`, or an empty one
+export const listOf = <T,>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : [])
