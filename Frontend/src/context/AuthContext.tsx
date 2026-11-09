@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState, type FC, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type FC, type ReactNode } from 'react';
 import { authAPI, type User } from '../api/authAPI';
+import { onPasswordChangeRequired } from '../api/axios';
 import { AuthContext } from './useAuth';
 
 // Written by versions that kept the session in browser storage. Those tokens
@@ -39,26 +40,51 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
     };
   }, []);
 
-  const login = async (email: string, password: string, rememberMe = false) => {
-    const { success, user: signedIn, message } = await authAPI.login({ email, password, rememberMe });
-    if (!success || !signedIn) {
-      throw new Error(message || 'Invalid credentials');
-    }
+  // A request was refused because an admin reset this password: from now on
+  // the app only lets the user choose a new one
+  useEffect(
+    () => onPasswordChangeRequired(() => setUser((current) => (current ? { ...current, mustChangePassword: true } : current))),
+    [],
+  );
 
+  const signedIn = (next: User) => {
     sessionChangedRef.current = true;
-    setUser(signedIn);
+    setUser(next);
     setLoading(false);
-    return signedIn;
+    return next;
+  };
+
+  const login = async (email: string, password: string, rememberMe = false) => {
+    const result = await authAPI.login({ email, password, rememberMe });
+    if (result.user) signedIn(result.user);
+    return result;
+  };
+
+  const completeTwoFactor = async (ticket: string, code: string) => signedIn(await authAPI.verifyTwoFactor(ticket, code));
+
+  const signedOut = () => {
+    sessionChangedRef.current = true;
+    setUser(null);
+    setLoading(false);
   };
 
   // Only signs out here once the server has cleared the cookie; otherwise the
   // browser would still be signed in after a reload
   const logout = async () => {
     await authAPI.logout();
-    sessionChangedRef.current = true;
-    setUser(null);
-    setLoading(false);
+    signedOut();
   };
+
+  const logoutAll = async () => {
+    await authAPI.logoutAll();
+    signedOut();
+  };
+
+  const refreshUser = useCallback(async () => {
+    const current = await authAPI.getMe();
+    setUser(current);
+    return current;
+  }, []);
 
   const value = {
     user,
@@ -68,8 +94,11 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
     isTeamMember: user?.role === 'team_member',
     loading,
     login,
+    completeTwoFactor,
     logout,
+    logoutAll,
     updateUser: setUser,
+    refreshUser,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

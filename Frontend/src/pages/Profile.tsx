@@ -1,257 +1,246 @@
-import { useState, useEffect, useCallback } from 'react'
-import { useAuth } from '../context/useAuth'
-import { userAPI } from '../api/userAPI'
-import { taskAPI } from '../api/taskAPI'
-import { attendanceAPI, type AttendanceRecord } from '../api/attendanceAPI'
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { Camera } from 'lucide-react'
+import { authAPI } from '../api/authAPI'
 import { getErrorMessage } from '../api/axios'
-import { resizeImage } from '../utils/resizeImage'
-import type { TaskInput } from '../components/Tasksadd'
+import { userAPI } from '../api/userAPI'
+import { useAuth } from '../context/useAuth'
 import { useFeedback } from '../context/useFeedback'
+import { resizeImage } from '../utils/resizeImage'
+import { getRoleLabel } from '../utils/roleRedirect'
+import { useAuthConfig } from '../utils/useAuthConfig'
+import Avatar from '../components/shell/Avatar'
+import ProfileActivity from '../components/shell/ProfileActivity'
+import ProfileSecurity from '../components/shell/ProfileSecurity'
+import { errorBoxClass, infoBoxClass, inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from '../components/shell/formStyles'
 
-type ProfileTask = TaskInput & {
-  createdAt?: string
-  updatedAt?: string
-}
+type TabId = 'overview' | 'security' | 'notifications'
 
-type DayEntry = {
-  date: string
-  count: number
-}
-
-type TaskStats = {
-  total: number
-  completed: number
-  inProgress: number
-  pending: number
-}
-
-type AttendanceStats = {
-  totalDays: number
-  presentDays: number
-  avgWorkHours: number
-}
-
-const COLOR_SCALE = [
-  'bg-neutral-200',
-  'bg-emerald-300',
-  'bg-emerald-300',
-  'bg-emerald-400',
-  'bg-emerald-500',
-  'bg-emerald-600',
+const TABS: { id: TabId; label: string }[] = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'security', label: 'Security' },
+  { id: 'notifications', label: 'Notifications' },
 ]
 
-function colorForCount(count: number) {
-  if (count === 0) return COLOR_SCALE[0]
-  if (count >= 5) return COLOR_SCALE[5]
-  if (count >= 4) return COLOR_SCALE[4]
-  if (count >= 3) return COLOR_SCALE[3]
-  if (count >= 2) return COLOR_SCALE[2]
-  return COLOR_SCALE[1]
+// The new photo next to the current one, before it is saved. Native <dialog>:
+// Escape cancels and focus stays inside.
+function PhotoDialog({
+  name,
+  currentImage,
+  newImage,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  name: string
+  currentImage?: string
+  newImage: string
+  busy: boolean
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  const ref = useRef<HTMLDialogElement>(null)
+
+  useEffect(() => {
+    const element = ref.current
+    if (element && !element.open) element.showModal()
+    return () => {
+      if (element?.open) element.close()
+    }
+  }, [])
+
+  return (
+    <dialog
+      ref={ref}
+      aria-labelledby="photo-dialog-title"
+      onCancel={(e) => {
+        e.preventDefault()
+        if (!busy) onCancel()
+      }}
+      className="m-auto w-[calc(100%-2rem)] max-w-lg rounded-xl bg-white p-6 shadow-xl backdrop:bg-black/50"
+    >
+      <h2 id="photo-dialog-title" className="mb-4 text-lg font-semibold text-neutral-900">Update Profile Picture</h2>
+
+      <div className="mb-6 grid grid-cols-2 gap-4">
+        <div className="text-center">
+          <p className="mb-2 text-sm font-medium text-neutral-500">Current</p>
+          <Avatar name={name} src={currentImage} className="mx-auto h-28 w-28 border-2 border-neutral-200 text-2xl" />
+        </div>
+        <div className="text-center">
+          <p className="mb-2 text-sm font-medium text-emerald-700">New</p>
+          <img src={newImage} alt="Your new profile picture" className="mx-auto h-28 w-28 rounded-full border-2 border-emerald-500 object-cover" />
+        </div>
+      </div>
+
+      <div className="flex gap-3">
+        <button type="button" onClick={onCancel} disabled={busy} className={`flex-1 ${secondaryButtonClass}`}>
+          Cancel
+        </button>
+        <button type="button" onClick={onConfirm} disabled={busy} className={`flex-1 ${primaryButtonClass}`}>
+          {busy ? 'Saving...' : 'Confirm Change'}
+        </button>
+      </div>
+    </dialog>
+  )
 }
 
-function alignToSunday(date: Date) {
-  const d = new Date(date)
-  const day = d.getDay()
-  d.setDate(d.getDate() - day)
-  return d
-}
+// The switch for emails about notifications (the notifications tab)
+function NotificationSettings() {
+  const { user, updateUser } = useAuth()
+  const { notify } = useFeedback()
+  const { mailEnabled, ready } = useAuthConfig()
+  const [busy, setBusy] = useState(false)
 
-function buildCalendar(entries: DayEntry[]) {
-  const map = new Map(entries.map((e) => [e.date, e.count]))
-  const today = new Date()
-  const start = alignToSunday(new Date(today.getFullYear(), today.getMonth(), today.getDate() - entries.length))
-  const cells: DayEntry[] = []
-  for (let d = new Date(start); d <= today; d.setDate(d.getDate() + 1)) {
-    const iso = d.toISOString().slice(0, 10)
-    cells.push({ date: iso, count: map.get(iso) ?? 0 })
-  }
-  const weeks: DayEntry[][] = []
-  for (let i = 0; i < cells.length; i += 7) {
-    weeks.push(cells.slice(i, i + 7))
-  }
-  return { weeks, today }
-}
+  if (!user) return null
+  const on = user.emailNotifications
 
-function streaks(entries: DayEntry[]) {
-  let max = 0
-  let temp = 0
-  for (let i = 0; i < entries.length; i++) {
-    if (entries[i].count > 0) {
-      temp += 1
-      if (temp > max) max = temp
-    } else {
-      temp = 0
+  const toggle = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      await userAPI.updateUser(user._id, { emailNotifications: !on })
+      updateUser({ ...user, emailNotifications: !on })
+      notify(!on ? 'We will email you about important notifications.' : 'Email notifications are off.', 'success')
+    } catch (err) {
+      notify(getErrorMessage(err, 'Could not save that. Please try again.'), 'error')
+    } finally {
+      setBusy(false)
     }
   }
 
-  // Calculate current streak from today backwards
-  let current = 0
-  for (let i = entries.length - 1; i >= 0; i--) {
-    if (entries[i].count > 0) current += 1
-    else break
-  }
-  return { current, best: max }
-}
+  return (
+    <section aria-labelledby="email-notifications-title" className="rounded-xl border border-neutral-200 bg-white p-6 shadow-sm">
+      <h2 id="email-notifications-title" className="text-lg font-semibold text-neutral-900">Email</h2>
+      <p className="mt-1 text-sm text-neutral-600">
+        Notifications always show up in the app. Some of them, such as a task given to you or a team invite, can also be sent to {user.email}.
+      </p>
 
-const dayLabels = ['Sun', '', 'Tue', '', 'Thu', '', 'Sat']
+      <div className="mt-4 flex items-center justify-between gap-4 rounded-lg border border-neutral-200 px-4 py-3">
+        <span id="email-notifications-label" className="text-sm font-medium text-neutral-900">Email me about important notifications</span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={on}
+          aria-labelledby="email-notifications-label"
+          onClick={() => void toggle()}
+          disabled={busy}
+          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${on ? 'bg-emerald-600' : 'bg-neutral-300'}`}
+        >
+          <span aria-hidden="true" className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${on ? 'translate-x-5.5' : 'translate-x-0.5'}`} />
+        </button>
+      </div>
 
-type UserProfile = {
-  name: string
-  email: string
-  phone: string
-  role: string
-  joinedDate: string
-  profileImage?: string
+      {ready && !mailEnabled && (
+        <p className="mt-3 text-sm text-neutral-600">Email is not set up on this server yet, so no emails are sent for now.</p>
+      )}
+    </section>
+  )
 }
 
 export default function Profile() {
-  const { notify } = useFeedback()
+  const { notify, confirm } = useFeedback()
   const { user, updateUser } = useAuth()
-  const [activityData, setActivityData] = useState<DayEntry[]>([])
-  const [loadingActivity, setLoadingActivity] = useState(true)
-  const [taskStats, setTaskStats] = useState<TaskStats>({ total: 0, completed: 0, inProgress: 0, pending: 0 })
-  const [attendanceStats, setAttendanceStats] = useState<AttendanceStats>({ totalDays: 0, presentDays: 0, avgWorkHours: 0 })
-  
-  const { weeks } = buildCalendar(activityData)
-  const { current, best } = streaks(activityData)
-  const total = activityData.reduce((sum, d) => sum + d.count, 0)
+  const { mailEnabled } = useAuthConfig()
+  const [params, setParams] = useSearchParams()
 
   const [isEditing, setIsEditing] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [uploadingImage, setUploadingImage] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState<string | null>(null)
+  const [form, setForm] = useState({ name: '', email: '', phone: '', department: '', currentPassword: '' })
   const [previewImage, setPreviewImage] = useState<string | null>(null)
-  const [showImagePreview, setShowImagePreview] = useState(false)
-  const [profile, setProfile] = useState<UserProfile>({
-    name: user?.name || 'User',
-    email: user?.email || '',
-    phone: user?.phone || '',
-    role: user?.role || 'User',
-    joinedDate: user?.createdAt || new Date().toISOString(),
-    profileImage: user?.profileImage || '',
-  })
+  const [photoBusy, setPhotoBusy] = useState(false)
+  const [resending, setResending] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const tabRefs = useRef<Record<TabId, HTMLButtonElement | null>>({ overview: null, security: null, notifications: null })
 
-  const [editedProfile, setEditedProfile] = useState<UserProfile>(profile)
+  const forced = user?.mustChangePassword === true
+  const requested = params.get('tab')
+  // Until a new password is chosen, only the security tab is available
+  const tab: TabId = forced ? 'security' : TABS.some((t) => t.id === requested) ? (requested as TabId) : 'overview'
 
-  const userId = user?._id
+  if (!user) return null
 
-  const loadAllData = useCallback(async () => {
-    if (!userId) return
-    setLoadingActivity(true)
-    
-    try {
-      // Activity map to track all activities by date
-      const activityMap = new Map<string, number>()
-      
-      // Load tasks
-      const taskResponse = await taskAPI.getTasks({ assignedTo: userId })
-      if (taskResponse.success && Array.isArray(taskResponse.data)) {
-        const tasks: ProfileTask[] = taskResponse.data
-        
-        // Calculate task stats
-        setTaskStats({
-          total: tasks.length,
-          completed: tasks.filter((t) => t.status === 'completed').length,
-          inProgress: tasks.filter((t) => t.status === 'in-progress').length,
-          pending: tasks.filter((t) => t.status === 'pending').length,
-        })
-        
-        // Count activities from tasks: completed, completion-requested, or any status change
-        tasks.forEach((task) => {
-          // Count completed tasks
-          if ((task.status === 'completed' || task.status === 'completion-requested') && task.updatedAt) {
-            const date = new Date(task.updatedAt).toISOString().slice(0, 10)
-            activityMap.set(date, (activityMap.get(date) || 0) + 1)
-          }
-          // Also count task creation as activity
-          if (task.createdAt) {
-            const date = new Date(task.createdAt).toISOString().slice(0, 10)
-            activityMap.set(date, (activityMap.get(date) || 0) + 1)
-          }
-        })
-      }
+  const emailChanged = form.email.trim().toLowerCase() !== user.email.toLowerCase()
+  const memberDays = user.createdAt ? Math.max(0, Math.floor((Date.now() - new Date(user.createdAt).getTime()) / 86_400_000)) : null
 
-      // Load attendance and add to activity
-      try {
-        const attendanceResponse = await attendanceAPI.getAttendance({ user: userId })
-        if (attendanceResponse.success && Array.isArray(attendanceResponse.data)) {
-          const records: AttendanceRecord[] = attendanceResponse.data
-          const approvedRecords = records.filter((r) => r.approvalStatus === 'approved')
-          const totalHours = approvedRecords.reduce((sum, r) => sum + (r.workHours || 0), 0)
-          
-          setAttendanceStats({
-            totalDays: records.length,
-            presentDays: approvedRecords.length,
-            avgWorkHours: approvedRecords.length > 0 ? Math.round((totalHours / approvedRecords.length) * 10) / 10 : 0,
-          })
-          
-          // Add attendance check-ins to activity map
-          records.forEach((record) => {
-            if (record.date || record.checkInTime) {
-              const dateStr = record.date
-                ? new Date(record.date).toISOString().slice(0, 10)
-                : new Date(record.checkInTime!).toISOString().slice(0, 10)
-              activityMap.set(dateStr, (activityMap.get(dateStr) || 0) + 1)
-            }
-          })
-        }
-      } catch (err) {
-        console.error('Failed to load attendance:', err)
-      }
-      
-      // Fill in the last 120 days
-      const todayDate = new Date()
-      const entries: DayEntry[] = []
-      for (let i = 120; i >= 0; i--) {
-        const d = new Date(todayDate)
-        d.setDate(todayDate.getDate() - i)
-        const iso = d.toISOString().slice(0, 10)
-        entries.push({ date: iso, count: activityMap.get(iso) || 0 })
-      }
-      setActivityData(entries)
-      
-    } catch (error) {
-      console.error('Failed to load data:', error)
-      const todayDate = new Date()
-      const entries: DayEntry[] = []
-      for (let i = 120; i >= 0; i--) {
-        const d = new Date(todayDate)
-        d.setDate(todayDate.getDate() - i)
-        entries.push({ date: d.toISOString().slice(0, 10), count: 0 })
-      }
-      setActivityData(entries)
-    } finally {
-      setLoadingActivity(false)
-    }
-  }, [userId])
+  const selectTab = (id: TabId) => setParams({ tab: id })
 
-  useEffect(() => {
-    if (user) {
-      const userProfile: UserProfile = {
-        name: user.name || 'User',
-        email: user.email || '',
-        phone: user.phone || '',
-        role: user.role || 'User',
-        joinedDate: user.createdAt || new Date().toISOString(),
-        profileImage: user.profileImage || '',
-      }
-      setProfile(userProfile)
-      setEditedProfile(userProfile)
-      loadAllData()
-    }
-  }, [user, loadAllData])
+  // Arrow keys, Home and End move between tabs
+  const onTabKeyDown = (e: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const enabled = forced ? TABS.filter((t) => t.id === 'security') : TABS
+    const position = enabled.findIndex((t) => t.id === TABS[index].id)
+    let target: number | null = null
+    if (e.key === 'ArrowRight') target = (position + 1) % enabled.length
+    else if (e.key === 'ArrowLeft') target = (position - 1 + enabled.length) % enabled.length
+    else if (e.key === 'Home') target = 0
+    else if (e.key === 'End') target = enabled.length - 1
+    if (target === null) return
+    e.preventDefault()
+    const next = enabled[target].id
+    selectTab(next)
+    tabRefs.current[next]?.focus()
+  }
 
-  const handleEdit = () => {
-    setEditedProfile(profile)
+  const startEditing = () => {
+    setForm({
+      name: user.name,
+      email: user.email,
+      phone: user.phone ?? '',
+      department: user.department ?? '',
+      currentPassword: '',
+    })
+    setFormError(null)
     setIsEditing(true)
   }
 
-  const handleCancel = () => {
-    setEditedProfile(profile)
-    setIsEditing(false)
+  const handleSave = async (e: FormEvent) => {
+    e.preventDefault()
+    if (saving) return
+    setFormError(null)
+
+    if (!form.name.trim()) {
+      setFormError('Please enter your name.')
+      return
+    }
+    if (emailChanged && !form.currentPassword) {
+      setFormError('Enter your current password to change your email address.')
+      return
+    }
+
+    setSaving(true)
+    try {
+      const response = await userAPI.updateUser(user._id, {
+        name: form.name.trim(),
+        phone: form.phone.trim(),
+        department: form.department.trim(),
+        ...(emailChanged ? { email: form.email.trim(), currentPassword: form.currentPassword } : {}),
+      })
+      const saved = response.data ?? {}
+      updateUser({
+        ...user,
+        name: saved.name ?? form.name.trim(),
+        email: saved.email ?? user.email,
+        phone: saved.phone,
+        department: saved.department,
+        emailVerified: typeof saved.emailVerified === 'boolean' ? saved.emailVerified : user.emailVerified,
+      })
+      setIsEditing(false)
+      notify(
+        emailChanged && mailEnabled ? 'Profile saved. We sent a link to confirm your new email address.' : 'Profile saved.',
+        'success',
+      )
+    } catch (err) {
+      setFormError(getErrorMessage(err, 'Could not save your profile. Please try again.'))
+    } finally {
+      setSaving(false)
+    }
   }
 
   const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
+    const input = e.target
+    const file = input.files?.[0]
+    // Forget the choice, so picking the same file again still counts as a change
+    input.value = ''
     if (!file) return
 
     if (!file.type.startsWith('image/')) {
@@ -266,391 +255,303 @@ export default function Profile() {
 
     try {
       setPreviewImage(await resizeImage(file))
-      setShowImagePreview(true)
     } catch {
       notify('Could not read that image. Please try another file.', 'error')
     }
   }
 
   const handleImageConfirm = async () => {
-    if (!previewImage || !user?._id) return
-
-    setUploadingImage(true)
+    if (!previewImage) return
+    setPhotoBusy(true)
     try {
-      const response = await userAPI.updateUser(user._id, { profileImage: previewImage })
-      if (response.success) {
-        const updatedProfile = { ...profile, profileImage: previewImage }
-        setProfile(updatedProfile)
-        setEditedProfile(updatedProfile)
-        if (updateUser) {
-          updateUser({ ...user, profileImage: previewImage })
-        }
-        setShowImagePreview(false)
-        setPreviewImage(null)
-      } else {
-        notify(response.message || 'Failed to update profile picture', 'error')
-      }
-    } catch (error) {
-      notify(getErrorMessage(error, 'Failed to upload image'), 'error')
+      await userAPI.updateUser(user._id, { profileImage: previewImage })
+      updateUser({ ...user, profileImage: previewImage })
+      setPreviewImage(null)
+      notify('Profile photo updated.', 'success')
+    } catch (err) {
+      notify(getErrorMessage(err, 'Failed to upload image'), 'error')
     } finally {
-      setUploadingImage(false)
+      setPhotoBusy(false)
     }
   }
 
-  const handleImageCancel = () => {
-    setPreviewImage(null)
-    setShowImagePreview(false)
-  }
-
-  const handleSave = async () => {
-    if (!user?._id) {
-      notify('User not found', 'error')
-      return
-    }
-
-    setLoading(true)
+  const handleImageRemove = async () => {
+    const ok = await confirm({
+      title: 'Remove your photo?',
+      message: 'Your initials will show instead.',
+      confirmLabel: 'Remove photo',
+      danger: true,
+    })
+    if (!ok) return
+    setPhotoBusy(true)
     try {
-      const response = await userAPI.updateUser(user._id, {
-        name: editedProfile.name,
-        email: editedProfile.email,
-        phone: editedProfile.phone,
-      })
-
-      if (response.success) {
-        setProfile(editedProfile)
-        setIsEditing(false)
-        if (updateUser) {
-          updateUser({
-            ...user,
-            name: editedProfile.name,
-            email: editedProfile.email,
-            phone: editedProfile.phone,
-          })
-        }
-      } else {
-        notify(response.message || 'Failed to update profile', 'error')
-      }
-    } catch (error) {
-      notify(getErrorMessage(error, 'Failed to update profile'), 'error')
+      await userAPI.updateUser(user._id, { profileImage: null })
+      updateUser({ ...user, profileImage: undefined })
+      notify('Profile photo removed.', 'success')
+    } catch (err) {
+      notify(getErrorMessage(err, 'Could not remove your photo. Please try again.'), 'error')
     } finally {
-      setLoading(false)
+      setPhotoBusy(false)
     }
   }
 
-  const completionRate = taskStats.total > 0 ? Math.round((taskStats.completed / taskStats.total) * 100) : 0
-  const memberSince = new Date(profile.joinedDate)
-  const daysAsMember = Math.floor((new Date().getTime() - memberSince.getTime()) / (1000 * 60 * 60 * 24))
+  const resendVerification = async () => {
+    setResending(true)
+    try {
+      notify((await authAPI.resendVerification()) ?? 'We have sent you a new link.', 'success')
+    } catch (err) {
+      notify(getErrorMessage(err, 'Could not send the link. Please try again.'), 'error')
+    } finally {
+      setResending(false)
+    }
+  }
+
+  const showVerification = user.emailVerified || mailEnabled
 
   return (
-    <main className="min-h-screen bg-neutral-50">
+    <div className="min-h-screen bg-neutral-50">
       {/* Hero Header */}
       <div className="bg-linear-to-r from-emerald-600 to-teal-600">
         <div className="mx-auto max-w-6xl px-4 py-8">
           <div className="flex flex-col items-center gap-6 md:flex-row md:items-start">
             {/* Profile Picture */}
-            <div className="relative">
-              {profile.profileImage ? (
-                <img
-                  src={profile.profileImage}
-                  alt={profile.name}
-                  className="h-28 w-28 rounded-full border-4 border-white object-cover shadow-lg"
-                  onError={(e) => {
-                    e.currentTarget.style.display = 'none'
-                    const fallback = e.currentTarget.nextElementSibling
-                    if (fallback) fallback.classList.remove('hidden')
-                  }}
-                />
-              ) : null}
-              <div className={`flex h-28 w-28 items-center justify-center rounded-full border-4 border-white bg-white text-3xl font-bold text-emerald-600 shadow-lg ${profile.profileImage ? 'hidden' : ''}`}>
-                {profile.name.split(' ').map(n => n[0]).join('').toUpperCase()}
+            <div className="flex flex-col items-center gap-2">
+              <div className="relative">
+                <Avatar name={user.name} src={user.profileImage} className="h-28 w-28 border-4 border-white text-3xl shadow-lg" />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={photoBusy}
+                  aria-label="Change profile photo"
+                  className="absolute bottom-1 right-1 flex h-8 w-8 items-center justify-center rounded-full bg-white text-emerald-700 shadow-md transition-colors hover:bg-emerald-50 disabled:opacity-50"
+                >
+                  <Camera className="h-4 w-4" aria-hidden="true" />
+                </button>
+                <input ref={fileInputRef} type="file" accept="image/*" onChange={handleImageSelect} className="hidden" />
               </div>
-              <label
-                htmlFor="profile-image"
-                className="absolute bottom-1 right-1 flex h-8 w-8 cursor-pointer items-center justify-center rounded-full bg-white text-emerald-600 shadow-md hover:bg-emerald-50 transition-colors"
-              >
-                {uploadingImage ? (
-                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-emerald-600 border-t-transparent"></div>
-                ) : (
-                  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                  </svg>
-                )}
-              </label>
-              <input id="profile-image" type="file" accept="image/*" onChange={handleImageSelect} disabled={uploadingImage} className="hidden" />
+              {user.profileImage && (
+                <button
+                  type="button"
+                  onClick={() => void handleImageRemove()}
+                  disabled={photoBusy}
+                  className="rounded text-xs font-medium text-white underline hover:text-emerald-50 disabled:opacity-50"
+                >
+                  Remove photo
+                </button>
+              )}
             </div>
 
             {/* User Info */}
-            <div className="flex-1 text-center md:text-left">
-              <h1 className="text-2xl font-bold text-white md:text-3xl">{profile.name}</h1>
-              <p className="mt-1 text-emerald-100">{profile.email}</p>
+            <div className="min-w-0 flex-1 text-center md:text-left">
+              <h1 className="break-words text-2xl font-bold text-white md:text-3xl">{user.name}</h1>
+              <p className="mt-1 break-all text-emerald-50">{user.email}</p>
               <div className="mt-3 flex flex-wrap justify-center gap-2 md:justify-start">
-                <span className="inline-flex items-center gap-1 rounded-full bg-white/20 px-3 py-1 text-sm text-white">
-                  👤 {profile.role}
+                <span className="inline-flex max-w-full items-center gap-1 rounded-full bg-white/20 px-3 py-1 text-sm text-white">
+                  <span aria-hidden="true">👤</span> {getRoleLabel(user.role)}
                 </span>
-                <span className="inline-flex items-center gap-1 rounded-full bg-white/20 px-3 py-1 text-sm text-white">
-                  📅 {daysAsMember} days
-                </span>
-                {profile.phone && (
+                {memberDays !== null && (
                   <span className="inline-flex items-center gap-1 rounded-full bg-white/20 px-3 py-1 text-sm text-white">
-                    📞 {profile.phone}
+                    <span aria-hidden="true">📅</span> Member for {memberDays} {memberDays === 1 ? 'day' : 'days'}
                   </span>
+                )}
+                {user.phone && (
+                  <span className="inline-flex max-w-full items-center gap-1 break-all rounded-full bg-white/20 px-3 py-1 text-sm text-white">
+                    <span aria-hidden="true">📞</span> {user.phone}
+                  </span>
+                )}
+                {user.department && (
+                  <span className="inline-flex max-w-full items-center gap-1 break-words rounded-full bg-white/20 px-3 py-1 text-sm text-white">
+                    <span aria-hidden="true">🏢</span> {user.department}
+                  </span>
+                )}
+                {showVerification && (
+                  <span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-sm font-medium ${user.emailVerified ? 'bg-white text-emerald-800' : 'bg-amber-100 text-amber-900'}`}>
+                    {user.emailVerified ? 'Email verified' : 'Email not verified'}
+                  </span>
+                )}
+                {!user.emailVerified && mailEnabled && (
+                  <button
+                    type="button"
+                    onClick={() => void resendVerification()}
+                    disabled={resending}
+                    className="rounded-full bg-white px-3 py-1 text-sm font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50"
+                  >
+                    {resending ? 'Sending...' : 'Send the link again'}
+                  </button>
                 )}
               </div>
             </div>
 
             {/* Edit Button */}
-            <button
-              onClick={isEditing ? handleCancel : handleEdit}
-              className="rounded-lg bg-white px-4 py-2 text-sm font-semibold text-emerald-600 hover:bg-emerald-50 transition-colors"
-            >
-              {isEditing ? 'Cancel' : 'Edit Profile'}
-            </button>
+            {tab === 'overview' && (
+              <button
+                type="button"
+                onClick={isEditing ? () => setIsEditing(false) : startEditing}
+                aria-expanded={isEditing}
+                className="rounded-lg bg-white px-4 py-2 text-sm font-semibold text-emerald-700 transition-colors hover:bg-emerald-50"
+              >
+                {isEditing ? 'Cancel' : 'Edit Profile'}
+              </button>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Image Preview Modal */}
-      {showImagePreview && previewImage && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-xl">
-            <h3 className="mb-4 text-lg font-semibold text-neutral-900">Update Profile Picture</h3>
-            
-            <div className="mb-6 grid grid-cols-2 gap-4">
-              {/* Current Image */}
-              <div className="text-center">
-                <p className="mb-2 text-sm font-medium text-neutral-500">Current</p>
-                <div className="mx-auto h-32 w-32 overflow-hidden rounded-full border-2 border-neutral-200">
-                  {profile.profileImage ? (
-                    <img src={profile.profileImage} alt="Current" className="h-full w-full object-cover" />
-                  ) : (
-                    <div className="flex h-full w-full items-center justify-center bg-emerald-100 text-2xl font-bold text-emerald-600">
-                      {profile.name.split(' ').map(n => n[0]).join('').toUpperCase()}
-                    </div>
-                  )}
-                </div>
-              </div>
-              
-              {/* Arrow */}
-              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 hidden md:block">
-              </div>
-              
-              {/* New Image */}
-              <div className="text-center">
-                <p className="mb-2 text-sm font-medium text-emerald-600">New</p>
-                <div className="mx-auto h-32 w-32 overflow-hidden rounded-full border-2 border-emerald-500">
-                  <img src={previewImage} alt="New" className="h-full w-full object-cover" />
-                </div>
-              </div>
-            </div>
-            
-            {/* Arrow between images */}
-            <div className="mb-4 flex justify-center">
-              <svg className="h-6 w-6 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
-              </svg>
-            </div>
-            
-            <div className="flex gap-3">
-              <button
-                onClick={handleImageCancel}
-                className="flex-1 rounded-lg border border-neutral-300 px-4 py-2.5 text-sm font-medium text-neutral-700 hover:bg-neutral-50 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleImageConfirm}
-                disabled={uploadingImage}
-                className="flex-1 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 transition-colors"
-              >
-                {uploadingImage ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"></div>
-                    Saving...
-                  </span>
-                ) : (
-                  'Confirm Change'
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
+      {previewImage && (
+        <PhotoDialog
+          name={user.name}
+          currentImage={user.profileImage}
+          newImage={previewImage}
+          busy={photoBusy}
+          onConfirm={() => void handleImageConfirm()}
+          onCancel={() => setPreviewImage(null)}
+        />
       )}
 
       <div className="mx-auto max-w-6xl px-4 py-6">
-        {/* Edit Form */}
-        {isEditing && (
-          <section className="mb-6 rounded-xl border bg-white p-6 shadow-sm">
-            <h2 className="mb-4 text-lg font-semibold text-neutral-900">Edit Profile</h2>
-            <div className="space-y-4">
-              <div>
-                <label className="mb-1 block text-sm font-medium text-neutral-700">Full Name</label>
-                <input
-                  type="text"
-                  value={editedProfile.name}
-                  onChange={(e) => setEditedProfile({ ...editedProfile, name: e.target.value })}
-                  className="w-full rounded-lg border px-4 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
-                />
-              </div>
-              <div className="grid gap-4 md:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-sm font-medium text-neutral-700">Email</label>
-                  <input
-                    type="email"
-                    value={editedProfile.email}
-                    onChange={(e) => setEditedProfile({ ...editedProfile, email: e.target.value })}
-                    className="w-full rounded-lg border px-4 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm font-medium text-neutral-700">Phone</label>
-                  <input
-                    type="tel"
-                    value={editedProfile.phone}
-                    onChange={(e) => setEditedProfile({ ...editedProfile, phone: e.target.value })}
-                    className="w-full rounded-lg border px-4 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20"
-                  />
-                </div>
-              </div>
-              <div className="flex justify-end gap-3 pt-2">
-                <button onClick={handleCancel} className="rounded-lg border px-4 py-2 text-sm font-medium text-neutral-600 hover:bg-neutral-50">
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSave}
-                  disabled={loading}
-                  className="rounded-lg bg-emerald-600 px-6 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
-                >
-                  {loading ? 'Saving...' : 'Save Changes'}
-                </button>
-              </div>
-            </div>
-          </section>
+        {forced && (
+          <div role="alert" className={`mb-6 ${infoBoxClass}`}>
+            <strong>Choose a new password to continue.</strong> An admin reset your password. Until you choose your own, this is the only page you can use.
+          </div>
         )}
 
-        {/* Stats Grid */}
-        <section className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
-          <div className="rounded-xl border bg-white p-4 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100 text-xl">📋</div>
-              <div>
-                <p className="text-2xl font-bold text-neutral-900">{taskStats.total}</p>
-                <p className="text-xs text-neutral-500">Total Tasks</p>
-              </div>
-            </div>
-          </div>
-          <div className="rounded-xl border bg-white p-4 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-100 text-xl">✅</div>
-              <div>
-                <p className="text-2xl font-bold text-neutral-900">{completionRate}%</p>
-                <p className="text-xs text-neutral-500">Completion</p>
-              </div>
-            </div>
-          </div>
-          <div className="rounded-xl border bg-white p-4 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-100 text-xl">⏱️</div>
-              <div>
-                <p className="text-2xl font-bold text-neutral-900">{attendanceStats.avgWorkHours}h</p>
-                <p className="text-xs text-neutral-500">Avg Hours</p>
-              </div>
-            </div>
-          </div>
-          <div className="rounded-xl border bg-white p-4 shadow-sm">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-purple-100 text-xl">🔥</div>
-              <div>
-                <p className="text-2xl font-bold text-neutral-900">{current}</p>
-                <p className="text-xs text-neutral-500">Day Streak</p>
-              </div>
-            </div>
-          </div>
-        </section>
+        {/* Tabs, kept in the address (?tab=...) */}
+        <div role="tablist" aria-label="Profile sections" className="mb-6 flex gap-1 overflow-x-auto border-b border-neutral-200">
+          {TABS.map((t, index) => {
+            const selected = tab === t.id
+            const disabled = forced && t.id !== 'security'
+            return (
+              <button
+                key={t.id}
+                ref={(element) => {
+                  tabRefs.current[t.id] = element
+                }}
+                type="button"
+                role="tab"
+                id={`profile-tab-${t.id}`}
+                aria-selected={selected}
+                aria-controls={`profile-panel-${t.id}`}
+                aria-disabled={disabled || undefined}
+                disabled={disabled}
+                tabIndex={selected ? 0 : -1}
+                onClick={() => selectTab(t.id)}
+                onKeyDown={(e) => onTabKeyDown(e, index)}
+                className={`-mb-px shrink-0 border-b-2 px-4 py-2.5 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                  selected ? 'border-emerald-600 text-emerald-700' : 'border-transparent text-neutral-600 hover:text-neutral-900'
+                }`}
+              >
+                {t.label}
+              </button>
+            )
+          })}
+        </div>
 
-        {/* Task Progress Bar */}
-        <section className="mb-6 rounded-xl border bg-white p-6 shadow-sm">
-          <h2 className="mb-4 text-lg font-semibold text-neutral-900">Task Progress</h2>
-          <div className="mb-4 h-3 overflow-hidden rounded-full bg-neutral-100">
-            <div className="flex h-full">
-              <div className="bg-emerald-500 transition-all" style={{ width: `${taskStats.total > 0 ? (taskStats.completed / taskStats.total) * 100 : 0}%` }}></div>
-              <div className="bg-blue-500 transition-all" style={{ width: `${taskStats.total > 0 ? (taskStats.inProgress / taskStats.total) * 100 : 0}%` }}></div>
-              <div className="bg-amber-500 transition-all" style={{ width: `${taskStats.total > 0 ? (taskStats.pending / taskStats.total) * 100 : 0}%` }}></div>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-4 text-sm">
-            <div className="flex items-center gap-2">
-              <span className="h-3 w-3 rounded-full bg-emerald-500"></span>
-              <span className="text-neutral-600">Completed ({taskStats.completed})</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="h-3 w-3 rounded-full bg-blue-500"></span>
-              <span className="text-neutral-600">In Progress ({taskStats.inProgress})</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="h-3 w-3 rounded-full bg-amber-500"></span>
-              <span className="text-neutral-600">Pending ({taskStats.pending})</span>
-            </div>
-          </div>
-        </section>
+        {tab === 'overview' && (
+          <div role="tabpanel" id="profile-panel-overview" aria-labelledby="profile-tab-overview">
+            {/* Edit Form */}
+            {isEditing && (
+              <form onSubmit={handleSave} aria-labelledby="edit-profile-title" className="mb-6 rounded-xl border border-neutral-200 bg-white p-6 shadow-sm">
+                <h2 id="edit-profile-title" className="mb-4 text-lg font-semibold text-neutral-900">Edit Profile</h2>
+                <div className="space-y-4">
+                  {formError && <div role="alert" className={errorBoxClass}>{formError}</div>}
 
-        {/* Activity Heatmap */}
-        {loadingActivity ? (
-          <div className="flex justify-center py-12">
-            <div className="h-8 w-8 animate-spin rounded-full border-4 border-emerald-600 border-t-transparent"></div>
-          </div>
-        ) : (
-          <section className="rounded-xl border bg-white p-6 shadow-sm">
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <h2 className="text-lg font-semibold text-neutral-900">Activity</h2>
-                <p className="text-sm text-neutral-500">{total} activities in the last 120 days</p>
-              </div>
-              <div className="flex items-center gap-4 text-sm">
-                <div className="text-center">
-                  <p className="text-xl font-bold text-emerald-600">{current}</p>
-                  <p className="text-xs text-neutral-500">Current</p>
-                </div>
-                <div className="text-center">
-                  <p className="text-xl font-bold text-amber-600">{best}</p>
-                  <p className="text-xs text-neutral-500">Best</p>
-                </div>
-              </div>
-            </div>
-
-            <div className="overflow-x-auto">
-              <div className="flex gap-1">
-                <div className="flex w-8 flex-col gap-0.75 text-[10px] text-neutral-400">
-                  {dayLabels.map((d, i) => (
-                    <span key={i} className="h-3.25 leading-3.25">{d}</span>
-                  ))}
-                </div>
-                <div className="flex gap-0.75">
-                  {weeks.map((week, i) => (
-                    <div key={i} className="flex flex-col gap-0.75">
-                      {week.map((day) => (
-                        <div
-                          key={day.date}
-                          className={`h-3.25 w-3.25 rounded-sm ${colorForCount(day.count)} transition-colors hover:ring-1 hover:ring-neutral-400`}
-                          title={`${day.date}: ${day.count} activity${day.count !== 1 ? '' : ''}`}
-                        ></div>
-                      ))}
+                  <div>
+                    <label htmlFor="profile-name" className={labelClass}>Full Name</label>
+                    <input
+                      id="profile-name"
+                      type="text"
+                      autoComplete="name"
+                      autoFocus
+                      required
+                      value={form.name}
+                      onChange={(e) => setForm({ ...form, name: e.target.value })}
+                      className={inputClass}
+                    />
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div>
+                      <label htmlFor="profile-email" className={labelClass}>Email</label>
+                      <input
+                        id="profile-email"
+                        type="email"
+                        autoComplete="email"
+                        required
+                        value={form.email}
+                        onChange={(e) => setForm({ ...form, email: e.target.value })}
+                        className={inputClass}
+                      />
                     </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+                    <div>
+                      <label htmlFor="profile-phone" className={labelClass}>Phone</label>
+                      <input
+                        id="profile-phone"
+                        type="tel"
+                        autoComplete="tel"
+                        value={form.phone}
+                        onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                        className={inputClass}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label htmlFor="profile-department" className={labelClass}>Department</label>
+                    <input
+                      id="profile-department"
+                      type="text"
+                      autoComplete="organization-title"
+                      value={form.department}
+                      onChange={(e) => setForm({ ...form, department: e.target.value })}
+                      className={inputClass}
+                    />
+                  </div>
 
-            {/* <div className="mt-4 flex items-center justify-end gap-1 text-xs text-neutral-500">
-              <span>Less</span>
-              {COLOR_SCALE.map((c, i) => (
-                <span key={i} className={`h-3.25 w-3.25 rounded-sm ${c}`}></span>
-              ))}
-              <span>More</span>
-            </div> */}
-          </section>
+                  {emailChanged && (
+                    <div className="max-w-md">
+                      <label htmlFor="profile-current-password" className={labelClass}>Current password</label>
+                      <input
+                        id="profile-current-password"
+                        type="password"
+                        autoComplete="current-password"
+                        required
+                        aria-describedby="profile-current-password-hint"
+                        value={form.currentPassword}
+                        onChange={(e) => setForm({ ...form, currentPassword: e.target.value })}
+                        className={inputClass}
+                      />
+                      <p id="profile-current-password-hint" className="mt-1 text-xs text-neutral-600">
+                        Needed to change your email address.{mailEnabled ? ' We will send a link to the new address to confirm it.' : ''}
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="flex justify-end gap-3 pt-2">
+                    <button type="button" onClick={() => setIsEditing(false)} disabled={saving} className={secondaryButtonClass}>
+                      Cancel
+                    </button>
+                    <button type="submit" disabled={saving} className={primaryButtonClass}>
+                      {saving ? 'Saving...' : 'Save Changes'}
+                    </button>
+                  </div>
+                </div>
+              </form>
+            )}
+
+            <ProfileActivity userId={user._id} />
+          </div>
+        )}
+
+        {tab === 'security' && (
+          <div role="tabpanel" id="profile-panel-security" aria-labelledby="profile-tab-security">
+            <ProfileSecurity />
+          </div>
+        )}
+
+        {tab === 'notifications' && (
+          <div role="tabpanel" id="profile-panel-notifications" aria-labelledby="profile-tab-notifications">
+            <NotificationSettings />
+          </div>
         )}
       </div>
-    </main>
+    </div>
   )
 }

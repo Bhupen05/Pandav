@@ -14,6 +14,10 @@ export interface PromptOptions extends ConfirmOptions {
   label: string;
   type?: 'text' | 'password';
   minLength?: number;
+  // Whether an empty answer is refused (default true)
+  required?: boolean;
+  // Limits the answer and shows a character counter
+  maxLength?: number;
 }
 
 export interface FeedbackContextType {
