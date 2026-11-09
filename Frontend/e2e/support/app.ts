@@ -19,7 +19,9 @@ export async function signIn(page: Page, account: Account, { remember = false } 
 }
 
 export async function signOut(page: Page, account: Account) {
-  await page.getByRole('button', { name: account.name }).click()
+  // The avatar button by its full name: other buttons can contain the name too
+  // ("Delete comment by Admin User")
+  await page.getByRole('button', { name: `${account.name}, account menu`, exact: true }).click()
   await page.getByRole('button', { name: 'Logout' }).click()
   await expect(page).toHaveURL(/\/$/)
 }

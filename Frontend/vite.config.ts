@@ -13,10 +13,13 @@ export default defineConfig(({ mode }) => {
     server: {
       proxy: { '/api': backendUrl },
     },
-    // Loaded on demand (two-step sign-in setup). Prepared at start-up, or the
-    // first import on a fresh dev server fails while Vite re-bundles
+    // Pages are lazy-loaded, so Vite would find some packages only when a page
+    // first opens and re-bundle mid-session: an on-demand import fails, or a
+    // page gets a second copy of React ("Invalid hook call"). Scan every source
+    // file at start-up instead, and name the two late finds outright.
     optimizeDeps: {
-      include: ['qrcode'],
+      entries: ['index.html', 'src/**/*.{ts,tsx}'],
+      include: ['qrcode', 'motion/react'],
     },
   }
 })
