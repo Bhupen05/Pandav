@@ -3,13 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "motion/react";
 import { 
   CheckCircle2, 
   Timer, 
   Users, 
+  UserCheck,
   MessageSquare, 
+  Share2,
   ShieldCheck, 
   Headphones, 
   ArrowRight,
@@ -18,8 +21,32 @@ import {
 } from "lucide-react";
 import Footer from "../components/Footer";
 
+// The photo is loaded from another site: when it can't be, a plain panel in
+// the brand colours takes its place
+const HeroPhoto = () => {
+  const [failed, setFailed] = useState(false);
+
+  if (failed) {
+    return (
+      <div role="img" aria-label="Modern architectural office" className="flex h-full w-full items-center justify-center bg-primary-gradient">
+        <LayoutDashboard aria-hidden="true" className="h-24 w-24 text-white/20" />
+      </div>
+    );
+  }
+
+  return (
+    <img 
+      className="w-full h-full object-cover opacity-90" 
+      src="https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&q=80&w=1200" 
+      alt="Modern architectural office"
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(true)}
+    />
+  );
+};
+
 const Hero = () => (
-  <section className="relative min-h-[90vh] flex items-center overflow-hidden px-6 pt-20">
+  <section className="relative min-h-[90vh] flex items-center overflow-hidden px-6 pb-12 pt-28 lg:pb-0 lg:pt-20">
     <div className="max-w-7xl mx-auto grid lg:grid-cols-2 gap-16 items-center">
       <motion.div 
         initial={{ opacity: 0, x: -20 }}
@@ -30,7 +57,7 @@ const Hero = () => (
         <span className="inline-block py-1 px-3 rounded-full bg-blue-100 text-primary text-xs font-bold tracking-widest uppercase mb-6">
           Unified Operations
         </span>
-        <h1 className="text-6xl md:text-7xl font-extrabold font-headline leading-[1.1] text-primary tracking-tight mb-8">
+        <h1 className="text-4xl sm:text-6xl md:text-7xl font-extrabold font-headline leading-[1.1] text-primary tracking-tight mb-8">
           The Digital <span className="text-blue-500">Atrium</span> for Modern Teams
         </h1>
         <p className="text-lg text-secondary leading-relaxed max-w-xl mb-10">
@@ -54,12 +81,7 @@ const Hero = () => (
       >
         <div className="absolute inset-0 bg-primary/5 rounded-[3rem] -rotate-3 blur-3xl"></div>
         <div className="relative bg-white rounded-[2rem] shadow-2xl overflow-hidden aspect-square lg:aspect-auto lg:h-full border border-slate-200">
-          <img 
-            className="w-full h-full object-cover opacity-90" 
-            src="https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&q=80&w=1200" 
-            alt="Modern architectural office"
-            referrerPolicy="no-referrer"
-          />
+          <HeroPhoto />
           <div className="absolute inset-0 bg-gradient-to-t from-primary/40 to-transparent"></div>
           
           {/* Floating Glass Metric */}
@@ -92,10 +114,7 @@ const Features = () => (
       
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {/* Task Lifecycle */}
-        <motion.div 
-          whileHover={{ y: -5 }}
-          className="md:col-span-2 bg-white p-8 rounded-[2rem] flex flex-col justify-between group hover:shadow-xl transition-all border border-slate-200"
-        >
+        <div className="md:col-span-2 bg-white p-8 rounded-[2rem] flex flex-col justify-between border border-slate-200">
           <div className="max-w-md">
             <div className="w-14 h-14 bg-blue-50 rounded-2xl flex items-center justify-center mb-6">
               <ClipboardCheck className="text-primary w-8 h-8" />
@@ -108,13 +127,10 @@ const Features = () => (
             <div className="bg-primary text-white px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap">In Review</div>
             <div className="bg-slate-100 px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap">Approved</div>
           </div>
-        </motion.div>
+        </div>
 
         {/* Attendance */}
-        <motion.div 
-          whileHover={{ y: -5 }}
-          className="bg-primary-gradient p-8 rounded-[2rem] text-white border border-primary/20 flex flex-col"
-        >
+        <div className="bg-primary-gradient p-8 rounded-[2rem] text-white border border-primary/20 flex flex-col">
           <div className="w-14 h-14 bg-white/10 rounded-2xl flex items-center justify-center mb-6">
             <Timer className="text-white w-8 h-8" />
           </div>
@@ -129,25 +145,19 @@ const Features = () => (
               </div>
             </div>
           </div>
-        </motion.div>
+        </div>
 
         {/* Team Operations */}
-        <motion.div 
-          whileHover={{ y: -5 }}
-          className="bg-white p-8 rounded-[2rem] border border-slate-200"
-        >
+        <div className="bg-white p-8 rounded-[2rem] border border-slate-200">
           <div className="w-14 h-14 bg-blue-50 rounded-2xl flex items-center justify-center mb-6">
             <Users className="text-primary w-8 h-8" />
           </div>
           <h3 className="text-2xl font-bold font-headline mb-4">Team Operations</h3>
           <p className="text-secondary leading-relaxed">Role-based permissions and team-scoped tasks. Scale from 5 to 500 without losing structural integrity.</p>
-        </motion.div>
+        </div>
 
         {/* Internal Messaging */}
-        <motion.div 
-          whileHover={{ y: -5 }}
-          className="md:col-span-2 bg-white p-8 rounded-[2rem] flex flex-col md:flex-row gap-8 items-center border border-slate-200"
-        >
+        <div className="md:col-span-2 bg-white p-8 rounded-[2rem] flex flex-col md:flex-row gap-8 items-center border border-slate-200">
           <div className="flex-1">
             <div className="w-14 h-14 bg-blue-50 rounded-2xl flex items-center justify-center mb-6">
               <MessageSquare className="text-primary w-8 h-8" />
@@ -163,7 +173,23 @@ const Features = () => (
               Almost done, sending the files now.
             </div>
           </div>
-        </motion.div>
+        </div>
+
+        {/* Social Hub */}
+        <div className="md:col-span-3 bg-white p-8 rounded-[2rem] flex flex-col md:flex-row gap-8 items-center border border-slate-200">
+          <div className="flex-1">
+            <div className="w-14 h-14 bg-blue-50 rounded-2xl flex items-center justify-center mb-6">
+              <Share2 className="text-primary w-8 h-8" />
+            </div>
+            <h3 className="text-2xl font-bold font-headline mb-4">Social Hub</h3>
+            <p className="text-secondary leading-relaxed">A feed for your team's updates, with likes and comments. Keep personal to-dos, connect with colleagues, and publish posts to LinkedIn or GitHub.</p>
+          </div>
+          <ul className="flex-1 w-full flex flex-wrap gap-3">
+            {["Team feed", "Likes and comments", "Personal to-dos", "Connections", "LinkedIn", "GitHub"].map((item) => (
+              <li key={item} className="bg-slate-100 px-4 py-2 rounded-lg text-sm font-medium text-slate-700">{item}</li>
+            ))}
+          </ul>
+        </div>
       </div>
     </div>
   </section>
@@ -177,12 +203,18 @@ const Personas = () => (
         <p className="text-secondary">Tailored experiences for every level of your organization.</p>
       </div>
       
-      <div className="grid md:grid-cols-3 gap-8">
+      <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 lg:gap-8">
         {[
           {
             title: "Standard Users",
             features: ["Effortless task tracking", "Mobile-first check-ins", "Direct team messaging"],
             icon: CheckCircle2,
+            dark: false
+          },
+          {
+            title: "Team Members",
+            features: ["Work on your team's tasks", "Check in and out each day", "Team chat room and the Social Hub"],
+            icon: UserCheck,
             dark: false
           },
           {
@@ -197,23 +229,22 @@ const Personas = () => (
             icon: ShieldCheck,
             dark: false
           }
-        ].map((persona, i) => (
-          <motion.div 
-            key={i}
-            whileHover={{ scale: 1.02 }}
+        ].map((persona) => (
+          <div
+            key={persona.title}
             className={`p-8 rounded-3xl relative overflow-hidden ${persona.dark ? 'bg-primary text-white shadow-2xl shadow-primary/20' : 'bg-slate-100 text-slate-900'}`}
           >
             <div className={`absolute -right-4 -top-4 w-32 h-32 rounded-full ${persona.dark ? 'bg-white/5' : 'bg-primary/5'}`}></div>
-            <h4 className="text-xl font-bold font-headline mb-6">{persona.title}</h4>
+            <h3 className="text-xl font-bold font-headline mb-6">{persona.title}</h3>
             <ul className="space-y-4">
               {persona.features.map((feature, j) => (
                 <li key={j} className="flex items-start gap-3 text-sm opacity-90">
-                  <persona.icon className={`w-5 h-5 ${persona.dark ? 'text-blue-300' : 'text-primary'}`} />
+                  <persona.icon className={`w-5 h-5 shrink-0 ${persona.dark ? 'text-blue-300' : 'text-primary'}`} />
                   {feature}
                 </li>
               ))}
             </ul>
-          </motion.div>
+          </div>
         ))}
       </div>
     </div>
@@ -251,13 +282,12 @@ const CTA = () => (
 
 export default function App() {
   return (
+    // The app already wraps every page in <main>, so the page itself has none
     <div className="min-h-screen selection:bg-blue-100 selection:text-primary">
-      <main>
-        <Hero />
-        <Features />
-        <Personas />
-        <CTA />
-      </main>
+      <Hero />
+      <Features />
+      <Personas />
+      <CTA />
       <Footer />
     </div>
   );

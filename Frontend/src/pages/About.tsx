@@ -1,8 +1,11 @@
+import { Link } from 'react-router-dom'
+import Footer from '../components/Footer'
+
 function About() {
   return (
     <div className="min-h-screen bg-white">
-      {/* Hero Section */}
-      <section className="border-b bg-neutral-50 py-16 md:py-20">
+      {/* Hero Section (the top padding clears the fixed header) */}
+      <section className="border-b border-neutral-200 bg-neutral-50 pb-16 pt-28 md:pb-20 md:pt-32">
         <div className="mx-auto max-w-6xl px-4">
           <div className="text-center">
             <div className="mb-6 inline-block rounded-full bg-emerald-100 px-4 py-1.5 text-xs font-medium text-emerald-800">
@@ -30,7 +33,7 @@ function About() {
           <div className="grid gap-8 md:grid-cols-2">
             <div className="rounded-2xl bg-linear-to-br from-blue-50 to-blue-100 p-8">
               <div className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-lg bg-blue-600 text-white">
-                🎯
+                <span aria-hidden="true">🎯</span>
               </div>
               <h3 className="mb-3 text-2xl font-bold text-neutral-900">Our Mission</h3>
               <p className="mb-3 text-neutral-700 leading-relaxed">
@@ -42,7 +45,7 @@ function About() {
             </div>
             <div className="rounded-2xl bg-linear-to-br from-purple-50 to-purple-100 p-8">
               <div className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-lg bg-purple-600 text-white">
-                🔮
+                <span aria-hidden="true">🔮</span>
               </div>
               <h3 className="mb-3 text-2xl font-bold text-neutral-900">Our Vision</h3>
               <p className="mb-3 text-neutral-700 leading-relaxed">
@@ -66,9 +69,9 @@ function About() {
             </p>
           </div>
           <div className="grid gap-8 md:grid-cols-3">
-            <div className="group rounded-xl border bg-neutral-50 p-6 transition-all hover:shadow-lg hover:-translate-y-1">
+            <div className="group rounded-xl border border-neutral-200 bg-neutral-50 p-6 transition-shadow hover:shadow-lg">
               <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-linear-to-br from-blue-500 to-blue-600 text-white shadow-lg">
-                <svg className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <svg aria-hidden="true" className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
                 </svg>
               </div>
@@ -78,9 +81,9 @@ function About() {
               </p>
             </div>
 
-            <div className="group rounded-xl border bg-neutral-50 p-6 transition-all hover:shadow-lg hover:-translate-y-1">
+            <div className="group rounded-xl border border-neutral-200 bg-neutral-50 p-6 transition-shadow hover:shadow-lg">
               <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-linear-to-br from-green-500 to-green-600 text-white shadow-lg">
-                <svg className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <svg aria-hidden="true" className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
               </div>
@@ -90,9 +93,9 @@ function About() {
               </p>
             </div>
 
-            <div className="group rounded-xl border bg-neutral-50 p-6 transition-all hover:shadow-lg hover:-translate-y-1">
+            <div className="group rounded-xl border border-neutral-200 bg-neutral-50 p-6 transition-shadow hover:shadow-lg">
               <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-linear-to-br from-purple-500 to-purple-600 text-white shadow-lg">
-                <svg className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <svg aria-hidden="true" className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
                 </svg>
               </div>
@@ -106,7 +109,7 @@ function About() {
       </section>
 
       {/* Values Section */}
-      <section className="border-b bg-white py-16">
+      <section className="border-b border-neutral-200 bg-white py-16">
         <div className="mx-auto max-w-6xl px-4">
           <div className="mb-12 text-center">
             <h2 className="mb-4 text-3xl font-bold text-neutral-900">Our Core Values</h2>
@@ -115,10 +118,10 @@ function About() {
             </p>
           </div>
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded-xl border bg-white p-6 text-center shadow-sm transition-all hover:shadow-md">
+            <div className="rounded-xl border border-neutral-200 bg-white p-6 text-center shadow-sm transition-all hover:shadow-md">
               <div className="mb-4 flex justify-center">
                 <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-emerald-600">
-                  <svg className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <svg aria-hidden="true" className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                   </svg>
                 </div>
@@ -130,7 +133,7 @@ function About() {
             <div className="rounded-2xl bg-white p-6 text-center shadow-sm transition-all hover:shadow-md">
               <div className="mb-4 flex justify-center">
                 <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-linear-to-br from-green-500 to-green-600 shadow-lg">
-                  <svg className="h-8 w-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <svg aria-hidden="true" className="h-8 w-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                   </svg>
                 </div>
@@ -142,7 +145,7 @@ function About() {
             <div className="rounded-2xl bg-white p-6 text-center shadow-sm transition-all hover:shadow-md">
               <div className="mb-4 flex justify-center">
                 <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-linear-to-br from-purple-500 to-purple-600 shadow-lg">
-                  <svg className="h-8 w-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <svg aria-hidden="true" className="h-8 w-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" />
                   </svg>
                 </div>
@@ -154,7 +157,7 @@ function About() {
             <div className="rounded-2xl bg-white p-6 text-center shadow-sm transition-all hover:shadow-md">
               <div className="mb-4 flex justify-center">
                 <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-linear-to-br from-orange-500 to-orange-600 shadow-lg">
-                  <svg className="h-8 w-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <svg aria-hidden="true" className="h-8 w-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
                   </svg>
                 </div>
@@ -167,7 +170,7 @@ function About() {
       </section>
 
       {/* Team Section */}
-      <section className="border-b bg-neutral-50 py-16">
+      <section className="border-b border-neutral-200 bg-neutral-50 py-16">
         <div className="mx-auto max-w-6xl px-4">
           <div className="mb-4 text-center">
             <h2 className="mb-4 text-3xl font-bold text-neutral-900">Trusted Worldwide</h2>
@@ -176,17 +179,17 @@ function About() {
             </p>
           </div>
           <div className="mt-12 grid gap-8 md:grid-cols-3">
-            <div className="rounded-xl border bg-white p-8 text-center shadow-sm">
+            <div className="rounded-xl border border-neutral-200 bg-white p-8 text-center shadow-sm">
               <div className="mb-3 text-4xl font-bold text-neutral-900">500+</div>
               <div className="text-lg font-semibold text-neutral-900">Active Users</div>
               <div className="mt-2 text-sm text-neutral-600">Growing community of professionals</div>
             </div>
-            <div className="rounded-xl border bg-white p-8 text-center shadow-sm">
+            <div className="rounded-xl border border-neutral-200 bg-white p-8 text-center shadow-sm">
               <div className="mb-3 text-4xl font-bold text-neutral-900">10K+</div>
               <div className="text-lg font-semibold text-neutral-900">Tasks Completed</div>
               <div className="mt-2 text-sm text-neutral-600">Delivered with excellence</div>
             </div>
-            <div className="rounded-xl border bg-white p-8 text-center shadow-sm">
+            <div className="rounded-xl border border-neutral-200 bg-white p-8 text-center shadow-sm">
               <div className="mb-3 text-4xl font-bold text-neutral-900">99.9%</div>
               <div className="text-lg font-semibold text-neutral-900">Uptime</div>
               <div className="mt-2 text-sm text-neutral-600">Always available when you need us</div>
@@ -198,28 +201,30 @@ function About() {
       {/* CTA Section */}
       <section className="bg-white py-16">
         <div className="mx-auto max-w-4xl px-4">
-          <div className="rounded-xl border bg-neutral-50 p-8 text-center md:p-12">
+          <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-8 text-center md:p-12">
             <h2 className="mb-4 text-3xl font-bold text-neutral-900 md:text-4xl">Ready to Transform Your Workflow?</h2>
             <p className="mb-8 text-base text-neutral-600 md:text-lg">
               Join hundreds of teams already using Pandav to streamline their operations and achieve more
             </p>
             <div className="flex flex-wrap justify-center gap-3">
-              <a
-                href="/login"
-                className="rounded-lg bg-neutral-900 px-6 py-3 text-sm font-semibold text-white shadow-md hover:opacity-90"
+              <Link
+                to="/register"
+                className="rounded-lg bg-neutral-900 px-6 py-3 text-sm font-semibold text-white shadow-md outline-none hover:opacity-90 focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2"
               >
                 Get Started Now
-              </a>
-              <a
-                href="/contact"
-                className="rounded-lg border border-neutral-300 bg-white px-6 py-3 text-sm font-semibold text-neutral-900 hover:bg-neutral-50"
+              </Link>
+              <Link
+                to="/contact"
+                className="rounded-lg border border-neutral-300 bg-white px-6 py-3 text-sm font-semibold text-neutral-900 outline-none hover:bg-neutral-50 focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2"
               >
                 Contact Us
-              </a>
+              </Link>
             </div>
           </div>
         </div>
       </section>
+
+      <Footer />
     </div>
   )
 }
