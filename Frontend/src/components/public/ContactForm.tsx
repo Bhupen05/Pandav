@@ -9,7 +9,7 @@ import {
   validateContact,
   type ContactErrors,
   type ContactValues,
-} from './contactForm'
+} from './contactRules'
 
 type FieldElement = HTMLInputElement | HTMLTextAreaElement
 
