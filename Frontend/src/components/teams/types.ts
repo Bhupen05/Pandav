@@ -148,3 +148,9 @@ export const teamPeople = (team: Team): TeamPerson[] => [
 
 // Leaders who can still sign in; a team always keeps at least one
 export const activeLeaders = (team: Team) => team.leaders.filter((leader) => leader.isActive !== false)
+
+// People on a task, as names
+export const assigneeNames = (task: TeamTask) => task.assignedTo.map((person) => person.name)
+
+export const isAssignedTo = (task: TeamTask, userId?: string) =>
+  Boolean(userId) && task.assignedTo.some((person) => person._id === userId)
