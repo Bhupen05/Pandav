@@ -1,5 +1,6 @@
 import { getErrorMessage } from '../../api/axios'
-import type { ApprovalStatus, AttendanceSettings, AttendanceStatus, LeaveRequestStatus } from '../../api/attendanceAPI'
+import { addDays, isoWeekday } from '../../utils/date'
+import type { ApprovalStatus, AttendanceRecord, AttendanceSettings, AttendanceStatus, Holiday, LeaveRequestStatus } from '../../api/attendanceAPI'
 
 // One label per value, everywhere (UI_REDESIGN 6.2)
 export const DAY_TYPE_LABELS: Record<AttendanceStatus, string> = {
@@ -67,6 +68,34 @@ export const describeShift = (settings?: AttendanceSettings | null) => {
 export const leaveTypeLabel = (settings: AttendanceSettings | null | undefined, key?: string | null, fallback?: string) => {
   if (!key) return ''
   return settings?.leaveTypes.find((type) => type.key === key)?.label || fallback || key
+}
+
+// Workdays from start to end (YYYY-MM-DD, both included), counted as the
+// server counts leave: days of the week people work, minus holidays
+export const countWorkdays = (start: string, end: string, workdays: number[], holidays: Set<string>) => {
+  let count = 0
+  for (let day = start, guard = 0; day <= end && guard < 70; day = addDays(day, 1), guard += 1) {
+    if (workdays.includes(isoWeekday(day)) && !holidays.has(day)) count += 1
+  }
+  return count
+}
+
+// Why Check in is closed today, or '' when it is open. Mirrors the server: a
+// pending or approved leave, half-day or absence request closes it; a rejected
+// one doesn't (checking in replaces it). A holiday closes it too.
+export const checkInBlockReason = (record: AttendanceRecord | undefined, holiday?: Holiday): string => {
+  if (record?.checkInTime) return ''
+  if (record && record.approvalStatus !== 'rejected') {
+    if (record.status === 'leave') {
+      return record.approvalStatus === 'approved'
+        ? 'You are on approved leave today, so check-in is closed.'
+        : 'You asked for leave today, so check-in is closed. Withdraw the request on the Leave tab if you want to work.'
+    }
+    if (record.status === 'half-day') return 'You asked for a half day today, so check-in is closed.'
+    if (record.status === 'absent') return 'You are marked absent today, so check-in is closed.'
+  }
+  if (holiday) return `Today is a holiday (${holiday.name}), so check-in is closed.`
+  return ''
 }
 
 // "3 days", "1 day", "Half a day"

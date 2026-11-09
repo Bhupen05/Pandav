@@ -24,7 +24,7 @@ const APPROVAL_ICONS = { pending: Clock, approved: Check, rejected: X, mixed: Ci
 
 export function DayTypeBadge({ status, detail }: { status: AttendanceStatus; detail?: string }) {
   return (
-    <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${DAY_TYPE_CLASSES[status] ?? 'bg-neutral-100 text-neutral-800'}`}>
+    <span className={`inline-flex items-center whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium ${DAY_TYPE_CLASSES[status] ?? 'bg-neutral-100 text-neutral-800'}`}>
       {dayTypeLabel(status)}
       {detail ? <span className="ml-1 font-normal">· {detail}</span> : null}
     </span>
@@ -34,7 +34,7 @@ export function DayTypeBadge({ status, detail }: { status: AttendanceStatus; det
 export function ApprovalBadge({ status }: { status: LeaveRequestStatus }) {
   const Icon = APPROVAL_ICONS[status] ?? Clock
   return (
-    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${APPROVAL_CLASSES[status] ?? 'bg-neutral-50 text-neutral-700 ring-neutral-300'}`}>
+    <span className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${APPROVAL_CLASSES[status] ?? 'bg-neutral-50 text-neutral-700 ring-neutral-300'}`}>
       <Icon className="h-3 w-3 shrink-0" aria-hidden="true" />
       <span>{approvalLabel(status)}</span>
     </span>
