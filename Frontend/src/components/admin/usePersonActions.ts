@@ -126,8 +126,8 @@ export function usePersonActions(onChanged: () => void, onDeleted?: (person: Per
         title: `Delete ${person.name}'s account?`,
         message:
           'The account is anonymised: the name becomes "Deleted user", and the email, phone, department and photo are removed. ' +
-          'Their attendance, chat messages, Social Hub posts and connections are deleted, and they are taken off open tasks. ' +
-          'Tasks they finished, approvals and the audit log are kept, under "Deleted user". This can\'t be undone.',
+          'Their attendance, Social Hub posts and connections are deleted, and they are taken off open tasks. ' +
+          'Chat messages, tasks they finished, approvals and the audit log are kept, under "Deleted user". This can\'t be undone.',
         confirmLabel: 'Delete account',
         danger: true,
       })

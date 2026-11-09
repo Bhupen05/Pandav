@@ -218,10 +218,10 @@ Then what belongs only to the user is removed:
   status then follows the assignees left. Completed and cancelled tasks keep them, as the record
   of who did the work.
 - Their attendance records are deleted.
-- Direct chat messages they sent or received are deleted.
+- Direct and team chat messages stay: they are the other people's conversations too, and show as
+  from "Deleted user".
 - They are removed from the leaders and members of every team.
-- Team invites to or from them are deleted.
-- Team chat messages they sent are deleted, and their read receipts are removed from the others.
+- Team invites to them are deleted; pending invites they sent are withdrawn.
 - Social Hub: their posts, linked accounts (with the stored tokens), publish jobs, personal tasks
   and connections (sent or received) are deleted, and their likes and comments are removed from
   other posts.

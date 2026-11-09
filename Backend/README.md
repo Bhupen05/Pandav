@@ -63,6 +63,7 @@ All of them are described in [`.env.example`](.env.example).
 | `APP_URL` | No | The frontend's address for links in emails (default: the first `CLIENT_URL`) |
 | `EMAIL_VERIFICATION_REQUIRED` | No | `true` (with email set up) refuses sign-in until the address is confirmed. Run `npm run migrate` first |
 | `DISABLE_SCHEDULER` | No | `true` turns off the background jobs (publishing queued posts, task reminders and repeats, attendance upkeep); admins can still run them by hand |
+| `REGISTER_LIMIT_PER_HOUR` | Tests only | Raises the 10 sign-ups an hour limit; leave unset in production |
 
 ## Layout
 
