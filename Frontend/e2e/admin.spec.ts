@@ -1,4 +1,4 @@
-import { expect, test, type Browser } from '@playwright/test'
+import { expect, test, type APIRequestContext, type Browser } from '@playwright/test'
 import { ADMIN, USER, signIn, type Account } from './support/app'
 
 const signedInPage = async (browser: Browser, account: Account) => {
@@ -89,8 +89,9 @@ test('admin resets a password; the new one signs in', async ({ browser, request 
 
   const admin = await signedInPage(browser, ADMIN)
   await admin.goto('/admin')
-  await admin.getByRole('button', { name: 'Manage Users' }).click()
-  await expect(admin.getByRole('heading', { name: 'User Management' })).toBeVisible()
+  await admin.getByRole('region', { name: 'Quick actions' }).getByRole('link', { name: 'People' }).click()
+  await expect(admin.getByRole('heading', { name: 'People', exact: true })).toBeVisible()
+  await admin.getByLabel('Search people').fill(target.email)
   await admin.getByRole('row').filter({ hasText: target.email }).getByRole('button', { name: 'Reset password' }).click()
 
   const prompt = admin.getByRole('dialog', { name: `Reset password for ${target.name}` })
@@ -112,4 +113,100 @@ test('admin resets a password; the new one signs in', async ({ browser, request 
   await expect(other.getByText('Error:')).toBeVisible()
   await other.context().close()
   await page.context().close()
+})
+
+// A person to work on, made through the API so the seeded accounts stay as the other tests expect
+const newPerson = async (request: APIRequestContext, label: string) => {
+  const person = { name: `${label} ${Date.now()}`, email: `${label.toLowerCase()}${Date.now()}@e2e.test`, password: 'Passw0rd123' }
+  expect((await request.post('/api/v2/auth/register', { data: person })).status()).toBe(201)
+  return person
+}
+
+test('admin finds a person, disables and enables them, and the audit log lists it', async ({ browser, request }) => {
+  const person = await newPerson(request, 'Dana')
+  const admin = await signedInPage(browser, ADMIN)
+
+  await admin.goto('/admin/users')
+  await admin.getByLabel('Search people').fill(person.email)
+  const row = admin.getByRole('row').filter({ hasText: person.email })
+  await expect(row).toBeVisible()
+  await expect(admin.getByRole('row')).toHaveCount(2) // the header and the match
+
+  await row.getByRole('button', { name: `Disable ${person.name}` }).click()
+  const confirm = admin.getByRole('dialog', { name: `Disable ${person.name}?` })
+  await expect(confirm.getByText('signed out everywhere')).toBeVisible()
+  await confirm.getByRole('button', { name: 'Disable' }).click()
+  await expect(row.getByText('Inactive')).toBeVisible()
+
+  await row.getByRole('button', { name: `Enable ${person.name}` }).click()
+  await expect(row.getByText('Active', { exact: true })).toBeVisible()
+
+  await admin.goto('/admin/audit')
+  await admin.getByLabel('Action', { exact: true }).selectOption('admin_user_deactivated')
+  await admin.getByRole('button', { name: 'Search' }).click()
+  const event = admin.getByRole('listitem').filter({ hasText: 'Admin user deactivated' }).first()
+  await expect(event).toBeVisible()
+  await expect(event).toContainText('Admin User')
+  await event.getByRole('button', { name: 'Details' }).click()
+  await expect(event.getByText('Event', { exact: true })).toBeVisible()
+  await admin.context().close()
+})
+
+test('the approvals inbox approves a task its assignee asked to have reviewed', async ({ browser }) => {
+  const admin = await signedInPage(browser, ADMIN)
+  const user = await signedInPage(browser, USER)
+  const title = `E2E review ${Date.now()}`
+
+  const me = await (await user.request.get('/api/v2/auth/me')).json()
+  const created = await admin.request.post('/api/v2/tasks', {
+    data: { title, description: 'Waiting in the approvals inbox', assignedTo: [me.data._id], startDate: dateInput(), dueDate: dateInput(7) },
+  })
+  expect(created.status()).toBe(201)
+  const taskId = (await created.json()).data._id
+  expect((await user.request.post(`/api/v2/tasks/${taskId}/request-completion`, { data: {} })).status()).toBe(200)
+
+  await admin.goto('/approvals')
+  await expect(admin.getByRole('heading', { name: 'Approvals' })).toBeVisible()
+  await expect(admin.getByRole('tab', { name: /^Tasks/ })).toHaveAttribute('aria-selected', 'true')
+  const item = admin.getByRole('listitem').filter({ hasText: title })
+  await expect(item).toBeVisible()
+  await item.getByRole('button', { name: `Approve ${title}` }).click()
+  await expect(admin.getByRole('status').filter({ hasText: `Approved "${title}"` })).toBeVisible()
+  await expect(item).toHaveCount(0)
+
+  const task = await (await admin.request.get(`/api/v2/tasks/${taskId}`)).json()
+  expect(task.data.status).toBe('completed')
+
+  await user.context().close()
+  await admin.context().close()
+})
+
+test('someone who reviews nothing is sent home from the approvals inbox', async ({ browser }) => {
+  const user = await signedInPage(browser, USER)
+  await user.goto('/approvals')
+  await expect(user).toHaveURL(/\/user$/)
+  await user.context().close()
+})
+
+test('the contact reply box explains that email is not set up', async ({ browser, request }) => {
+  const subject = `E2E question ${Date.now()}`
+  const sent = await request.post('/api/v2/contact', {
+    data: { name: 'Casey Visitor', email: `casey${Date.now()}@e2e.test`, subject, message: 'Do you have a plan for small teams?' },
+  })
+  expect(sent.status()).toBe(201)
+
+  const admin = await signedInPage(browser, ADMIN)
+  await admin.goto('/admin/messages')
+  await admin.getByLabel('Search messages').fill(subject)
+  const card = admin.getByRole('article', { name: subject })
+  await expect(card).toBeVisible()
+
+  await card.getByLabel('Status').selectOption('resolved')
+  await expect(admin.getByRole('status').filter({ hasText: 'Marked as resolved' })).toBeVisible()
+
+  await card.getByRole('button', { name: 'Reply' }).click()
+  await expect(card.getByText("Email isn't set up on this server")).toBeVisible()
+  await expect(card.getByRole('link', { name: 'Reply from my mail app' })).toHaveAttribute('href', /^mailto:casey/)
+  await expect(card.getByRole('textbox')).toHaveCount(0)
+  await admin.context().close()
 })
