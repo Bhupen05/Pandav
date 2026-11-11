@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { ChevronDown, X } from 'lucide-react'
 import { getErrorMessage } from '../../api/axios'
+import { PEOPLE_WORDS, type PickerWords } from './pickerWords'
 import type { AssigneeOption } from './types'
 
 type Props = {
@@ -20,13 +21,31 @@ type Props = {
   invalid?: boolean
   describedBy?: string
   disabled?: boolean
+  // What the list is called, if it isn't people
+  words?: PickerWords
+  // With `single`: whether the list offers "nobody" (the placeholder) as a choice. Off where a choice is required.
+  allowEmpty?: boolean
 }
 
 // A button that opens a searchable list of people: checkboxes to pick several,
 // or radio buttons to pick one. Everything is reachable by keyboard, Escape
 // closes the list and returns to the button, and the chips below the button
 // name each pick with a button to remove it.
-export default function AssigneePicker({ id, labelId, value, onChange, load, single = false, placeholder, max, invalid, describedBy, disabled }: Props) {
+export default function AssigneePicker({
+  id,
+  labelId,
+  value,
+  onChange,
+  load,
+  single = false,
+  placeholder,
+  max,
+  invalid,
+  describedBy,
+  disabled,
+  words = PEOPLE_WORDS,
+  allowEmpty = true,
+}: Props) {
   const listId = useId()
   const summaryId = useId()
   const rootRef = useRef<HTMLDivElement>(null)
@@ -49,7 +68,7 @@ export default function AssigneePicker({ id, labelId, value, onChange, load, sin
         const people = await load(query)
         if (!cancelled) setOptions(people)
       } catch (failure) {
-        if (!cancelled) setError(getErrorMessage(failure, "Couldn't load the list of people."))
+        if (!cancelled) setError(getErrorMessage(failure, words.failure))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -58,7 +77,7 @@ export default function AssigneePicker({ id, labelId, value, onChange, load, sin
       cancelled = true
       clearTimeout(timer)
     }
-  }, [open, query, load, reloadKey])
+  }, [open, query, load, reloadKey, words.failure])
 
   const selectedIds = value.map((person) => person._id)
   const atLimit = !single && max !== undefined && value.length >= max
@@ -121,7 +140,7 @@ export default function AssigneePicker({ id, labelId, value, onChange, load, sin
 
       {open && (
         // tabIndex keeps focus inside when a click lands on the list's own padding or scrollbar
-        <div id={listId} role="group" aria-label="Choose people" tabIndex={-1} className="mt-2 rounded-xl border border-neutral-200 bg-white shadow-sm outline-none">
+        <div id={listId} role="group" aria-label={words.choose} tabIndex={-1} className="mt-2 rounded-xl border border-neutral-200 bg-white shadow-sm outline-none">
           <div className="border-b border-neutral-100 p-2">
             <input
               type="search"
@@ -131,14 +150,14 @@ export default function AssigneePicker({ id, labelId, value, onChange, load, sin
                 // Enter in the search box searches; it must not send the form around it
                 if (event.key === 'Enter') event.preventDefault()
               }}
-              aria-label="Search people"
-              placeholder="Search by name or email"
+              aria-label={words.search}
+              placeholder={words.hint}
               autoComplete="off"
               className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm outline-none focus:border-neutral-900 focus:ring-2 focus:ring-neutral-900/10"
             />
           </div>
           <div className="max-h-52 overflow-y-auto" aria-busy={loading}>
-            {single && (
+            {single && allowEmpty && (
               <label className="flex cursor-pointer items-center gap-3 px-4 py-2.5 text-sm hover:bg-neutral-50">
                 <input
                   type="radio"
@@ -162,9 +181,9 @@ export default function AssigneePicker({ id, labelId, value, onChange, load, sin
                 </button>
               </div>
             ) : loading && options.length === 0 ? (
-              <p role="status" className="px-4 py-3 text-sm text-neutral-500">Loading people…</p>
+              <p role="status" className="px-4 py-3 text-sm text-neutral-500">{words.loading}</p>
             ) : options.length === 0 ? (
-              <p role="status" className="px-4 py-3 text-sm text-neutral-500">{query ? 'Nobody matches that search.' : 'No one to choose from.'}</p>
+              <p role="status" className="px-4 py-3 text-sm text-neutral-500">{query ? words.noMatch : words.empty}</p>
             ) : (
               options.map((person) => {
                 const checked = selectedIds.includes(person._id)

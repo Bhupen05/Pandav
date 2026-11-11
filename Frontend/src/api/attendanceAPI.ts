@@ -53,6 +53,13 @@ export interface AttendanceRecord {
   updatedAt?: string;
 }
 
+// Someone or something to pick from a list: a person or a team
+export interface PickOption {
+  _id: string;
+  name: string;
+  email?: string;
+}
+
 export interface Pagination {
   page: number;
   limit: number;
@@ -110,6 +117,8 @@ export interface AttendanceSettings {
   halfDayHours: number | null;
   autoAbsent: boolean;
   leaveTypes: LeaveType[];
+  // The server's time zone (APP_TIMEZONE), read-only: it decides each record's day
+  timezone?: string;
   updatedAt?: string | null;
   updatedBy?: string | null;
 }
@@ -364,15 +373,32 @@ export const attendanceAPI = {
     return response.data;
   },
 
-  // Admins: active people, for choosing who a record is for and filtering by person
-  listPeople: async (): Promise<ListResponse<PersonRef & { role: string }>> => {
-    const response = await api.get('/users', { params: { isActive: true, sort: 'name' } });
-    return response.data;
+  // Admins: active people whose name or email contains `q` (the first 20 by name), for
+  // choosing who a record is for and filtering by person
+  searchPeople: async (q = ''): Promise<PickOption[]> => {
+    const response = await api.get('/users', { params: clean({ q: q.trim(), isActive: true, sort: 'name', page: 1, limit: 20 }) });
+    const people: PickOption[] = Array.isArray(response.data?.data) ? response.data.data : [];
+    return people.map(({ _id, name, email }) => ({ _id, name, email }));
   },
 
-  // Admins: teams, for the team filter
-  listTeams: async (): Promise<ListResponse<{ _id: string; name: string; isActive?: boolean }>> => {
-    const response = await api.get('/teams');
-    return response.data;
+  // Admins: one person's name, for a filter that opened from a link
+  getPerson: async (id: string): Promise<PickOption> => {
+    const response = await api.get(`/users/${encodeURIComponent(id)}`);
+    const { _id, name, email } = response.data?.data ?? {};
+    return { _id, name, email };
+  },
+
+  // Admins: teams whose name contains `q`. The server doesn't page this list, so only the first 20 are kept
+  searchTeams: async (q = ''): Promise<PickOption[]> => {
+    const response = await api.get('/teams', { params: clean({ q: q.trim() }) });
+    const teams: PickOption[] = Array.isArray(response.data?.data) ? response.data.data : [];
+    return teams.slice(0, 20).map(({ _id, name }) => ({ _id, name }));
+  },
+
+  // One team's name (admins, and the team's own people), for a filter that opened from a link
+  getTeam: async (id: string): Promise<PickOption> => {
+    const response = await api.get(`/teams/${encodeURIComponent(id)}`);
+    const { _id, name } = response.data?.data ?? {};
+    return { _id, name };
   },
 };

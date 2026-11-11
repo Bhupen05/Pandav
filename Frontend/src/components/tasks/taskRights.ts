@@ -15,6 +15,8 @@ export type Viewer = {
   ledTeam: TeamInfo | null
   // Team names by id, to name a task's team
   teamNames: Record<string, string>
+  // The teams this person knows are frozen (their own, for leaders and members; any, for admins)
+  frozenTeamIds: string[]
 }
 
 const assigneeIds = (task: Task) => task.assignedTo.map((assignee) => personId(assignee) || '')
@@ -27,6 +29,13 @@ export const hasReviewRequest = (task: Task) =>
   task.status === 'completion-requested' ||
   (isOpenTask(task) &&
     ((task.doneCount ?? 0) > 0 || Boolean(task.assigneeProgress?.some((entry) => entry.status === 'completion-requested'))))
+
+// Whether the task belongs to a frozen team, as far as this person can tell (from their own
+// team, via GET /teams/my). Admins are never held back by a freeze; the server decides in the end.
+// While a team is frozen, nothing changes on its tasks except that assignees can still start
+// work, ask for completion and tick checklist items.
+export const isFrozenFor = (task: Pick<Task, 'team'>, viewer: Viewer) =>
+  !viewer.isAdmin && Boolean(task.team) && viewer.frozenTeamIds.includes(String(task.team))
 
 // Edit, delete, cancel and reopen: admins; a leader of the task's team while it
 // isn't frozen, when they aren't on the task and everyone on it is in the team
@@ -59,6 +68,11 @@ export const canReviewTask = (task: Task, viewer: Viewer) => {
 export const canTickChecklist = (task: Task, viewer: Viewer) =>
   isOpenTask(task) && (assigneeIds(task).includes(viewer.id) || canManageTask(task, viewer))
 
-// Attach files: the people on the task, its managers and admins; not to a cancelled task
+// Attach files: the people on the task, its managers and admins; not to a cancelled task, and
+// not to a frozen team's task unless an admin
 export const canAttachFiles = (task: Task, viewer: Viewer) =>
-  task.status !== 'cancelled' && (viewer.isAdmin || assigneeIds(task).includes(viewer.id) || canManageTask(task, viewer))
+  task.status !== 'cancelled' && !isFrozenFor(task, viewer) && (viewer.isAdmin || assigneeIds(task).includes(viewer.id) || canManageTask(task, viewer))
+
+// Comment, edit or delete a comment, and remove a file: whoever may normally, except that a
+// frozen team's task is closed to everyone but admins
+export const canChangeDiscussion = (task: Task, viewer: Viewer) => !isFrozenFor(task, viewer)

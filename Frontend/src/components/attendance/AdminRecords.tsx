@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Download, Plus } from 'lucide-react'
 import {
   attendanceAPI,
@@ -11,18 +12,21 @@ import {
   type AttendanceStatus,
 } from '../../api/attendanceAPI'
 import { useFeedback } from '../../context/useFeedback'
-import { formatDay, formatHours, todayKey } from '../../utils/date'
+import { dayKeyIn, formatDay, formatHours, todayKey } from '../../utils/date'
 import AdminQueue from './AdminQueue'
 import AdminRecordDialog from './AdminRecordDialog'
 import AdminRecordsTable from './AdminRecordsTable'
 import { inputClass, labelClass, primaryButton, secondaryButton } from './fields'
 import { approvalLabel, dayTypeLabel, describeError } from './labels'
 import Pager from './Pager'
+import { PersonPicker, TeamPicker } from './Pickers'
 import { EmptyState, ErrorState, Loading } from './States'
 import { saveBlob } from './download'
 import { useLoad } from './useLoad'
 import { useReview } from './useReview'
 
+// The person and team filters live in the address (?user=<id>&team=<id>), so a link from the
+// team page or a reload brings them back; the others are kept here
 type FilterState = {
   user: string
   team: string
@@ -33,7 +37,9 @@ type FilterState = {
   missedCheckout: boolean
 }
 
-const NO_FILTERS: FilterState = { user: '', team: '', status: '', approvalStatus: '', startDate: '', endDate: '', missedCheckout: false }
+type OtherFilters = Omit<FilterState, 'user' | 'team'>
+
+const NO_OTHER_FILTERS: OtherFilters = { status: '', approvalStatus: '', startDate: '', endDate: '', missedCheckout: false }
 const PAGE_SIZE = 20
 const REFRESH_MS = 30000
 
@@ -58,16 +64,19 @@ type Props = {
 // editing and deleting, and the CSV export
 export default function AdminRecords({ meId, settings, onChanged }: Props) {
   const { notify, confirm, prompt } = useFeedback()
-  const today = todayKey()
-  const [filters, setFilters] = useState<FilterState>(NO_FILTERS)
+  // Today in the server's time zone, which decides what a record's day is
+  const today = settings?.timezone ? dayKeyIn(settings.timezone) : todayKey()
+  const personLabelId = useId()
+  const teamLabelId = useId()
+  const [params, setParams] = useSearchParams()
+  const [others, setOthers] = useState<OtherFilters>(NO_OTHER_FILTERS)
+  const filters: FilterState = { ...others, user: params.get('user') ?? '', team: params.get('team') ?? '' }
   const [page, setPage] = useState(1)
   const [dialog, setDialog] = useState<{ record?: AttendanceRecord } | null>(null)
   const [exporting, setExporting] = useState(false)
   const [deletingId, setDeletingId] = useState('')
   const [overviewOpen, setOverviewOpen] = useState(false)
 
-  const people = useLoad(() => attendanceAPI.listPeople(), 'people')
-  const teams = useLoad(() => attendanceAPI.listTeams(), 'teams')
   const queue = useLoad(() => attendanceAPI.listRecords({ approvalStatus: 'pending', reviewable: true, page: 1, limit: 50 }), 'queue', { refreshMs: REFRESH_MS })
   const list = useLoad(
     () => attendanceAPI.listRecords({ ...toApiFilters(filters), page, limit: PAGE_SIZE }),
@@ -82,11 +91,37 @@ export default function AdminRecords({ meId, settings, onChanged }: Props) {
   const refreshAll = () => Promise.all([queue.refresh(), list.refresh(), overview.refresh(), onChanged()])
   const review = useReview({ notify, prompt, onChanged: refreshAll })
 
-  const setFilter = <K extends keyof FilterState>(key: K, value: FilterState[K]) => {
-    setFilters((previous) => ({ ...previous, [key]: value }))
+  const setFilter = <K extends keyof OtherFilters>(key: K, value: OtherFilters[K]) => {
+    setOthers((previous) => ({ ...previous, [key]: value }))
     setPage(1)
   }
-  const filtered = JSON.stringify(filters) !== JSON.stringify(NO_FILTERS)
+  // The person and team go in the address ('' takes the filter off)
+  const setLinked = (key: 'user' | 'team', id: string) => {
+    setParams(
+      (previous) => {
+        const next = new URLSearchParams(previous)
+        if (id) next.set(key, id)
+        else next.delete(key)
+        return next
+      },
+      { replace: true },
+    )
+    setPage(1)
+  }
+  const clearFilters = () => {
+    setOthers(NO_OTHER_FILTERS)
+    setParams(
+      (previous) => {
+        const next = new URLSearchParams(previous)
+        next.delete('user')
+        next.delete('team')
+        return next
+      },
+      { replace: true },
+    )
+    setPage(1)
+  }
+  const filtered = !!filters.user || !!filters.team || JSON.stringify(others) !== JSON.stringify(NO_OTHER_FILTERS)
 
   const exportCsv = async () => {
     setExporting(true)
@@ -121,7 +156,6 @@ export default function AdminRecords({ meId, settings, onChanged }: Props) {
   }
 
   const records = list.data?.data ?? []
-  const personList = people.data?.data ?? []
   const stats = overview.data?.data
 
   return (
@@ -148,28 +182,12 @@ export default function AdminRecords({ meId, settings, onChanged }: Props) {
         <h2 id="filters-title" className="sr-only">Filter the records</h2>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <div>
-            <label htmlFor="filter-user" className={labelClass}>Person</label>
-            <select id="filter-user" value={filters.user} onChange={(event) => setFilter('user', event.target.value)} className={inputClass}>
-              <option value="">Everyone</option>
-              {personList.map((person) => (
-                <option key={person._id} value={person._id}>{person.name}</option>
-              ))}
-            </select>
-            {people.error && !people.data && (
-              <p className="mt-1 text-xs text-red-700">The list of people did not load. <button type="button" onClick={people.reload} className="font-medium underline">Retry</button></p>
-            )}
+            <span id={personLabelId} className={labelClass}>Person</span>
+            <PersonPicker id="filter-user" labelId={personLabelId} value={filters.user} onChange={(person) => setLinked('user', person?._id ?? '')} placeholder="Everyone" />
           </div>
           <div>
-            <label htmlFor="filter-team" className={labelClass}>Team</label>
-            <select id="filter-team" value={filters.team} onChange={(event) => setFilter('team', event.target.value)} className={inputClass}>
-              <option value="">All teams</option>
-              {(teams.data?.data ?? []).map((team) => (
-                <option key={team._id} value={team._id}>{team.name}</option>
-              ))}
-            </select>
-            {teams.error && !teams.data && (
-              <p className="mt-1 text-xs text-red-700">The list of teams did not load. <button type="button" onClick={teams.reload} className="font-medium underline">Retry</button></p>
-            )}
+            <span id={teamLabelId} className={labelClass}>Team</span>
+            <TeamPicker id="filter-team" labelId={teamLabelId} value={filters.team} onChange={(team) => setLinked('team', team?._id ?? '')} placeholder="All teams" />
           </div>
           <div>
             <label htmlFor="filter-status" className={labelClass}>Day type</label>
@@ -204,7 +222,7 @@ export default function AdminRecords({ meId, settings, onChanged }: Props) {
             </label>
           </div>
           <div className="flex items-end">
-            <button type="button" onClick={() => { setFilters(NO_FILTERS); setPage(1) }} disabled={!filtered} className={`${secondaryButton} w-full`}>
+            <button type="button" onClick={clearFilters} disabled={!filtered} className={`${secondaryButton} w-full`}>
               Clear filters
             </button>
           </div>
@@ -303,7 +321,6 @@ export default function AdminRecords({ meId, settings, onChanged }: Props) {
       {dialog && (
         <AdminRecordDialog
           record={dialog.record}
-          people={personList}
           settings={settings}
           onClose={() => setDialog(null)}
           onSaved={(message) => {

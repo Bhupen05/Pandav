@@ -11,6 +11,8 @@ const MAX_COMMENT = 2000
 type Props = {
   taskId: string
   viewerId: string
+  // False while the task's team is frozen: no one but an admin can comment, edit or delete then
+  canWrite: boolean
   // Managers and admins may delete anyone's comment
   canModerate: boolean
   report: (message: string, tone: 'success' | 'error') => void
@@ -19,7 +21,7 @@ type Props = {
 }
 
 // The discussion on a task: newest 50 comments, older ones on request
-export default function TaskComments({ taskId, viewerId, canModerate, report, onActivity }: Props) {
+export default function TaskComments({ taskId, viewerId, canWrite, canModerate, report, onActivity }: Props) {
   const { confirm } = useFeedback()
   const [comments, setComments] = useState<TaskComment[]>([])
   const [hasMore, setHasMore] = useState(false)
@@ -141,7 +143,7 @@ export default function TaskComments({ taskId, viewerId, canModerate, report, on
             </button>
           )}
           {comments.length === 0 ? (
-            <p className="text-sm text-neutral-500">No comments yet. Start the conversation below.</p>
+            <p className="text-sm text-neutral-500">{canWrite ? 'No comments yet. Start the conversation below.' : 'No comments.'}</p>
           ) : (
             <ul className="space-y-3">
               {comments.map((comment) => {
@@ -203,7 +205,7 @@ export default function TaskComments({ taskId, viewerId, canModerate, report, on
                     ) : (
                       <p className="mt-1 whitespace-pre-wrap wrap-break-word text-sm text-neutral-800">{comment.text}</p>
                     )}
-                    {!comment.deleted && !editing && (own || canModerate) && (
+                    {canWrite && !comment.deleted && !editing && (own || canModerate) && (
                       <div className="mt-2 flex gap-3 text-xs">
                         {own && (
                           <button
@@ -237,35 +239,39 @@ export default function TaskComments({ taskId, viewerId, canModerate, report, on
         </>
       )}
 
-      <form onSubmit={post} className="mt-4">
-        <label htmlFor="task-comment-input" className="mb-1.5 block text-sm font-medium text-neutral-700">Add a comment</label>
-        <textarea
-          id="task-comment-input"
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-          onKeyDown={(event) => {
-            // Enter sends; Shift+Enter starts a new line
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault()
-              post()
-            }
-          }}
-          maxLength={MAX_COMMENT}
-          rows={3}
-          placeholder="Write a comment. Enter sends, Shift+Enter adds a line."
-          className="w-full resize-none rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-2.5 text-sm outline-none focus:border-neutral-900 focus:bg-white focus:ring-2 focus:ring-neutral-900/10"
-        />
-        <div className="mt-2 flex items-center justify-between gap-3">
-          <span className="text-xs text-neutral-500">{text.length}/{MAX_COMMENT}</span>
-          <button
-            type="submit"
-            disabled={posting || !text.trim()}
-            className="rounded-lg bg-neutral-900 px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
-          >
-            {posting ? 'Posting…' : 'Post comment'}
-          </button>
-        </div>
-      </form>
+      {!canWrite ? (
+        <p className="mt-4 text-sm text-neutral-500">Comments are closed while the team is frozen.</p>
+      ) : (
+        <form onSubmit={post} className="mt-4">
+          <label htmlFor="task-comment-input" className="mb-1.5 block text-sm font-medium text-neutral-700">Add a comment</label>
+          <textarea
+            id="task-comment-input"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={(event) => {
+              // Enter sends; Shift+Enter starts a new line
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault()
+                post()
+              }
+            }}
+            maxLength={MAX_COMMENT}
+            rows={3}
+            placeholder="Write a comment. Enter sends, Shift+Enter adds a line."
+            className="w-full resize-none rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-2.5 text-sm outline-none focus:border-neutral-900 focus:bg-white focus:ring-2 focus:ring-neutral-900/10"
+          />
+          <div className="mt-2 flex items-center justify-between gap-3">
+            <span className="text-xs text-neutral-500">{text.length}/{MAX_COMMENT}</span>
+            <button
+              type="submit"
+              disabled={posting || !text.trim()}
+              className="rounded-lg bg-neutral-900 px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
+            >
+              {posting ? 'Posting…' : 'Post comment'}
+            </button>
+          </div>
+        </form>
+      )}
     </section>
   )
 }

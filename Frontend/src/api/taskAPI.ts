@@ -203,6 +203,12 @@ export const taskAPI = {
     return users.map(({ _id, name, email }) => ({ _id, name, email }))
   },
 
+  // Admins: one person's name, for a filter that opened from a link
+  getUser: async (id: string): Promise<AssigneeOption | null> => {
+    const person = (await api.get(`/users/${encodeURIComponent(id)}`)).data?.data
+    return person?._id && person?.name ? { _id: person._id, name: person.name, email: person.email } : null
+  },
+
   // The caller's team, or null outside a team (the server answers 404 then)
   getMyTeam: async (): Promise<MyTeam | null> => {
     try {

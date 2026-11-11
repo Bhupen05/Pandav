@@ -12,7 +12,7 @@ export function useViewer(): Viewer {
   const isLeader = user?.role === 'team_leader'
   const hasTeam = Boolean(user?.teamId)
   const [led, setLed] = useState<TeamInfo | null>(null)
-  const [teams, setTeams] = useState<Array<{ _id: string; name: string }>>([])
+  const [teams, setTeams] = useState<Array<{ _id: string; name: string; isActive?: boolean }>>([])
 
   useEffect(() => {
     if (!userId) return
@@ -29,7 +29,7 @@ export function useViewer(): Viewer {
         .getMyTeam()
         .then((team) => {
           if (cancelled || !team) return
-          setTeams([{ _id: team._id, name: team.name }])
+          setTeams([{ _id: team._id, name: team.name, isActive: team.isActive }])
           if (isLeader) {
             const people = [...team.leaders, ...team.members]
             setLed({ _id: team._id, name: team.name, isActive: team.isActive !== false, memberIds: people.map((person) => person._id) })
@@ -49,6 +49,7 @@ export function useViewer(): Viewer {
       isLeader,
       ledTeam: led,
       teamNames: Object.fromEntries(teams.map((team) => [team._id, team.name])),
+      frozenTeamIds: teams.filter((team) => team.isActive === false).map((team) => team._id),
     }),
     [userId, isAdmin, isLeader, led, teams],
   )

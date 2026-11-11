@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { attendanceAPI, ATTENDANCE_STATUSES, type AttendanceRecord, type AttendanceStatus } from '../api/attendanceAPI'
 import { useAuth } from '../context/useAuth'
 import { useFeedback } from '../context/useFeedback'
-import { addDays, todayKey } from '../utils/date'
+import { addDays, browserTimeZone, dayKeyIn } from '../utils/date'
 import CheckPanel from './attendance/CheckPanel'
 import { inputClass } from './attendance/fields'
 import { checkInBlockReason, dayTypeLabel, describeError } from './attendance/labels'
@@ -38,7 +38,6 @@ function Attendance() {
   const { notify, confirm } = useFeedback()
   const { user, isAdmin } = useAuth()
   const userId = user?._id ?? ''
-  const today = todayKey()
 
   const [searchParams, setSearchParams] = useSearchParams()
   const tab = searchParams.get('tab') === 'leave' ? 'leave' : 'attendance'
@@ -49,9 +48,14 @@ function Attendance() {
   const [busy, setBusy] = useState(false)
 
   // Everything here is about the signed-in person, administrators included
-  const recent = useLoad(() => loadRecent(userId, today), `${userId}:${today}`, { refreshMs: REFRESH_MS })
-  const summary = useLoad(() => attendanceAPI.getSummary(), `${userId}:${today.slice(0, 7)}`, { refreshMs: REFRESH_MS })
   const settings = useLoad(() => attendanceAPI.getSettings(), 'settings')
+  // Today is the day it is in the server's time zone, which decides what a record's day is; the
+  // browser's own zone only stands in if the settings can't be loaded. Until one of them is
+  // known there is no "today" and today's record waits.
+  const zone = settings.data?.data.timezone ?? (settings.error ? browserTimeZone() : undefined)
+  const today = zone ? dayKeyIn(zone) : ''
+  const recent = useLoad(() => (today ? loadRecent(userId, today) : Promise.resolve(null)), `${userId}:${today}`, { refreshMs: REFRESH_MS })
+  const summary = useLoad(() => attendanceAPI.getSummary(), `${userId}:${today.slice(0, 7)}`, { refreshMs: REFRESH_MS })
   const holidays = useLoad(() => attendanceAPI.getHolidays(), 'holidays')
   const missed = useLoad(() => attendanceAPI.listRecords({ user: userId, missedCheckout: true }), userId, { refreshMs: REFRESH_MS })
   const list = useLoad(

@@ -84,6 +84,7 @@ One set of rules for the whole organisation. Until an admin saves them, the defa
 | `halfDayHours` | Number or `null` | `null` | A check-out after fewer hours makes the day a half day. `null` switches it off |
 | `autoAbsent` | Boolean | `false` | Whether the auto-absent job marks people absent |
 | `leaveTypes` | Array | see below | `{ key, label, daysPerYear }`; `daysPerYear: null` means no limit |
+| `timezone` | String | `Asia/Kolkata` | Read-only. The time zone `APP_TIMEZONE` names, which decides each record's `day` and which clock `shiftStart` is read on. Clients use it to show and type times the way the server counts days |
 
 Default leave types:
 
@@ -741,21 +742,25 @@ only while there is a correction or missed check-out to settle. They can decline
       { "key": "earned", "label": "Earned leave", "daysPerYear": 15 },
       { "key": "unpaid", "label": "Unpaid leave", "daysPerYear": null }
     ],
+    "timezone": "Asia/Kolkata",
     "updatedAt": "2026-10-24T10:00:00.000Z",
     "updatedBy": "6710a0f1e4b0f5a3c8d90b01"
   }
 }
 ```
 
-`updatedAt` and `updatedBy` are `null` until an admin saves settings.
+`updatedAt` and `updatedBy` are `null` until an admin saves settings. `timezone` is always
+present: it is the server's `APP_TIMEZONE` (default `Asia/Kolkata`), not something an admin saves.
 
 ### Change the settings
 
 `PUT /api/v2/attendance/settings`
 
 **Who may call:** admins. Send only the settings to change; the others keep their values. Returns
-the settings in force, with `"message": "Attendance settings saved"`. Recorded in the audit log
-(`attendance_settings_updated`).
+the settings in force (with `timezone`, as in [Read the settings](#read-the-settings)), with
+`"message": "Attendance settings saved"`. Recorded in the audit log
+(`attendance_settings_updated`). A `timezone` in the body is ignored, like any other field that
+isn't in the table below; sent alone it gets the `Nothing to change` error.
 
 | Setting | Rule |
 | --- | --- |

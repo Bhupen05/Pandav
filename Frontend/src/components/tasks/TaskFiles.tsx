@@ -67,13 +67,15 @@ type Props = {
   viewerId: string
   // Whether this person may add files
   canAttach: boolean
+  // False while the task's team is frozen: files can't be removed then, by anyone but an admin
+  canRemove: boolean
   // Managers and admins may remove anyone's file
   canModerate: boolean
   report: (message: string, tone: 'success' | 'error') => void
   onActivity: () => void
 }
 
-export default function TaskFiles({ taskId, viewerId, canAttach, canModerate, report, onActivity }: Props) {
+export default function TaskFiles({ taskId, viewerId, canAttach, canRemove, canModerate, report, onActivity }: Props) {
   const { confirm } = useFeedback()
   const [files, setFiles] = useState<TaskAttachment[]>([])
   const [loading, setLoading] = useState(true)
@@ -184,6 +186,7 @@ export default function TaskFiles({ taskId, viewerId, canAttach, canModerate, re
         )}
       </div>
       {canAttach && !problem && <p className="mb-2 text-xs text-neutral-500">Images, PDFs, text, CSV, ZIP and Office files, up to 2 MB each.</p>}
+      {!canRemove && <p className="mb-2 text-xs text-neutral-500">Files can't be added or removed while the team is frozen.</p>}
       {problem && <p role="alert" className="mb-2 text-sm text-red-600">{problem}</p>}
 
       {loading && files.length === 0 ? (
@@ -212,7 +215,7 @@ export default function TaskFiles({ taskId, viewerId, canAttach, canModerate, re
               >
                 <Download aria-hidden="true" className="h-4 w-4" />
               </button>
-              {(canModerate || personId(file.uploadedBy) === viewerId) && (
+              {canRemove && (canModerate || personId(file.uploadedBy) === viewerId) && (
                 <button
                   type="button"
                   onClick={() => remove(file)}

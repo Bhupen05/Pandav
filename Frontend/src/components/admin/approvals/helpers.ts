@@ -27,3 +27,12 @@ export function useSelection(visibleIds: string[]) {
 // Pending records that aren't part of a leave request: those are reviewed,
 // a whole request at a time, under Leave
 export const reviewableRecords = (data?: ListResponse<AttendanceRow>) => (data?.data ?? []).filter((row) => !row.leaveRequestId)
+
+// The Attendance tab's count: the server's total for the queue, less the leave days among the
+// rows loaded (those are reviewed under Leave). While more pages are still to load, leave days in
+// them are still counted, so the number can be a little high until they are.
+export const attendanceWaiting = (data?: ListResponse<AttendanceRow>) => {
+  if (!data) return null
+  const leaveDays = data.data.length - reviewableRecords(data).length
+  return Math.max(0, (data.pagination?.total ?? data.data.length) - leaveDays)
+}

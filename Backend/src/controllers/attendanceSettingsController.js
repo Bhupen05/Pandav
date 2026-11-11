@@ -7,6 +7,10 @@ import { SETTINGS_FIELDS, getSettings } from '../utils/attendance.js';
 
 const fail = (res, status, message) => res.status(status).json({ success: false, message });
 
+// The zone the attendance days and the shift start are read in (read-only: it
+// comes from APP_TIMEZONE, not from the settings an admin saves)
+const timezone = () => process.env.APP_TIMEZONE || 'Asia/Kolkata';
+
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const LEAVE_KEY = /^[a-z][a-z0-9_-]{0,29}$/;
 
@@ -86,7 +90,7 @@ const readSettings = (body) => {
 // @access  Private
 export const getAttendanceSettings = async (req, res) => {
   try {
-    res.json({ success: true, data: await getSettings() });
+    res.json({ success: true, data: { ...(await getSettings()), timezone: timezone() } });
   } catch (error) {
     sendServerError(res, error);
   }
@@ -114,7 +118,7 @@ export const updateAttendanceSettings = async (req, res) => {
       details: { changes: values },
     });
 
-    res.json({ success: true, message: 'Attendance settings saved', data: await getSettings() });
+    res.json({ success: true, message: 'Attendance settings saved', data: { ...(await getSettings()), timezone: timezone() } });
   } catch (error) {
     sendServerError(res, error);
   }

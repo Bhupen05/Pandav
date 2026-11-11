@@ -130,6 +130,7 @@ test('settings and holidays', async (t) => {
     JSON.stringify(data?.leaveTypes?.map((type) => [type.key, type.daysPerYear])) === '[["casual",12],["sick",6],["earned",15],["unpaid",null]]',
     JSON.stringify(data?.leaveTypes));
   await check('signed-out callers cannot read them', (await call('GET', '/attendance/settings')).status === 401);
+  await check('the settings carry the server time zone (APP_TIMEZONE), read-only', data?.timezone === 'Asia/Kolkata', JSON.stringify(data));
 
   await check('only admins change settings',
     (await call('PUT', '/attendance/settings', { token: mia.token, body: { autoAbsent: true } })).status === 403);
@@ -158,7 +159,14 @@ test('settings and holidays', async (t) => {
     saved.status === 200 && saved.data.data.leaveTypes.some((type) => type.key === 'wfh') && saved.data.data.lateAfterMinutes === 10 &&
     JSON.stringify(saved.data.data.workdays) === '[1,2,3,4,5]', JSON.stringify(saved.data));
   await check('the change is in the audit log', (await auditCount('attendance_settings_updated')) === 1);
-  await call('PUT', '/attendance/settings', { token: adminToken, body: { lateAfterMinutes: 15 } });
+  await check('saving settings answers with the time zone too', saved.data.data.timezone === 'Asia/Kolkata', JSON.stringify(saved.data.data));
+  const ignored = await call('PUT', '/attendance/settings', { token: adminToken, body: { timezone: 'UTC', lateAfterMinutes: 15 } });
+  await check('a timezone in the body is ignored', ignored.status === 200 && ignored.data.data.timezone === 'Asia/Kolkata' && ignored.data.data.lateAfterMinutes === 15,
+    JSON.stringify(ignored.data));
+  await check('and not stored or logged as a change',
+    (await call('GET', '/attendance/settings', { token: mia.token })).data.data.timezone === 'Asia/Kolkata' && (await auditCount('attendance_settings_updated')) === 2);
+  await check('a timezone alone is nothing to change',
+    (await call('PUT', '/attendance/settings', { token: adminToken, body: { timezone: 'UTC' } })).status === 400);
 
   // Holidays
   const holiday = await call('POST', '/attendance/holidays', { token: adminToken, body: { day: HOLIDAY, name: 'Founders Day' } });
