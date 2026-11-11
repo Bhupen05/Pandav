@@ -15,10 +15,6 @@ import { OPEN_STATUSES, TASK_STATUSES, type LeaderboardRow, type Task, type Task
 
 type Period = 'month' | 'all'
 
-// A leaderboard row. The server gives each a photoUrl (null without a photo)
-// instead of the picture itself, which the shared row type doesn't say yet.
-type BoardRow = LeaderboardRow & { photoUrl?: string | null }
-
 // The stat cards, one per status, so they add up to the total
 const STAT_STYLE: Record<TaskStatus, { box: string; number: string }> = {
   pending: { box: 'bg-amber-500', number: 'text-amber-700' },
@@ -119,7 +115,7 @@ export default function UserDashboard() {
   const counts = summary.data
   const open = counts ? (counts.byStatus.pending ?? 0) + (counts.byStatus['in-progress'] ?? 0) + (counts.byStatus['completion-requested'] ?? 0) : null
   const myTodos = todos.data ?? []
-  const boardRows: BoardRow[] = board.data?.period === period ? board.data.rows : []
+  const boardRows: LeaderboardRow[] = board.data?.period === period ? board.data.rows : []
   const boardLoading = board.loading || (board.data !== null && board.data.period !== period && !board.error)
 
   const dueText = (task: Task) => {

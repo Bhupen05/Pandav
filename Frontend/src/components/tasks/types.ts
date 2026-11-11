@@ -126,7 +126,8 @@ export type TaskAttachment = {
 export type LeaderboardRow = {
   _id: string
   name: string
-  profileImage?: string
+  // GET /users/:id/photo with a version, or null without a photo
+  photoUrl: string | null
   totalTasks: number
   completedTasks: number
   completionRate: number
