@@ -188,6 +188,11 @@ test.describe('every public page', () => {
       await page.goto(path)
       const footer = page.locator('footer')
       await expect(footer).toBeVisible()
+      // The one contentinfo landmark, outside <main>
+      const landmark = page.getByRole('contentinfo')
+      await expect(landmark).toBeVisible()
+      await expect(landmark).toHaveCount(1)
+      await expect(page.getByRole('main').getByRole('contentinfo')).toHaveCount(0)
       await expect(footer).toContainText(String(new Date().getFullYear()))
       await expect(footer.locator('a[href="#"]')).toHaveCount(0)
       for (const link of ['Pricing', 'About Us', 'Contact', 'Login']) {

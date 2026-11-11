@@ -23,6 +23,9 @@ interface ContactsState {
   error: string
 }
 
+// What the server uses for user ids
+const OBJECT_ID = /^[a-f\d]{24}$/i
+
 const sumCounts = (counts: Record<string, number>) => Object.values(counts).reduce((total, count) => total + count, 0)
 
 function ListMessage({ title, children }: { title: string; children?: React.ReactNode }) {
@@ -78,6 +81,7 @@ export default function ChatPage() {
     conversations,
     conversationsStatus,
     loadConversations,
+    findConversation,
     teamChats,
     teamChatsStatus,
     loadTeamChats,
@@ -223,6 +227,39 @@ export default function ChatPage() {
       : null
   }, [blocked, canMessageById, contactRows, conversationRows, selectedUserId])
 
+  // A link to someone who is neither a contact nor in the conversations loaded
+  // so far: their conversation may be on an older page of the list. If it is
+  // not there either, there is nothing to open.
+  const [lookup, setLookup] = useState<{ id: string; outcome: 'none' | 'failed' } | null>(null)
+  const [lookupAttempt, setLookupAttempt] = useState(0)
+  const lookupNeeded = Boolean(selectedUserId) && directSettled && !selectedPerson
+  const lookupFailedToLoad = Boolean(contacts.error || conversationsStatus.error)
+  // Not an id, or your own: there is nothing to look for
+  const impossibleLink = Boolean(selectedUserId) && (!OBJECT_ID.test(selectedUserId ?? '') || selectedUserId === user?._id)
+
+  useEffect(() => {
+    if (!selectedUserId || !lookupNeeded || lookupFailedToLoad || impossibleLink) return
+    let cancelled = false
+    findConversation(selectedUserId)
+      .then((found) => {
+        // A conversation that is found joins the list, which opens it
+        if (!cancelled && !found) setLookup({ id: selectedUserId, outcome: 'none' })
+      })
+      .catch(() => {
+        if (!cancelled) setLookup({ id: selectedUserId, outcome: 'failed' })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [findConversation, impossibleLink, lookupAttempt, lookupFailedToLoad, lookupNeeded, selectedUserId])
+
+  const retryLookup = () => {
+    setLookup(null)
+    setLookupAttempt((attempt) => attempt + 1)
+    if (contacts.error) void loadContacts()
+    if (conversationsStatus.error) void loadConversations()
+  }
+
   const selectedTeamRow = selectedTeamId ? teamChats.find((row) => row.teamId === selectedTeamId) : undefined
   const team = teamDetail?.id === selectedTeamId ? teamDetail.team : null
   const isTeamLeader = Boolean(team && team.isActive !== false && team.leaders.some((leader) => leader._id === user?._id))
@@ -299,15 +336,28 @@ export default function ChatPage() {
           />
         )
       }
-      return directSettled ? (
-        <NotFound
-          title="We couldn't find that person"
-          text="They may not be someone you can message, or the link is out of date."
-          onBack={goBackToList}
-        />
-      ) : (
-        <PaneLoading />
-      )
+      if (!directSettled) return <PaneLoading />
+      const result = impossibleLink ? 'none' : lookup?.id === selectedUserId ? lookup.outcome : null
+      if (lookupFailedToLoad || result === 'failed') {
+        return (
+          <NotFound
+            title="We couldn't open that conversation"
+            text="Something went wrong while loading it. Try again in a moment."
+            onBack={goBackToList}
+            onRetry={retryLookup}
+          />
+        )
+      }
+      if (result === 'none') {
+        return (
+          <NotFound
+            title="You can't message this person"
+            text="They aren't in your team or your Social Hub connections, and you have no conversation with them."
+            onBack={goBackToList}
+          />
+        )
+      }
+      return <PaneLoading />
     }
 
     if (selectedTeamId) {
@@ -667,19 +717,34 @@ function PaneLoading() {
   )
 }
 
-function NotFound({ title, text, onBack }: { title: string; text: string; onBack: () => void }) {
+function NotFound({ title, text, onBack, onRetry }: { title: string; text: string; onBack: () => void; onRetry?: () => void }) {
   return (
     <div className="flex h-full items-center justify-center rounded-2xl border border-slate-200 bg-white p-8 text-center">
       <div className="max-w-sm">
         <h2 className="text-lg font-bold text-slate-900">{title}</h2>
         <p className="mt-2 text-sm text-slate-600">{text}</p>
-        <button
-          type="button"
-          onClick={onBack}
-          className="mt-4 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
-        >
-          Back to messages
-        </button>
+        <div className="mt-4 flex flex-wrap justify-center gap-2">
+          {onRetry ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+            >
+              Retry
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={onBack}
+            className={
+              onRetry
+                ? 'rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50'
+                : 'rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700'
+            }
+          >
+            Back to messages
+          </button>
+        </div>
       </div>
     </div>
   )

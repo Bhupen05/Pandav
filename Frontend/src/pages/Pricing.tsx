@@ -1,5 +1,4 @@
 import { Link } from 'react-router-dom'
-import Footer from '../components/Footer'
 
 const plans = [
   {
@@ -153,7 +152,6 @@ export default function Pricing() {
           </div>
         </section>
       </div>
-      <Footer />
     </div>
   )
 }

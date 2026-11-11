@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FC, type FormEvent, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { useTopModal } from '../components/shell/useTopModal';
 import { FeedbackContext, type ConfirmOptions, type NoticeTone, type PromptOptions } from './useFeedback';
 
 interface Notice {
@@ -33,7 +35,7 @@ export const FeedbackProvider: FC<{ children: ReactNode }> = ({ children }) => {
   const [dialog, setDialog] = useState<OpenDialog | null>(null);
   const openDialog = useRef<OpenDialog | null>(null);
   const nextId = useRef(0);
-  const toastsRef = useRef<HTMLDivElement>(null);
+  const modal = useTopModal();
 
   const dismiss = useCallback((id: number) => {
     setNotices((prev) => prev.filter((notice) => notice.id !== id));
@@ -73,50 +75,76 @@ export const FeedbackProvider: FC<{ children: ReactNode }> = ({ children }) => {
 
   const value = useMemo(() => ({ notify, confirm, prompt }), [notify, confirm, prompt]);
 
-  // The toasts live in the browser's top layer, so a dialog opened with
-  // showModal() can't cover them. Showing the popover again after a dialog
-  // opened (or a toast was added) puts it back above whatever is on top.
-  // It is a manual popover: it never takes focus and nothing closes it.
-  useEffect(() => {
-    const element = toastsRef.current;
-    if (!element || typeof element.showPopover !== 'function') return;
-    if (element.matches(':popover-open')) element.hidePopover();
-    element.showPopover();
-  }, [notices, dialog]);
-
   return (
     <FeedbackContext.Provider value={value}>
       {children}
 
-      <div
-        ref={toastsRef}
-        popover={POPOVER_SUPPORTED ? 'manual' : undefined}
-        aria-live="polite"
-        className={`pointer-events-none fixed inset-x-0 bottom-0 top-auto z-[60] m-0 h-auto w-auto flex-col items-center gap-2 overflow-visible border-0 bg-transparent p-4 sm:items-end ${POPOVER_SUPPORTED ? 'open:flex' : 'flex'}`}
-      >
-        {notices.map((notice) => (
-          <div
-            key={notice.id}
-            role={notice.tone === 'error' ? 'alert' : 'status'}
-            className={`pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-lg border px-4 py-3 text-sm shadow-lg ${NOTICE_CLASSES[notice.tone]}`}
-          >
-            <p className="flex-1">{notice.message}</p>
-            <button
-              type="button"
-              onClick={() => dismiss(notice.id)}
-              aria-label="Dismiss"
-              className="-mr-1 rounded px-1 text-lg leading-none opacity-60 hover:opacity-100"
-            >
-              ×
-            </button>
-          </div>
-        ))}
-      </div>
+      {/* While a modal dialog is open everything outside it is inert, so the
+          toasts move into it (and move out again when it closes) */}
+      {modal ? (
+        createPortal(<ToastRegion notices={notices} dismiss={dismiss} inModal />, modal)
+      ) : (
+        <ToastRegion notices={notices} dismiss={dismiss} dialogId={dialog?.id} />
+      )}
 
       {dialog && <DialogBox key={dialog.id} dialog={dialog} />}
     </FeedbackContext.Provider>
   );
 };
+
+interface ToastRegionProps {
+  notices: Notice[];
+  dismiss: (id: number) => void;
+  // Inside a modal dialog, which is already in the top layer
+  inModal?: boolean;
+  // Changes when a Feedback dialog opens
+  dialogId?: number;
+}
+
+// The live region holding the toasts. It stays in the page (empty) between
+// toasts, so screen readers announce each one as it is added.
+function ToastRegion({ notices, dismiss, inModal = false, dialogId }: ToastRegionProps) {
+  const ref = useRef<HTMLDivElement>(null);
+  const asPopover = POPOVER_SUPPORTED && !inModal;
+
+  // Outside a modal the toasts live in the browser's top layer (a manual
+  // popover: it never takes focus and nothing closes it). Showing it again
+  // after something else was put on top (or a toast was added) lifts it back
+  // above whatever is there. Inside a modal the dialog's own layer is enough.
+  useEffect(() => {
+    const element = ref.current;
+    if (!asPopover || !element || typeof element.showPopover !== 'function') return;
+    if (element.matches(':popover-open')) element.hidePopover();
+    element.showPopover();
+  }, [asPopover, notices, dialogId]);
+
+  return (
+    <div
+      ref={ref}
+      popover={asPopover ? 'manual' : undefined}
+      aria-live="polite"
+      className={`pointer-events-none fixed inset-x-0 bottom-0 top-auto z-[60] m-0 h-auto w-auto flex-col items-center gap-2 overflow-visible border-0 bg-transparent p-4 sm:items-end ${asPopover ? 'open:flex' : 'flex'}`}
+    >
+      {notices.map((notice) => (
+        <div
+          key={notice.id}
+          role={notice.tone === 'error' ? 'alert' : 'status'}
+          className={`pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-lg border px-4 py-3 text-sm shadow-lg ${NOTICE_CLASSES[notice.tone]}`}
+        >
+          <p className="flex-1">{notice.message}</p>
+          <button
+            type="button"
+            onClick={() => dismiss(notice.id)}
+            aria-label="Dismiss"
+            className="-mr-1 rounded px-1 text-lg leading-none opacity-60 hover:opacity-100"
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function DialogBox({ dialog }: { dialog: OpenDialog }) {
   const { options, asksForInput, finish } = dialog;

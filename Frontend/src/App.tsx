@@ -1,12 +1,13 @@
 import './App.css'
 import { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
+import Footer from './components/Footer'
 import Navbar from './components/Navbar'
 import RequireAuth from './components/RequireAuth'
 import { ChatProvider } from './context/ChatContext'
 import { NotificationProvider } from './context/NotificationContext'
 import { useAuth } from './context/useAuth'
-import { isPublicPath } from './utils/appPaths'
+import { hasPublicFooter, isPublicPath } from './utils/appPaths'
 
 // Each page is downloaded the first time it is opened, so visitors to the
 // landing page don't load the dashboards, chat and Social Hub
@@ -113,6 +114,8 @@ function AppRoutes() {
           </Routes>
         </Suspense>
       </main>
+      {/* Outside <main> so it is the page's contentinfo landmark */}
+      {hasPublicFooter(location.pathname) && <Footer />}
     </div>
   )
 }

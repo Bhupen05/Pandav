@@ -51,6 +51,9 @@ export interface ChatContextType {
   conversations: Conversation[];
   conversationsStatus: ListStatus;
   loadConversations: (options?: { older?: boolean }) => Promise<void>;
+  // One person's conversation, reading older pages of the list if it is not in
+  // the pages loaded (they join the list). null when there is none.
+  findConversation: (userId: string) => Promise<Conversation | null>;
   // Team rooms: every team for admins, the user's own team otherwise
   teamChats: TeamChat[];
   teamChatsStatus: ListStatus;

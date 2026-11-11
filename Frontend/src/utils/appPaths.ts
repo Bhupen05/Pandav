@@ -9,6 +9,11 @@ const APP_PATHS = [
 
 export const isPublicPath = (pathname: string) => PUBLIC_PATHS.includes(pathname)
 
+// The marketing pages end with the site footer (the sign-in and password pages don't)
+const FOOTER_PATHS = ['/', '/about', '/service', '/pricing', '/contact']
+
+export const hasPublicFooter = (pathname: string) => FOOTER_PATHS.includes(pathname)
+
 // A page that needs a session (the admin pages included); anything that is
 // neither public nor this is the 404 page
 export const isAppPath = (pathname: string) =>

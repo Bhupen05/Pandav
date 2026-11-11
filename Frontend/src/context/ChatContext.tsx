@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import io, { type Socket } from 'socket.io-client';
 import { getErrorMessage, socketBaseUrl } from '../api/axios';
 import { chatAPI, type BlockedUser, type Conversation, type Cursor, type TeamChat } from '../api/chatAPI';
@@ -24,6 +24,8 @@ const SOCKET_RETRY_MS = 5000;
 // Admins are in no team, so team rooms don't push to them: look again
 const ADMIN_TEAM_POLL_MS = 10000;
 const PREVIEW_LENGTH = 120;
+// Looking for one person's conversation beyond the newest page reads at most this many pages
+const FIND_CONVERSATION_MAX_PAGES = 20;
 
 // Sent once when someone in the team reads it: every message up to readAt
 // that someone else sent now lists them as a reader
@@ -95,6 +97,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const { user, loading } = useAuth();
   const userId = user?._id;
   const isAdmin = user?.role === 'admin';
+  // The server refuses every chat request until a new password is chosen
+  const mustChangePassword = user?.mustChangePassword === true;
   const [socket, setSocket] = useState<Socket | null>(null);
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [activeUsers, setActiveUsers] = useState<string[]>([]);
@@ -123,13 +127,16 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // Whether the first page of each list has been loaded: only then is a list
   // kept up to date
   const conversationsLoadedRef = useRef(false);
+  const conversationsHasMoreRef = useRef(false);
   const teamChatsLoadedRef = useRef(false);
   const typingTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
-  useEffect(() => {
+  // Layout effects for the conversations: a page's own effect runs after them
+  // in the same commit, and reads these (findConversation)
+  useLayoutEffect(() => {
     conversationsRef.current = conversations;
   }, [conversations]);
   useEffect(() => {
@@ -138,6 +145,9 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     conversationsLoadedRef.current = conversationsStatus.loaded;
   }, [conversationsStatus.loaded]);
+  useLayoutEffect(() => {
+    conversationsHasMoreRef.current = conversationsStatus.hasMore;
+  }, [conversationsStatus.hasMore]);
   useEffect(() => {
     teamChatsLoadedRef.current = teamChatsStatus.loaded;
   }, [teamChatsStatus.loaded]);
@@ -190,6 +200,27 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         error: getErrorMessage(error, 'Could not load your conversations.'),
       }));
     }
+  }, []);
+
+  // The conversation with one person, which may lie beyond the newest page of
+  // the list: older pages are read (and kept in the list) until it turns up.
+  // Resolves to null when there is none; rejects if a page could not be loaded.
+  const findConversation = useCallback(async (personId: string): Promise<Conversation | null> => {
+    const known = conversationsRef.current.find((row) => row.user._id === personId);
+    if (known) return known;
+
+    let last = conversationsRef.current[conversationsRef.current.length - 1];
+    let hasMore = conversationsHasMoreRef.current;
+    for (let pages = 0; last && hasMore && pages < FIND_CONVERSATION_MAX_PAGES; pages += 1) {
+      const older = await chatAPI.conversations({ before: last.lastMessage.at, beforeId: last.lastMessage._id });
+      hasMore = older.hasMore;
+      setConversations((prev) => mergeConversations(prev, older.data));
+      setConversationsStatus((prev) => ({ ...prev, hasMore }));
+      const found = older.data.find((row) => row.user._id === personId);
+      if (found) return found;
+      last = older.data[older.data.length - 1];
+    }
+    return null;
   }, []);
 
   const loadTeamChats = useCallback(async () => {
@@ -482,7 +513,8 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     // Wait until the session has been confirmed: a rejected session would
     // otherwise fail these requests and redirect to the login page
-    if (!userId || loading) return;
+    // (Chat starts as soon as a new password has been chosen)
+    if (!userId || loading || mustChangePassword) return;
 
     const typingTimers = typingTimersRef.current;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -676,6 +708,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [
     userId,
     loading,
+    mustChangePassword,
     refreshUnread,
     loadConversations,
     loadTeamChats,
@@ -714,6 +747,7 @@ export const ChatProvider: React.FC<{ children: React.ReactNode }> = ({ children
         conversations,
         conversationsStatus,
         loadConversations,
+        findConversation,
         teamChats,
         teamChatsStatus,
         loadTeamChats,

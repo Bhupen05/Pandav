@@ -1,5 +1,4 @@
 import { Link } from 'react-router-dom'
-import Footer from '../components/Footer'
 
 // The features of the app, as plain facts. Class names are written out in
 // full so Tailwind can find them.
@@ -364,8 +363,6 @@ function Service() {
           </div>
         </div>
       </section>
-
-      <Footer />
     </div>
   )
 }
