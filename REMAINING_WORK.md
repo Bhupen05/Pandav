@@ -1,30 +1,34 @@
 # Remaining Work
 
-What is still open after Phase 9, as of 2026-11-10. The Phase 9 **backend** and the frontend
+What is still open after Phase 10, as of 2026-11-11. The Phase 9 **backend** and the frontend
 groundwork reached `main` through PR #5 (2026-10-24), and Vercel's production deployment is that
-commit (`0f83d48`). The eight Phase 9 **screens**, LinkedIn posting and the fixes after them are on
-the branch `phase-9` only: not merged into `main`, not deployed. Until they are, production pairs the
-new backend (if Render deployed it) with the old screens, and the new pages (Approvals,
-Notifications, People, Audit log, Reports, password reset, email check) are empty placeholders.
+commit (`0f83d48`). The eight Phase 9 **screens**, LinkedIn posting, the Phase 10 follow-ups and the
+dependency fixes are on the branch `phase-10` (`phase-9` plus Phase 10) only: not merged into
+`main`, not deployed. A pull request from `phase-10` into `main` is prepared for the owner to open.
+Until it is merged, production pairs the new backend (if Render deployed it) with the old screens,
+and the new pages (Approvals, Notifications, People, Audit log, Reports, password reset, email
+check) are empty placeholders.
 
 Phase 9 is three pieces of work:
 - the backend: accounts, tasks, attendance, teams, chat, the Social Hub and admin
 - the frontend for eight areas: shell, tasks, attendance, teams, chat, social, admin and public
 - LinkedIn posting from personal profiles
 
-It fixed most of the workflow gaps, consistency problems and paging items that the Phase 8 version
-of this file listed. Those are in [section 7](#7-fixed-in-phase-9), each with where to see the
-fix. What is left is in sections 3–6. The owner's part is sections 1 and 2.
+Phase 9 fixed most of the workflow gaps, consistency problems and paging items that the Phase 8
+version of this file listed ([section 8](#8-fixed-in-phase-9)). Phase 10 fixed most of the
+follow-ups that the Phase 9 version listed, added browser tests for the email flows and updated
+three packages ([section 7](#7-fixed-in-phase-10)). Each has where to see the fix. What is left is in sections 3–6. The owner's part is sections 1 and 2.
 
 | # | Item | Who | Priority | Size |
 |---|------|-----|----------|------|
-| 1 | [Deployment steps](#1-deployment-steps) | Project owner | Before deploying `phase-9` | Medium |
+| 1 | [Deployment steps](#1-deployment-steps) | Project owner | Before deploying `phase-10` | Medium |
 | 2 | [Decisions for the project owner](#2-decisions-for-the-project-owner) | Project owner | Before release (public text first) | Small each |
 | 3 | [Frontend follow-ups](#3-frontend-follow-ups) | Developer | Low to medium | Small each |
 | 4 | [Backend items still open](#4-backend-items-still-open) | Developer | Low | Small each |
 | 5 | [Paging in the UI](#5-paging-in-the-ui) | Developer | Low while data is small | Small |
 | 6 | [Known limitations](#6-known-limitations) | — | Accepted for now | — |
-| 7 | [Fixed in Phase 9](#7-fixed-in-phase-9) | — | Done | — |
+| 7 | [Fixed in Phase 10](#7-fixed-in-phase-10) | — | Done | — |
+| 8 | [Fixed in Phase 9](#8-fixed-in-phase-9) | — | Done | — |
 
 ---
 
@@ -32,13 +36,16 @@ fix. What is left is in sections 3–6. The owner's part is sections 1 and 2.
 
 These happen on GitHub, Render and Vercel, outside the code.
 
-**Phase 9 (branch `phase-9`)**
+**Phases 9 and 10 (branch `phase-10`)**
 - [ ] On 2026-11-10 the Render backend didn't answer at all (no response in 60–100 seconds, direct
       or through Vercel), while the Vercel frontend did. Check Render's dashboard and logs first:
       the service may be suspended or failing to start (on 2026-10-18 the Atlas login in
       `MONGODB_URI` failed with `bad auth`).
-- [ ] Merge `phase-9` into `main` once CI (backend, frontend, e2e) passes. Vercel then deploys the
+- [ ] Merge `phase-10` into `main` once CI (backend, frontend, e2e) passes. Vercel then deploys the
       new screens to production; Render deploys the backend if it auto-deploys from `main`.
+- [ ] CI on `phase-10` needed new versions of three packages, because security advisories were
+      published after the last green run: follow-redirects 1.16.2 (frontend), mongoose 8.24.7 and
+      nodemailer 10.1.7 (backend). After pulling, run `npm ci` in `Frontend/` and `Backend/`.
 - [ ] Deploy the backend and the frontend together. The API changed in places the old screens don't
       expect (for example the feed's `next` cursor, `data.postId` on a share conflict, one account
       payload for register and login), and the new screens call endpoints the old backend doesn't
@@ -68,7 +75,7 @@ Without `SMTP_HOST` nothing is emailed, and "Forgot password" tells people to as
       isn't the address people use.
 - [ ] After the deploy, try it with a real address: "Forgot password" mails a link that opens
       `/reset-password`, and a new sign-up gets a link that opens `/verify-email`. The browser
-      tests can't check this (the test backend has no email).
+      tests check these flows with a fake mail server, not real delivery.
 - [ ] Optional: `EMAIL_VERIFICATION_REQUIRED=true` refuses sign-in until the address is confirmed.
       It does nothing while email isn't set up. Turn it on only after the mail above works and the
       migration has run; otherwise new people can't get in.
@@ -99,8 +106,16 @@ on timers inside the backend. No setting is needed (`DISABLE_SCHEDULER=true` tur
       moderation with fixed steps; a linked LinkedIn or GitHub account can be disconnected.
 - [ ] Admin: dashboard figures, an audit log, reports per team, CSV exports, and a contact inbox
       with replies by email. The contact form now has field limits and a spam trap.
+- [ ] Phase 10:
+  - Social Hub posts can carry links (https only).
+  - Admins can mark reported chat messages as handled, and reopen them.
+  - The Tasks filter shows the chosen person's name.
+  - A frozen team's task no longer offers what the server refuses.
+  - The approvals queues load 50 at a time, with "Load more".
+  - Admin attendance times are entered and shown in the server's time zone (`APP_TIMEZONE`).
+  - The admin attendance filters search as you type.
 
-**Social Hub: posting to LinkedIn (part of `phase-9`)**
+**Social Hub: posting to LinkedIn (part of `phase-10`)**
 
 Posting from Pandav to each person's own LinkedIn profile needs a LinkedIn app. Until it exists,
 "Connect LinkedIn" answers "LinkedIn isn't set up on this server".
@@ -170,8 +185,9 @@ Posting from Pandav to each person's own LinkedIn profile needs a LinkedIn app. 
 
 ## 2. Decisions for the project owner
 
-Raised by the people who built the Phase 9 screens. Each item says what the app does today. None
-blocks the deploy. The text on the public pages should be settled before the site is promoted.
+Raised by the people who built the Phase 9 screens and the Phase 10 follow-ups. Each item says
+what the app does today. None blocks the deploy. The text on the public pages should be settled
+before the site is promoted.
 
 **Reasons for rejecting or cancelling**
 - [ ] The UI asks for a reason when someone rejects a task, rejects an attendance record or a
@@ -203,6 +219,18 @@ blocks the deploy. The text on the public pages should be settled before the sit
 - [ ] Your own chat bubbles are emerald-700 instead of emerald-600, so that white text passes the
       contrast check. Keep?
 
+**Phase 10**
+- [ ] Links on posts: the server accepts http and https links (`mediaUrls`); the app only adds
+      https links and only opens https ones (an older http link is shown as text). Make the server
+      https-only too?
+- [ ] Profile photos: `GET /users/:id/photo` serves the photo of a deactivated account (old
+      conversations show it); deleted accounts get 404. Keep?
+- [ ] Reported messages: a new report on a message an admin marked as handled opens it again (the
+      resolution is cleared). Keep?
+- [ ] Admin attendance: if the attendance settings can't be loaded, the Add/Edit dialog doesn't
+      open (it says so) instead of guessing the time zone; the person's own attendance page falls
+      back to the browser's zone. Keep?
+
 **Public site: figures and claims nobody has confirmed.** Confirm each, change it or remove it.
 - [ ] Landing page:
   - "98.4% Live productivity", "1,240 Check-ins", "Join over 500+ teams", "24/7 Premium Support",
@@ -230,44 +258,26 @@ blocks the deploy. The text on the public pages should be settled before the sit
 
 ## 3. Frontend follow-ups
 
-Gaps the Phase 9 builders reported. None loses data.
-
-**Accessibility and layout**
-- **Toasts while a modal dialog is open.** They draw on top (in the popover top layer), but the
-  browser treats them as inert while a modal is open: the × can't be clicked, and screen readers
-  don't announce a toast that arrives during a modal. The dialogs therefore show their own results
-  inline.
-- **The public pages' footer** sits inside the app's `<main>`, so it isn't a `contentinfo`
-  landmark.
+Gaps the Phase 9 and Phase 10 builders reported. None loses data.
 
 **Links and filters**
 - **Register ignores `?plan=growth`** from the Pricing page.
-- **The Tasks assignee filter**, opened from a link, shows "Selected person" instead of the name.
-- **`/chat?user=<id>`** for someone who is neither a contact nor in the latest 50 conversations
-  shows "couldn't find that person".
-
-**Rules the UI doesn't mirror**
-- **A frozen team's task:** the people on it still see Attach (the server refuses with the
-  frozen message).
-- **While a new password is required,** the chat context's unread request gets 403 and only logs
-  to the console.
 
 **Limits and time zones**
-- **The Approvals inbox** loads at most 200 pending attendance records and 100 corrections. It
-  says when it shows only the first batch.
-- **Times an admin types** into the attendance Add/Edit dialog use the browser's time zone; the
-  server's day is `APP_TIMEZONE`. The page's "today" also uses the browser's date.
+- **The Approvals Attendance tab count** can be a little high while more pages remain: the
+  server's total includes leave days, which that tab hides (see the backend item in section 4).
+- **The staff correction dialog** (a person's own missed check-out, `components/attendance/`)
+  still reads the time in the browser's zone; only the admin dialog uses `APP_TIMEZONE`.
+- **The admin attendance team filter** keeps the first 20 matches, because `GET /teams` isn't
+  paged.
 
 **Social Hub**
-- The composer has no field for links (`mediaUrls`); editing keeps existing links.
-- The Moderation author filter lists only authors already loaded.
+- The Moderation author search finds only active accounts, so a deactivated or deleted author
+  can't be picked.
 
 **Not covered by browser tests**
-- The email flows (reset link, verifying an address, `EMAIL_NOT_VERIFIED`), because the test
-  backend has no email. Check them by hand after the deploy (section 1).
 - A real 429 on the contact form.
 - Processing a GitHub publish job (it calls github.com).
-- Leader and frozen-team flows on `/tasks` (`teams.spec` covers the team pages).
 - `REGISTER_LIMIT_PER_HOUR` (default 10) exists only so the browser tests can sign up more
   accounts. It is in the table in `Backend/README.md`.
 
@@ -275,19 +285,22 @@ Gaps the Phase 9 builders reported. None loses data.
 
 ## 4. Backend items still open
 
-Found while checking the old lists against `Backend/Doc/` after Phase 9.
+Found while checking the old lists against `Backend/Doc/` after Phase 9, and while building
+Phase 10.
 
-- **The leaderboard returns profile images.** It is team-scoped now, but each of up to 20 rows
-  still carries the person's image (up to ~200 KB each).
-- **Reported messages have no "resolve" step.** A report stays on the admin list. A team message
-  can be deleted by an admin; a direct message only by its sender (`Backend/Doc/Chat.md`,
-  "List reported messages").
+- **Other lists still embed profile images.** The leaderboard links to `GET /users/:id/photo`
+  now, but these still carry the image inline: `GET /users`, `GET /users/:id`, `/users/search`,
+  `/users/chat-list`, the chat conversations list, the blocks list, leave requests, attendance
+  records, the notification actor, the Social Hub (post authors, commenters, the network, people
+  search, the publish queue), teams (members, invites, invite candidates) and the own account
+  payload (me, login, register). Moving them to `photoUrl` is the same change as the leaderboard
+  (`Backend/Doc/Users.md`, "Get a photo").
+- **The photo version is the account's `updatedAt`.** It changes whenever the account is saved
+  (for example at sign-in), which costs one extra image download; a field that changes only with
+  the photo would avoid it.
+- **The approvals Attendance count.** A `leave=false` filter on `GET /attendance` (or a queue
+  without leave days) would make the Attendance tab's count exact before every page is loaded.
 - **Response shapes still differ in places.**
-  - Some lists have no `count`: `GET /users/chat-list`, and `GET /users/search` with a short `q`.
-  - Social Hub posts return `approvedBy` as an id; tasks and attendance return
-    `{ _id, name, email }`.
-  - Like and publish answers repeat their result at the top level, "for older clients"
-    (`SocialHub.md`). Drop that when nothing uses it.
   - Other modules were not checked for the same kind of difference.
 
 ---
@@ -297,11 +310,11 @@ Found while checking the old lists against `Backend/Doc/` after Phase 9.
 **Done:** the Tasks page pages on the server (`GET /tasks` with `page`, `limit`, `q`; totals from
 `GET /tasks/summary`). The admin attendance records, leave and corrections, the admin user list,
 the contact inbox and the approvals queues page too. Chat, team chat and the Social Hub feed load
-50 at a time, with `before` and `beforeId`.
+50 at a time, with `before` and `beforeId`. The admin attendance page's person and team filters
+search as you type now, and `?user=` and `?team=` stay in the address (`attendanceAPI.listPeople`
+and `listTeams` are gone). The Approvals attendance and correction queues load 50 at a time.
 
 **Still unpaged:**
-- The admin attendance page's person and team filters load every active user and every team in
-  one request each (`attendanceAPI.listPeople` and `listTeams`).
 - The Tasks page refreshes the current page and the summary every 60 seconds and when the tab
   regains focus (`useTaskList.ts`). Fine at this size; a socket event would be lighter.
 
@@ -355,7 +368,66 @@ Accepted for now; listed so nobody mistakes them for bugs.
 
 ---
 
-## 7. Fixed in Phase 9
+## 7. Fixed in Phase 10
+
+Items from the Phase 9 version of this file that the Phase 10 docs or code show as fixed. The
+reference is where to see it. Nothing here was run against a live system.
+
+**Shell and chat**
+- Toasts were inert while a modal dialog was open → they move into the top modal dialog while one
+  is open, so their × works and screen readers announce them (`FeedbackContext.tsx`,
+  `components/shell/useTopModal.ts`).
+- The public pages' footer sat inside `<main>` → it is rendered once after `<main>` and is the
+  `contentinfo` landmark (`App.tsx`, `utils/appPaths.ts`).
+- Chat's unread request got 403 while a new password is required → chat makes no requests and
+  opens no socket then (`ChatContext.tsx`).
+- `/chat?user=<id>` failed for someone outside the latest 50 conversations → it reads older pages
+  of the conversations list to find the person, and otherwise says "You can't message this
+  person" (`ChatContext.tsx` `findConversation`, `ChatPage.tsx`).
+
+**Tasks and attendance**
+- The Tasks assignee filter showed "Selected person" → it shows the person's name
+  (`components/tasks/useSelectedAssignee.ts`).
+- A frozen team's task still offered Attach → non-admins get no Attach, file removal or comment
+  changes there, and the task says so; leaders of a frozen team get no New Task
+  (`components/tasks/taskRights.ts`).
+- The Approvals inbox loaded at most 200 attendance records and 100 corrections → the queues load
+  50 at a time and bulk review goes in batches of 100 (`components/admin/approvals/usePagedQueue.ts`,
+  `components/admin/useReview.ts`).
+- Times an admin typed into the attendance Add/Edit dialog used the browser's zone →
+  `GET /attendance/settings` returns `timezone`, and the admin Add/Edit dialog and the own page's
+  "today" use it (`Backend/Doc/Attendance.md`, "Settings"; `utils/date.ts`).
+- The admin attendance person and team filters loaded every user and team → they search as you
+  type (`components/attendance/Pickers.tsx`).
+
+**Social Hub and chat reports**
+- The composer had no field for links → links on posts, https only, up to 10
+  (`components/social/LinksField.tsx`, `PostLinks.tsx`).
+- The Moderation author filter listed only loaded authors → it searches people
+  (`components/social/PersonSearch.tsx`).
+- Reported messages had no resolve step → admins mark them as handled with an optional note and
+  reopen them: `PATCH /chat/reports/:messageId` and `GET /chat/reports?status=`
+  (`Backend/Doc/Chat.md`).
+- Response shapes differed between modules → `count` on `/users/chat-list` and short
+  `/users/search`; posts populate `approvedBy` as `{ _id, name }`; like and publish answer with
+  `data` only (`SocialHub.md`, `Users.md`).
+
+**Photos and tests**
+- The leaderboard returned each person's image → `GET /users/:id/photo` serves a profile photo as
+  an image, cached with an ETag, and the leaderboard gives `photoUrl` instead of the image
+  (`Users.md`, "Get a photo"; `Tasks.md`, "Leaderboard"). Other lists still embed images
+  (section 4).
+- The email flows, the leaderboard photo and the leader and frozen-team flows on `/tasks` had no
+  browser tests → the tests cover the email flows with a fake mail server in the e2e backend
+  (`Frontend/e2e/email.spec.ts`, `Backend/test/e2e-server.js`), the leaderboard photo
+  (`photos.spec.ts`) and the leader and frozen-team flows on `/tasks` (`tasks.spec.ts`).
+
+**Tooling**
+- `npm run lint` skips the Vite cache in `Frontend/.vite`.
+
+---
+
+## 8. Fixed in Phase 9
 
 Items from the Phase 8 version of this file that the Phase 9 docs or code show as fixed. The
 reference is where to see it. Nothing here was run against a live system.
@@ -371,7 +443,7 @@ reference is where to see it. Nothing here was run against a live system.
   ("Who may do what"). The task can still end up with nobody on it (`Teams.md`, "Remove a member
   or leader").
 - The leaderboard is global → non-admins see their own team; admins can pick a team ("Leaderboard").
-  The images are still open, in section 4.
+  The images were fixed in Phase 10 (section 7).
 
 **Attendance** (`Backend/Doc/Attendance.md`)
 - Check-in answers "Already checked in today" on a leave day → it names the case: "You asked for
@@ -435,8 +507,8 @@ reference is where to see it. Nothing here was run against a live system.
 - Register returns fewer fields than login → one account payload for register, login, the second
   sign-in step and `GET /auth/me` (`Users.md`, "The account payload").
 - `approvedBy` and `assigneeProgress[].user` aren't populated alike on tasks → one response shape,
-  with the references populated (`Tasks.md`, "One response shape"). Social Hub posts still differ
-  (section 4).
+  with the references populated (`Tasks.md`, "One response shape"). Social Hub posts were
+  aligned in Phase 10 (section 7).
 - `assigneeProgress[].notes` is never written → the note on "request completion" is stored there.
 - Contact form fields have no length limits → limits on every field (`Contact.md`).
 - Moving a contact message away from `resolved` keeps `resolvedBy` → it clears `resolvedBy` and
