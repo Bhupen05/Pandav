@@ -28,8 +28,29 @@ const messageReportSchema = new mongoose.Schema({
   },
 }, { _id: false });
 
+// An admin's decision that the reports on a message are dealt with. It belongs
+// to the message, not to one report: a new report removes it again (see
+// addReport in chatController.js). Not a model of its own.
+const reportResolutionSchema = new mongoose.Schema({
+  resolvedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+  },
+  resolvedAt: {
+    type: Date,
+    default: Date.now,
+  },
+  note: {
+    type: String,
+    trim: true,
+    maxlength: MAX_REPORT_REASON_LENGTH,
+    default: '',
+  },
+}, { _id: false });
+
 // The fields both message models add for reports (TeamChatMessage imports
-// them from here). Neither is ever sent to the people in the conversation
+// them from here). None is ever sent to the people in the conversation
 // (select: false): only admins see who reported what.
 export const reportFields = {
   reports: {
@@ -40,6 +61,12 @@ export const reportFields = {
   lastReportedAt: {
     type: Date,
     select: false,
+  },
+  // Set while the reports are marked as handled; absent while they are open
+  reportResolution: {
+    type: reportResolutionSchema,
+    select: false,
+    default: undefined,
   },
 };
 

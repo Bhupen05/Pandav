@@ -87,7 +87,7 @@ Fields as clients send and receive them. "Server-set" fields are ignored if sent
 | `visibility` | string | `public` (default), `team` or `connections`. See [Who sees a post](#who-sees-a-post) |
 | `targets` | object | `{ pandav, linkedin, github }` booleans, at least one `true`. Default `{ "pandav": true, "linkedin": false, "github": false }`. Fixed at creation. `pandav: false` keeps the post out of everyone else's feed |
 | `approvalStatus` | string | Server-set: `none`, `pending`, `approved` or `rejected` |
-| `approvedBy`, `approvedAt` | id, date | Server-set when the post is approved or rejected; cleared when an edit sends it back for approval |
+| `approvedBy`, `approvedAt` | user, date | Server-set when the post is approved or rejected; cleared when an edit sends it back for approval. `approvedBy` is populated as `{ _id, name }` (no email) wherever posts are returned. `null` while nobody has decided the post, and when the person who did is gone |
 | `moderationStatus` | string | Server-set: `clean` (default), `flagged`, `hidden` or `removed`. See [Moderation](#moderation) |
 | `moderationReason`, `moderatedBy`, `moderatedAt` | string, id, date | Server-set by moderation. `moderationReason` is trimmed, at most 500 characters |
 | `publishResults` | object | Server-set. One entry per target, `{ status, message, publishedAt }`, plus `externalId` and `publishingAt` for `linkedin` and `github`. `status` is `none`, `published` or `failed`. `publishingAt` is set while a request or job is publishing there (see [Publishing](#publishing)) |
@@ -1004,11 +1004,10 @@ Errors:
 
 A viewer of the post. No body.
 
-Adds the caller's like, or takes it back if it is already there. The result is under `data` and,
-for older clients, also at the top level.
+Adds the caller's like, or takes it back if it is already there.
 
 ```json
-{ "success": true, "data": { "liked": true, "likesCount": 4 }, "liked": true, "likesCount": 4 }
+{ "success": true, "data": { "liked": true, "likesCount": 4 } }
 ```
 
 Errors:
@@ -1094,8 +1093,7 @@ Body:
 
 Publishes to each target now with the author's linked accounts, stores the outcome in
 `publishResults` and returns it per target. The status is `200` with `success: true` even when a
-target fails; check `result.<target>.status`. A target not published has status `none`. The result
-is under `data` and, for older clients, also at the top level.
+target fails; check `result.<target>.status`. A target not published has status `none`.
 
 ```json
 {
@@ -1114,12 +1112,7 @@ is under `data` and, for older clients, also at the top level.
       }
     },
     "publishedAt": "2026-10-17T10:20:00.000Z"
-  },
-  "postId": "66a1b2c3d4e5f60718292002",
-  "approvalStatus": "approved",
-  "targets": { "pandav": false, "linkedin": false, "github": true },
-  "result": { "...": "as under data" },
-  "publishedAt": "2026-10-17T10:20:00.000Z"
+  }
 }
 ```
 
@@ -1539,7 +1532,7 @@ author. An approved post set to go to LinkedIn by itself goes now, during the re
 for its `publishAt`), with the author's account; the author's `post_approved` says so ("It is on
 LinkedIn now.", "It goes to LinkedIn on <date>.", or "It is being posted to LinkedIn." after a
 failure that will be retried). Nothing else is published. Returns the post populated like the feed
-(the author with `name` and `role`), with `viewer` and `queuedJobs`.
+(the author with `name` and `role`, the approver as `{ _id, name }`), with `viewer` and `queuedJobs`.
 
 ```json
 {
@@ -1550,7 +1543,7 @@ failure that will be retried). Nothing else is published. Returns the post popul
     "content": "Version 2.4 is live.",
     "targets": { "pandav": true, "linkedin": false, "github": true },
     "approvalStatus": "approved",
-    "approvedBy": "66a1b2c3d4e5f60718290002",
+    "approvedBy": { "_id": "66a1b2c3d4e5f60718290002", "name": "Lee Leader" },
     "approvedAt": "2026-10-17T10:15:00.000Z",
     "viewer": { "canApprove": false, "canPublish": true, "canEdit": false, "canDelete": false }
   }
@@ -1580,7 +1573,8 @@ Query:
 | `owner` | Optional author id. Ignored if it isn't a valid id |
 
 Returns at most 200 posts of any visibility and status, newest first, with `author` populated as
-`{ _id, name, email, role, profileImage }` and `moderatedBy` as `{ _id, name, email, role }`.
+`{ _id, name, email, role, profileImage }`, `moderatedBy` as `{ _id, name, email, role }` and `approvedBy` as
+`{ _id, name }`.
 
 ```json
 {
@@ -1617,7 +1611,7 @@ Body:
 
 Moves the post to its new state if the action applies to its current one (see
 [Moderation](#moderation)), and tells the author except for `unflag`. Returns the post with
-`author` populated as `{ _id, name, role, profileImage }`.
+`author` populated as `{ _id, name, role, profileImage }` and `approvedBy` as `{ _id, name }`.
 
 ```json
 {

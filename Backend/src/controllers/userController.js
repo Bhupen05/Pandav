@@ -132,7 +132,7 @@ export const searchUsers = async (req, res) => {
     const { q } = req.query;
 
     if (typeof q !== 'string' || q.trim().length < 2) {
-      return res.json({ success: true, data: [] });
+      return res.json({ success: true, count: 0, data: [] });
     }
 
     // Matched as plain text, not as a regular expression. Only admins see
@@ -171,7 +171,7 @@ export const getChatUsers = async (req, res) => {
     })
       .select('_id name email role department profileImage')
       .sort({ name: 1 });
-    res.json({ success: true, data: users });
+    res.json({ success: true, count: users.length, data: users });
   } catch (error) {
     sendServerError(res, error);
   }

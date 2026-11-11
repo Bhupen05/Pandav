@@ -45,6 +45,9 @@ export type Provider = 'linkedin' | 'github'
 
 export type ModerationAction = 'flag' | 'unflag' | 'hide' | 'unhide' | 'remove' | 'restore'
 
+// Which reported chat messages to list: those nobody has dealt with, those an admin marked as handled, or both
+export type ReportStatus = 'open' | 'resolved' | 'all'
+
 export const socialV2API = {
   // Newest posts first. Pass the `next` cursor of the previous page
   // ({ before, beforeId }) to load the posts before it.
@@ -130,6 +133,10 @@ export const socialV2API = {
   processDuePublishJobs: async (limit = 10) =>
     (await api.post('/social/publish-jobs/process-due', null, { params: { limit } })).data,
 
+  // Finds people by name (admins: by name or email too); needs 2 characters
+  searchPeople: async (q: string, signal?: AbortSignal) =>
+    (await api.get('/users/search', { params: { q }, signal })).data,
+
   getModerationPosts: async (status = 'all', owner?: string) =>
     (await api.get('/social/moderation/posts', { params: { status, owner: owner || undefined } })).data,
   // Leaving `reason` out clears the earlier reason
@@ -138,8 +145,11 @@ export const socialV2API = {
 
   // Reported chat messages, for the Moderation page (admins). Pass the last
   // row's lastReportedAt and _id to load the next page.
-  getReportedMessages: async (cursor?: { before: string; beforeId: string }) =>
-    (await api.get('/chat/reports', { params: cursor ?? {} })).data,
+  getReportedMessages: async (status: ReportStatus = 'open', cursor?: { before: string; beforeId: string }) =>
+    (await api.get('/chat/reports', { params: { status, ...cursor } })).data,
+  // Marks a reported message's reports as handled, or opens them again
+  resolveReportedMessage: async (messageId: string, action: 'resolve' | 'reopen', note?: string) =>
+    (await api.patch(`/chat/reports/${messageId}`, note ? { action, note } : { action })).data,
   deleteTeamMessage: async (teamId: string, messageId: string) =>
     (await api.delete(`/chat/teams/${teamId}/messages/${messageId}`)).data,
 }

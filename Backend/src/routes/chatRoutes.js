@@ -10,6 +10,7 @@ import {
   deleteMessage,
   reportMessage,
   getReportedMessages,
+  resolveReportedMessage,
   sendTeamMessage,
   getTeamMessages,
   editTeamMessage,
@@ -43,6 +44,7 @@ router.post('/blocks', protect, blockUser);
 router.delete('/blocks/:userId', protect, unblockUser);
 
 router.get('/reports', protect, authorize('admin'), getReportedMessages);
+router.patch('/reports/:messageId', protect, authorize('admin'), resolveReportedMessage);
 
 router.post('/teams/:teamId/send', protect, sendTeamMessage);
 router.get('/teams/:teamId/messages', protect, getTeamMessages);

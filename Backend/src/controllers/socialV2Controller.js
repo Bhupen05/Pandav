@@ -39,6 +39,8 @@ const participants = [
 const authorPopulate = { path: 'author', select: 'name role profileImage teamId', match: { deletedAt: null } };
 const sourceTaskPopulate = { path: 'sourceTask', select: 'title status completedAt' };
 const commenterPopulate = { path: 'comments.user', select: 'name profileImage' };
+// Who approved or rejected the post, as tasks show their approver (no email)
+const approverPopulate = { path: 'approvedBy', select: 'name' };
 // What the app needs to show a post's images; GET /images/:imageId has the bytes
 const imagePopulate = { path: 'images', select: 'type width height altText' };
 
@@ -982,7 +984,8 @@ const findPostForView = (postId) =>
     .populate(authorPopulate)
     .populate(sourceTaskPopulate)
     .populate(commenterPopulate)
-    .populate(imagePopulate);
+    .populate(imagePopulate)
+    .populate(approverPopulate);
 
 // Who is asked to approve an author's LinkedIn/GitHub post: the active
 // leaders of the author's team, unless it is frozen or has none; otherwise
@@ -1278,6 +1281,7 @@ export const getFeed = async (req, res) => {
         .populate(sourceTaskPopulate)
         .populate(commenterPopulate)
         .populate(imagePopulate)
+        .populate(approverPopulate)
         .sort({ createdAt: -1, _id: -1 })
         .limit(FEED_PAGE_SIZE + 1),
       viewerContext(req.user),
@@ -1324,6 +1328,7 @@ export const getMyPosts = async (req, res) => {
         .populate(sourceTaskPopulate)
         .populate(commenterPopulate)
         .populate(imagePopulate)
+        .populate(approverPopulate)
         .sort({ createdAt: -1 }),
       viewerContext(req.user),
     ]);
@@ -1350,6 +1355,7 @@ export const getPendingApprovalPosts = async (req, res) => {
         .populate(authorPopulate)
         .populate(sourceTaskPopulate)
         .populate(imagePopulate)
+        .populate(approverPopulate)
         .sort({ createdAt: -1 })
         .limit(200),
       viewerContext(req.user),
@@ -1519,9 +1525,7 @@ export const toggleLike = async (req, res) => {
       );
     }
 
-    const data = { liked, likesCount: updated?.likes.length ?? 0 };
-    // `liked` and `likesCount` are also at the top level, as before
-    return res.json({ success: true, data, ...data });
+    return res.json({ success: true, data: { liked, likesCount: updated?.likes.length ?? 0 } });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -2585,8 +2589,7 @@ export const publishPostToTargets = async (req, res) => {
       result,
       publishedAt: toIso(now),
     };
-    // The same fields are also at the top level, as before
-    return res.json({ success: true, data, ...data });
+    return res.json({ success: true, data });
   } catch (error) {
     return sendServerError(res, error);
   }
@@ -2987,6 +2990,7 @@ export const getModerationPosts = async (req, res) => {
     const posts = await SocialPost.find(filter)
       .populate('author', 'name email role profileImage')
       .populate('moderatedBy', 'name email role')
+      .populate(approverPopulate)
       .sort({ createdAt: -1 })
       .limit(200);
 
@@ -3050,7 +3054,7 @@ export const moderatePost = async (req, res) => {
       });
     }
 
-    await post.populate('author', 'name role profileImage');
+    await post.populate([{ path: 'author', select: 'name role profileImage' }, approverPopulate]);
     return res.json({ success: true, data: post });
   } catch (error) {
     return sendServerError(res, error);

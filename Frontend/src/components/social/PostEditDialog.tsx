@@ -1,6 +1,8 @@
 import { useId, useState, type FormEvent } from 'react'
 import { socialV2API } from '../../api/socialV2API'
 import { errorText } from './format'
+import { linksToSend, sameLinks } from './links'
+import LinksField from './LinksField'
 import { LINKEDIN_TEXT_MAX, linkedInText } from './linkedin'
 import Modal from './Modal'
 import { CONTENT_MAX, TAG_MAX, TAGS_MAX, TITLE_MAX, parseTags } from './postForm'
@@ -10,7 +12,7 @@ import type { SocialPost, Visibility } from './types'
 
 const sameTags = (a: string[], b: string[]) => a.length === b.length && a.every((tag, index) => tag === b[index])
 
-// Where the post is edited: its title, text, tags and who sees it. Where it is
+// Where the post is edited: its title, text, tags, links and who sees it. Where it is
 // posted can't change. The result is shown here (toasts sit behind a dialog).
 export default function PostEditDialog({
   post,
@@ -31,6 +33,8 @@ export default function PostEditDialog({
   const [content, setContent] = useState(post.content)
   const [visibility, setVisibility] = useState<Visibility>(post.visibility)
   const [tagsText, setTagsText] = useState((post.tags ?? []).join(', '))
+  const [links, setLinks] = useState<string[]>(post.mediaUrls ?? [])
+  const [linkDraft, setLinkDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -50,6 +54,8 @@ export default function PostEditDialog({
     if (!text) return setError('Write something to post.')
     if (tagError) return setError(tagError)
     if (liOver) return setError(`It is too long for LinkedIn: ${liText.length} of ${LINKEDIN_TEXT_MAX} characters, with the title and tags.`)
+    const { links: nextLinks, error: linkError } = linksToSend(links, linkDraft)
+    if (linkError) return setError(linkError)
 
     // Only what changed is sent
     const changes: Record<string, unknown> = {}
@@ -57,6 +63,7 @@ export default function PostEditDialog({
     if (text !== post.content) changes.content = text
     if (visibility !== post.visibility) changes.visibility = visibility
     if (!sameTags(tags, post.tags ?? [])) changes.tags = tags
+    if (!sameLinks(nextLinks, post.mediaUrls ?? [])) changes.mediaUrls = nextLinks
     if (Object.keys(changes).length === 0) return onClose()
 
     setError('')
@@ -100,6 +107,8 @@ export default function PostEditDialog({
           <input id={`${id}-tags`} value={tagsText} onChange={(event) => setTagsText(event.target.value)} aria-describedby={`${id}-tags-hint`} className={inputClass} />
           <p id={`${id}-tags-hint`} className={hintClass}>Separate tags with commas: up to {TAGS_MAX}, each up to {TAG_MAX} characters.</p>
         </div>
+
+        <LinksField links={links} onLinksChange={setLinks} draft={linkDraft} onDraftChange={setLinkDraft} disabled={saving} />
 
         <div>
           <label htmlFor={`${id}-visibility`} className={labelClass}>Who can see it in Pandav</label>

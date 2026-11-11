@@ -19,10 +19,12 @@ import {
 import { useResource, useShowMore } from './hooks'
 import ModerationDialog from './ModerationDialog'
 import { moderationActionInfo, moderationActionsFor } from './moderation'
+import PersonSearch, { type PickedPerson } from './PersonSearch'
+import PostLinks from './PostLinks'
 import { mergePost, authorOf } from './postState'
 import { Avatar, Badge, EmptyState, ErrorState, LoadingState, SectionCard, ShowMore } from './ui'
 import { dangerButton, inputClass, labelClass, linkButton, secondaryButton, smallButton } from './styles'
-import type { ModerationStatus, Person, SocialPost } from './types'
+import type { ModerationStatus, SocialPost } from './types'
 
 const STATUS_FILTERS: Array<['all' | ModerationStatus, string]> = [
   ['all', 'All posts'],
@@ -69,6 +71,8 @@ function PostRow({
         </button>
       ) : null}
 
+      <PostLinks links={post.mediaUrls} />
+
       <div className="mt-3 flex flex-wrap gap-2">
         <Badge className={tone.info}>{visibilityLabel[post.visibility]}</Badge>
         {post.approvalStatus !== 'none' ? <Badge className={approvalTone[post.approvalStatus]}>{approvalLabel[post.approvalStatus]}</Badge> : null}
@@ -114,32 +118,18 @@ export default function ModerationPosts() {
   const { notify } = useFeedback()
   const id = useId()
   const [status, setStatus] = useState<'all' | ModerationStatus>('all')
-  const [owner, setOwner] = useState('')
-  // Authors seen so far, so the author filter keeps its choices while it filters
-  const [authors, setAuthors] = useState<Record<string, Person>>({})
+  // Whose posts to show, found with the person search
+  const [owner, setOwner] = useState<PickedPerson | null>(null)
   const [acting, setActing] = useState<{ post: SocialPost; action: ModerationAction } | null>(null)
   const { limit, initial, more, less } = useShowMore(6)
 
   const posts = useResource<SocialPost[]>(
-    async () => {
-      const list = listOf<SocialPost>((await socialV2API.getModerationPosts(status, owner))?.data)
-      setAuthors((current) => {
-        const next = { ...current }
-        for (const post of list) {
-          const author = personOf(post.author)
-          if (author) next[author._id] = author
-        }
-        return next
-      })
-      return list
-    },
+    async () => listOf<SocialPost>((await socialV2API.getModerationPosts(status, owner?.id))?.data),
     'Couldn’t load the posts.',
     [],
-    { key: `${status}|${owner}` },
+    { key: `${status}|${owner?.id ?? ''}` },
   )
   const { setData } = posts
-
-  const authorList = Object.values(authors).sort((a, b) => a.name.localeCompare(b.name))
 
   // The post as the server has it after the action. A filtered list drops a
   // post that no longer matches.
@@ -172,20 +162,14 @@ export default function ModerationPosts() {
             ))}
           </select>
         </div>
-        <div>
-          <label htmlFor={`${id}-author`} className={labelClass}>Author</label>
-          <select id={`${id}-author`} value={owner} onChange={(event) => setOwner(event.target.value)} className={inputClass}>
-            <option value="">Everyone</option>
-            {authorList.map((author) => (
-              <option key={author._id} value={author._id}>{author.name}</option>
-            ))}
-          </select>
-        </div>
+        <PersonSearch label="Author" value={owner} onChange={setOwner} self={user} />
       </div>
 
       {posts.error ? <div className="mb-4"><ErrorState message={posts.error} onRetry={() => void posts.reload()} retrying={posts.loading} /></div> : null}
       {!posts.loaded && posts.loading ? <LoadingState label="Loading posts…" /> : null}
-      {posts.loaded && posts.data.length === 0 ? <EmptyState>No posts match these filters.</EmptyState> : null}
+      {posts.loaded && posts.data.length === 0 ? (
+        <EmptyState>{owner ? `No posts by ${owner.name} match these filters.` : 'No posts match these filters.'}</EmptyState>
+      ) : null}
 
       <ul aria-busy={posts.loading || undefined} className={`space-y-3 transition-opacity ${posts.loading && posts.loaded ? "opacity-60" : ""}`}>
         {posts.data.slice(0, limit).map((post) => (

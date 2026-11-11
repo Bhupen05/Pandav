@@ -146,7 +146,7 @@ test('publishing once, and the publishing queue', async (t) => {
   const p1 = await post(lee, { content: 'P9 release', targets: { github: true } });
   const first = await call('POST', `/social/posts/${p1._id}/publish`, { token: lee.token, body: { githubRepo: 'acme/site' } });
   await check('a leader publishes to GitHub', first.status === 200 && first.data.data?.result.github.status === 'published', JSON.stringify(first.data).slice(0, 300));
-  await check('the result is under data and, as before, at the top level', first.data.result?.github.status === 'published');
+  await check('the result is only under data', first.data.result === undefined && first.data.postId === undefined && first.data.data.postId === p1._id);
   const issuesAfterFirst = issueCalls().length;
   const second = await call('POST', `/social/posts/${p1._id}/publish`, { token: lee.token, body: { githubRepo: 'acme/site' } });
   await check('publishing it again is refused, naming GitHub', second.status === 409 && /GitHub/.test(second.data.message), JSON.stringify(second.data));
@@ -335,7 +335,7 @@ test('the feed shows only what it should', async (t) => {
   await check('the feed does not hand out authors\' emails', feedAuthor && !('email' in feedAuthor), JSON.stringify(feedAuthor));
 
   const like = await call('POST', `/social/posts/${shown._id}/like`, { token: oz.token });
-  await check('a like answers under data', like.data.data?.liked === true && like.data.data.likesCount === 1, JSON.stringify(like.data));
+  await check('a like answers under data, and only there', like.data.data?.liked === true && like.data.data.likesCount === 1 && like.data.liked === undefined && like.data.likesCount === undefined, JSON.stringify(like.data));
 });
 
 test('approvals: the queue, the answer, and the task that follows', async (t) => {
@@ -371,8 +371,16 @@ test('approvals: the queue, the answer, and the task that follows', async (t) =>
   await check('until then only its author sees the shared post in the feed', (await inFeed(mia)) && !(await inFeed(people.ned)));
   const approved = await call('PATCH', `/social/posts/${sharedId}/approve`, { token: lee.token, body: { action: 'approved' } });
   await check('once approved, everyone does', await inFeed(people.ned));
+  await check('the approver is named, without an email', approved.data.data.approvedBy?._id === lee._id && approved.data.data.approvedBy.name === 'Lee Leader' && !('email' in approved.data.data.approvedBy) && approved.data.data.approvedAt, JSON.stringify(approved.data.data.approvedBy));
   await check('approving answers with the author and her role',
     approved.status === 200 && approved.data.data.author?.role === 'team_member' && approved.data.data.author.name === 'Mia Member', JSON.stringify(approved.data).slice(0, 300));
+  const approver = (list) => list.data.data.find((p) => p._id === sharedId)?.approvedBy;
+  await check('every list names the approver the same way',
+    approver(await call('GET', '/social/feed', { token: people.ned.token }))?.name === 'Lee Leader' &&
+    approver(await call('GET', '/social/posts/me', { token: mia.token }))?.name === 'Lee Leader' &&
+    approver(await call('GET', '/social/moderation/posts', { token: adminToken }))?._id === lee._id &&
+    (await call('GET', `/social/posts/${sharedId}`, { token: oz.token })).data.data.approvedBy?.name === 'Lee Leader');
+  await check('a post nobody decided has no approver', !leeQueue.data.data.some((p) => p.approvedBy));
   // She asked for LinkedIn when she shared it: approving sends it there
   await check('approving sends it to LinkedIn', approved.data.data.publishResults?.linkedin?.status === 'published'
     && linkedInPosts().at(-1)?.auth === 'Bearer mia-li', JSON.stringify(approved.data.data.publishResults));
@@ -397,7 +405,7 @@ test('approvals: the queue, the answer, and the task that follows', async (t) =>
   await check('once none remains, it can', sharedOnceMore.status === 201 && (await taskStatus()) === 'published', JSON.stringify(sharedOnceMore.data));
 
   const rejected = await call('PATCH', `/social/posts/${ozPost._id}/approve`, { token: adminToken, body: { action: 'rejected' } });
-  await check('an admin rejects the outsider\'s post', rejected.status === 200 && rejected.data.data.approvalStatus === 'rejected');
+  await check('an admin rejects the outsider\'s post', rejected.status === 200 && rejected.data.data.approvalStatus === 'rejected' && rejected.data.data.approvedBy?.name === 'Admin User');
   await check('who is told', (await notificationsFor(oz, 'post_rejected')).some((n) => n.data.postId === ozPost._id));
   const twice = await call('PATCH', `/social/posts/${ozPost._id}/approve`, { token: adminToken, body: { action: 'approved' } });
   await check('it cannot be decided twice', twice.status === 409 && /already been rejected/.test(twice.data.message), JSON.stringify(twice.data));
