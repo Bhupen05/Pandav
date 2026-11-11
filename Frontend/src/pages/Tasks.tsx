@@ -13,6 +13,7 @@ import { useTaskActions } from '../components/tasks/useTaskActions'
 import { PAGE_SIZES, SORT_OPTIONS, useTaskFilters } from '../components/tasks/useTaskFilters'
 import { useTaskList } from '../components/tasks/useTaskList'
 import { usePeopleLoader } from '../components/tasks/usePeopleLoader'
+import { useSelectedAssignee } from '../components/tasks/useSelectedAssignee'
 import { useViewer } from '../components/tasks/useViewer'
 import { TASK_PRIORITIES, TASK_STATUSES, type AssigneeOption, type Task, type TaskStatus } from '../components/tasks/types'
 
@@ -36,7 +37,9 @@ export default function Tasks() {
   const { query, taskId, activeCount, setFilters, clearFilters, openTask, closeTask } = useTaskFilters()
   const list = useTaskList(query)
   const { reload } = list
-  const canCreateTasks = isAdmin || viewer.isLeader
+  // A leader of a frozen team can't give it tasks (the server refuses)
+  const teamFrozen = viewer.isLeader && viewer.ledTeam?.isActive === false
+  const canCreateTasks = isAdmin || (viewer.isLeader && !teamFrozen)
   const loadPeople = usePeopleLoader(isAdmin)
 
   const searchId = useId()
@@ -79,6 +82,7 @@ export default function Tasks() {
 
   // Deleting the last task of the last page leaves that page empty: go back one
   const { paging, tasks, loading, refreshing } = list
+  const selectedAssignee = useSelectedAssignee(query.assignedTo, pickedAssignee, { isAdmin, loadPeople, tasks })
   useEffect(() => {
     if (!loading && !refreshing && paging && tasks.length === 0 && paging.total > 0 && query.page > paging.pages) {
       setFilters({ page: String(paging.pages) })
@@ -280,11 +284,7 @@ export default function Tasks() {
                     id={assigneeId}
                     labelId={assigneeLabelId}
                     single
-                    value={
-                      query.assignedTo
-                        ? [pickedAssignee?._id === query.assignedTo ? pickedAssignee : { _id: query.assignedTo, name: 'Selected person' }]
-                        : []
-                    }
+                    value={selectedAssignee ? [selectedAssignee] : []}
                     onChange={(next) => {
                       setPickedAssignee(next[0] ?? null)
                       setFilters({ assignedTo: next[0]?._id })
@@ -318,6 +318,12 @@ export default function Tasks() {
             </div>
           )}
         </div>
+
+        {teamFrozen && (
+          <p role="note" className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
+            This team is frozen. Only an admin can change it.
+          </p>
+        )}
 
         {/* Status filter pills, with counts */}
         <div role="group" aria-label="Filter by status" className="-mx-4 mb-6 flex gap-2 overflow-x-auto px-4 pb-1 sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0">

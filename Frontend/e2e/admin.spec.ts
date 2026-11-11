@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext, type Browser } from '@playwright/test'
-import { ADMIN, USER, signIn, type Account } from './support/app'
+import { ADMIN, USER, registerAccount, signIn, type Account } from './support/app'
 
 const signedInPage = async (browser: Browser, account: Account) => {
   const page = await (await browser.newContext()).newPage()
@@ -178,6 +178,55 @@ test('the approvals inbox approves a task its assignee asked to have reviewed', 
   expect(task.data.status).toBe('completed')
 
   await user.context().close()
+  await admin.context().close()
+})
+
+// More than two pages of pending attendance (50 a page): the tab counts the whole queue, "Load more"
+// brings the rest, and select-all with a bulk approve works on everything loaded, though one bulk
+// request takes at most 100 records
+test('the approvals inbox pages the attendance queue with Load more, and bulk-approves what is loaded', async ({ browser, request }) => {
+  test.setTimeout(120_000)
+  // Signing up may start a session of its own, so the admin signs in after it
+  const subject = await registerAccount(request, 'Queue')
+  expect((await request.post('/api/v2/auth/login', { data: { email: ADMIN.email, password: ADMIN.password } })).status()).toBe(200)
+  // 120 days of waiting attendance for one person
+  for (let ago = 60; ago < 180; ago++) {
+    const created = await request.post('/api/v2/attendance', {
+      data: { user: subject.id, date: dateInput(-ago), status: 'present', approvalStatus: 'pending', remarks: 'Waiting in the queue' },
+    })
+    expect(created.status(), `record ${ago}`).toBe(201)
+  }
+  // What the inbox should count: the queue's total, without the days that belong to a leave request
+  const queue = await (await request.get('/api/v2/attendance?approvalStatus=pending&reviewable=true&page=1&limit=200')).json()
+  const waiting = (queue.data as Array<{ leaveRequestId?: string | null }>).filter((row) => !row.leaveRequestId).length
+  expect(waiting).toBeGreaterThanOrEqual(120)
+  expect(queue.pagination.total).toBeLessThanOrEqual(200)
+
+  const admin = await signedInPage(browser, ADMIN)
+  await admin.goto('/approvals?tab=attendance')
+  await expect(admin.getByRole('tab', { name: /^Attendance/ })).toContainText(String(waiting))
+  const items = admin.getByRole('tabpanel').getByRole('listitem')
+  await expect(items).toHaveCount(50)
+  await expect(admin.getByText(`Showing 50 of ${waiting} records`)).toBeVisible()
+  // Select all means the ones loaded, while more are waiting to load
+  await expect(admin.getByLabel('Select all 50 loaded records')).toBeVisible()
+
+  await admin.getByRole('button', { name: 'Load more' }).click()
+  await expect(items).toHaveCount(100)
+  await expect(admin.getByText(`Showing 100 of ${waiting} records`)).toBeVisible()
+  await admin.getByRole('button', { name: 'Load more' }).click()
+  await expect(items).toHaveCount(waiting)
+  await expect(admin.getByRole('button', { name: 'Load more' })).toHaveCount(0)
+
+  await admin.getByLabel(`Select all ${waiting} records`).check()
+  await admin.getByRole('button', { name: 'Approve selected' }).click()
+  await admin.getByRole('dialog', { name: `Approve ${waiting} records?` }).getByRole('button', { name: 'Approve' }).click()
+  await expect(admin.getByRole('status').filter({ hasText: /approved/ })).toBeVisible()
+
+  // Everything of this person's is approved now, though no single request took them all
+  await expect(admin.getByRole('listitem').filter({ hasText: subject.name })).toHaveCount(0)
+  const after = await (await request.get(`/api/v2/attendance?user=${subject.id}&approvalStatus=pending&page=1&limit=1`)).json()
+  expect(after.pagination.total).toBe(0)
   await admin.context().close()
 })
 

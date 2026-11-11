@@ -6,6 +6,9 @@ import { errorText, formatDay } from './format'
 
 export type ReviewArea = 'tasks' | 'attendance' | 'leave' | 'corrections' | 'posts'
 
+// The server reviews at most this many records in one bulk request (Backend/Doc/Attendance.md)
+const BULK_ATTENDANCE_MAX = 100
+
 const POST_TARGETS = (post: SocialPostRow) => (post.title || post.content || 'this post').slice(0, 60)
 
 // Approving and rejecting, in one place for the dashboard and the approvals
@@ -136,11 +139,19 @@ export function useReview(onDone: (area: ReviewArea) => void) {
       return false
     }
     const done = await run('bulk:attendance', async () => {
+      // Everything loaded can be selected, which may be more than one request takes
+      const results: BulkResult[] = []
+      const verb = action === 'approve' ? 'approved' : 'rejected'
       try {
-        const response = await adminAPI.bulkReviewAttendance(ids, action, reason?.trim() || undefined)
-        reportBulk(response.data.results, action === 'approve' ? 'approved' : 'rejected', 'record')
+        for (let start = 0; start < ids.length; start += BULK_ATTENDANCE_MAX) {
+          const response = await adminAPI.bulkReviewAttendance(ids.slice(start, start + BULK_ATTENDANCE_MAX), action, reason?.trim() || undefined)
+          results.push(...response.data.results)
+        }
+        reportBulk(results, verb, 'record')
         return true
       } catch (error) {
+        // The batches before the failing one went through: say so
+        if (results.length > 0) reportBulk(results, verb, 'record')
         notify(errorText(error, 'Could not review the records'), 'error')
         return false
       }

@@ -14,7 +14,7 @@ import {
   personName,
   repeatLabel,
 } from './taskFormat'
-import { canAttachFiles, canManageTask, canReviewTask, canTickChecklist, isOpenTask, type Viewer } from './taskRights'
+import { canAttachFiles, canChangeDiscussion, canManageTask, canReviewTask, canTickChecklist, isFrozenFor, isOpenTask, type Viewer } from './taskRights'
 import type { Task } from './types'
 import { InlineError, PriorityBadge, Spinner, StatusBadge } from './ui'
 import { useTaskActions } from './useTaskActions'
@@ -119,6 +119,9 @@ export default function TaskDetail({ taskId, viewer, refreshKey, onClose, onEdit
   const showStart = task ? canStart(task, viewer.id) : false
   const showRequest = task ? canRequestCompletion(task, viewer.id) : false
   const onIt = task ? isAssignee(task, viewer.id) : false
+  // A frozen team's task is closed to everyone but admins, apart from the assignees' own work
+  const frozen = task ? isFrozenFor(task, viewer) : false
+  const discussionOpen = task ? canChangeDiscussion(task, viewer) : true
   const teamName = task?.team ? viewer.teamNames[String(task.team)] || 'A team task' : 'No team'
 
   const progress: AssigneeProgress[] | undefined = task?.assigneeProgress
@@ -181,6 +184,11 @@ export default function TaskDetail({ taskId, viewer, refreshKey, onClose, onEdit
           <InlineError title="This task didn't open" message={error} onRetry={() => load()} />
         ) : task ? (
           <>
+            {frozen && (
+              <div role="note" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                This team is frozen. Only an admin can change it.
+              </div>
+            )}
             {task.rejectionReason && (
               <div role="note" className="rounded-xl border border-red-200 bg-red-50 p-4">
                 <p className="text-sm font-semibold text-red-900">Sent back for more work</p>
@@ -369,6 +377,7 @@ export default function TaskDetail({ taskId, viewer, refreshKey, onClose, onEdit
               taskId={task._id}
               viewerId={viewer.id}
               canAttach={canAttachFiles(task, viewer)}
+              canRemove={discussionOpen}
               canModerate={manager || viewer.isAdmin}
               report={report}
               onActivity={refreshQuietly}
@@ -377,6 +386,7 @@ export default function TaskDetail({ taskId, viewer, refreshKey, onClose, onEdit
             <TaskComments
               taskId={task._id}
               viewerId={viewer.id}
+              canWrite={discussionOpen}
               canModerate={manager || viewer.isAdmin}
               report={report}
               onActivity={refreshQuietly}

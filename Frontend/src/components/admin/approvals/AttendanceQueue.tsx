@@ -1,12 +1,12 @@
-import type { AttendanceRow, ListResponse } from '../../../api/adminAPI'
+import type { AttendanceRow } from '../../../api/adminAPI'
 import { Badge, Loadable } from '../ui'
 import { formatDay, formatHours, formatTime } from '../format'
 import { dayTypeLabel, dayTypeTone } from '../labels'
 import { BTN } from '../buttons'
 import type { useReview } from '../useReview'
-import type { useResource } from '../useResource'
-import { BulkBar, Meta, QueueItem } from './parts'
+import { BulkBar, LoadMore, Meta, QueueItem } from './parts'
 import { reviewableRecords, useSelection } from './helpers'
+import type { PagedQueue } from './usePagedQueue'
 
 type Review = ReturnType<typeof useReview>
 
@@ -14,7 +14,7 @@ export function AttendanceQueue({
   resource,
   review,
 }: {
-  resource: ReturnType<typeof useResource<ListResponse<AttendanceRow>>>
+  resource: PagedQueue<AttendanceRow>
   review: Review
 }) {
   const rows = reviewableRecords(resource.data)
@@ -35,6 +35,7 @@ export function AttendanceQueue({
           <BulkBar
             noun="records"
             total={rows.length}
+            partial={resource.hasMore}
             selection={selection}
             busy={review.isBusy('bulk:attendance')}
             onApprove={(ids) => review.bulkAttendance(ids, 'approve').then((done) => done && selection.clear())}
@@ -82,9 +83,15 @@ export function AttendanceQueue({
               )
             })}
           </ul>
-          {data.pagination && data.pagination.total > data.data.length && (
-            <p className="mt-3 text-xs text-neutral-500">Showing the first {data.data.length} of {data.pagination.total}. Review these and the rest appear.</p>
-          )}
+          <LoadMore
+            noun="records"
+            shown={data.data.length}
+            pagination={data.pagination}
+            hasMore={resource.hasMore}
+            loading={resource.loadingMore}
+            error={resource.moreError}
+            onLoadMore={resource.loadMore}
+          />
         </>
       )}
     </Loadable>

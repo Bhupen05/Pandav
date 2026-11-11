@@ -9,7 +9,8 @@ import { useResource } from '../components/admin/useResource'
 import { useReview, type ReviewArea } from '../components/admin/useReview'
 import { TaskQueue } from '../components/admin/approvals/TaskQueue'
 import { AttendanceQueue } from '../components/admin/approvals/AttendanceQueue'
-import { reviewableRecords } from '../components/admin/approvals/helpers'
+import { attendanceWaiting } from '../components/admin/approvals/helpers'
+import { usePagedQueue } from '../components/admin/approvals/usePagedQueue'
 import { LeaveQueue } from '../components/admin/approvals/LeaveQueue'
 import { CorrectionQueue } from '../components/admin/approvals/CorrectionQueue'
 import { PostQueue } from '../components/admin/approvals/PostQueue'
@@ -17,6 +18,8 @@ import { PostQueue } from '../components/admin/approvals/PostQueue'
 type Tab = ReviewArea
 const TAB_KEYS: Tab[] = ['tasks', 'attendance', 'leave', 'corrections', 'posts']
 const TASK_PAGE = 20
+// Attendance records and corrections load this many at a time ("Load more" adds the next page)
+const QUEUE_PAGE = 50
 
 // Team leaders and admins: everything waiting for their decision in one place.
 // Anyone else is sent to their own home.
@@ -44,12 +47,18 @@ function Inbox({ home }: { home: string }) {
 
   // Each list loads on its own, so one failing leaves the others usable
   const tasks = useResource(useCallback((signal: AbortSignal) => adminAPI.getTasksToReview({ page: taskPage, limit: TASK_PAGE }, { signal }), [taskPage]))
-  const attendance = useResource(
-    useCallback((signal: AbortSignal) => adminAPI.getAttendance({ approvalStatus: 'pending', reviewable: true, page: 1, limit: 200 }, { signal }), []),
+  const attendance = usePagedQueue(
+    useCallback(
+      (page: number, signal: AbortSignal) => adminAPI.getAttendance({ approvalStatus: 'pending', reviewable: true, page, limit: QUEUE_PAGE }, { signal }),
+      [],
+    ),
   )
   const leave = useResource(useCallback((signal: AbortSignal) => adminAPI.getLeaveRequests({ status: 'pending', page: 1, limit: 100 }, { signal }), []))
-  const corrections = useResource(
-    useCallback((signal: AbortSignal) => adminAPI.getAttendance({ hasCorrection: true, reviewable: true, page: 1, limit: 100 }, { signal }), []),
+  const corrections = usePagedQueue(
+    useCallback(
+      (page: number, signal: AbortSignal) => adminAPI.getAttendance({ hasCorrection: true, reviewable: true, page, limit: QUEUE_PAGE }, { signal }),
+      [],
+    ),
   )
   const posts = useResource(useCallback((signal: AbortSignal) => adminAPI.getPostsToApprove({ signal }), []))
 
@@ -77,9 +86,9 @@ function Inbox({ home }: { home: string }) {
 
   const counts: Record<Tab, number | null> = {
     tasks: tasks.data ? tasks.data.pagination?.total ?? tasks.data.data.length : null,
-    attendance: attendance.data ? reviewableRecords(attendance.data).length : null,
+    attendance: attendanceWaiting(attendance.data),
     leave: leave.data ? leave.data.pagination?.total ?? leave.data.data.length : null,
-    corrections: corrections.data ? corrections.data.data.length : null,
+    corrections: corrections.data ? corrections.data.pagination?.total ?? corrections.data.data.length : null,
     posts: posts.data ? posts.data.length : null,
   }
 

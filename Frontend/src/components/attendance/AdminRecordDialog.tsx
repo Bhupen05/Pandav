@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useId, useState, type FormEvent } from 'react'
 import {
   attendanceAPI,
   APPROVAL_STATUSES,
@@ -7,17 +7,16 @@ import {
   type AttendanceRecord,
   type AttendanceSettings,
   type AttendanceStatus,
-  type PersonRef,
 } from '../../api/attendanceAPI'
-import { formatDay, fromDateTimeInput, toDateTimeInput } from '../../utils/date'
+import { formatDay, fromZonedInput, toZonedInput } from '../../utils/date'
 import Dialog from './Dialog'
 import { inputClass, labelClass, primaryButton, secondaryButton } from './fields'
 import { approvalLabel, dayTypeLabel, describeError } from './labels'
+import { PersonPicker } from './Pickers'
 
 type Props = {
   // Editing this record; leave out to add one
   record?: AttendanceRecord
-  people: PersonRef[]
   settings?: AttendanceSettings
   onClose: () => void
   // Called after the record is saved, with a sentence for the toast
@@ -28,16 +27,33 @@ type UpdateBody = Parameters<typeof attendanceAPI.updateAttendance>[1]
 
 // Admins add a record for anyone, or change any field of one, including its
 // date and times (PUT sends only what changed, so an untouched check-out time
-// doesn't clear a waiting correction)
-export default function AdminRecordDialog({ record, people, settings, onClose, onSaved }: Props) {
+// doesn't clear a waiting correction). Times are typed, and shown, as the
+// wall-clock time in the server's zone: that is what decides a record's day.
+export default function AdminRecordDialog({ record, settings, onClose, onSaved }: Props) {
+  const timeZone = settings?.timezone
+  if (!timeZone) {
+    // Without the zone a typed time can't be turned into the right moment
+    return (
+      <Dialog title={record ? 'Edit attendance record' : 'Add attendance record'} onClose={onClose}>
+        <p role="alert" className="text-sm text-neutral-800">The attendance settings have not loaded yet, so times can't be read. Close this and try again in a moment.</p>
+        <button type="button" onClick={onClose} className={`${secondaryButton} mt-4 w-full`}>Close</button>
+      </Dialog>
+    )
+  }
+  return <RecordForm record={record} settings={settings} timeZone={timeZone} onClose={onClose} onSaved={onSaved} />
+}
+
+function RecordForm({ record, settings, timeZone, onClose, onSaved }: Omit<Props, 'settings'> & { settings: AttendanceSettings; timeZone: string }) {
   const editing = !!record
+  const personLabelId = useId()
   const [userId, setUserId] = useState('')
+  const [personName, setPersonName] = useState('')
   const [date, setDate] = useState(record?.day ?? '')
   const [status, setStatus] = useState<AttendanceStatus>(record?.status ?? 'present')
   const [approval, setApproval] = useState<ApprovalStatus>(record?.approvalStatus ?? 'approved')
   const [leaveType, setLeaveType] = useState(record?.leaveType ?? '')
-  const [checkIn, setCheckIn] = useState(toDateTimeInput(record?.checkInTime))
-  const [checkOut, setCheckOut] = useState(toDateTimeInput(record?.checkOutTime))
+  const [checkIn, setCheckIn] = useState(toZonedInput(record?.checkInTime, timeZone))
+  const [checkOut, setCheckOut] = useState(toZonedInput(record?.checkOutTime, timeZone))
   const [remarks, setRemarks] = useState(record?.remarks ?? '')
   const [reviewRemarks, setReviewRemarks] = useState(record?.reviewRemarks ?? '')
   const [saving, setSaving] = useState(false)
@@ -55,8 +71,16 @@ export default function AdminRecordDialog({ record, people, settings, onClose, o
       setError('Choose the date.')
       return
     }
-    const inISO = fromDateTimeInput(checkIn)
-    const outISO = fromDateTimeInput(checkOut)
+    const inISO = fromZonedInput(checkIn, timeZone)
+    const outISO = fromZonedInput(checkOut, timeZone)
+    if (checkIn && !inISO) {
+      setError(`The check-in time doesn't exist in ${timeZone}: the clocks skip it that day.`)
+      return
+    }
+    if (checkOut && !outISO) {
+      setError(`The check-out time doesn't exist in ${timeZone}: the clocks skip it that day.`)
+      return
+    }
     if (inISO && outISO && new Date(outISO) < new Date(inISO)) {
       setError('The check-out cannot be before the check-in.')
       return
@@ -70,8 +94,8 @@ export default function AdminRecordDialog({ record, people, settings, onClose, o
         if (date !== record.day) body.date = date
         if (status !== record.status) body.status = status
         if (approval !== record.approvalStatus) body.approvalStatus = approval
-        if (checkIn !== toDateTimeInput(record.checkInTime)) body.checkInTime = inISO
-        if (checkOut !== toDateTimeInput(record.checkOutTime)) body.checkOutTime = outISO
+        if (checkIn !== toZonedInput(record.checkInTime, timeZone)) body.checkInTime = inISO
+        if (checkOut !== toZonedInput(record.checkOutTime, timeZone)) body.checkOutTime = outISO
         if (remarks.trim() !== (record.remarks ?? '')) body.remarks = remarks.trim()
         if (reviewRemarks.trim() !== (record.reviewRemarks ?? '')) body.reviewRemarks = reviewRemarks.trim()
         if (showLeaveType && leaveType !== (record.leaveType ?? '')) body.leaveType = leaveType || null
@@ -93,8 +117,7 @@ export default function AdminRecordDialog({ record, people, settings, onClose, o
           reviewRemarks: reviewRemarks.trim() || undefined,
           leaveType: showLeaveType && leaveType ? leaveType : undefined,
         })
-        const person = people.find((candidate) => candidate._id === userId)
-        onSaved(`Added a record for ${person?.name || 'the person'}, ${formatDay(date)}.`)
+        onSaved(`Added a record for ${personName || 'the person'}, ${formatDay(date)}.`)
       }
     } catch (failure) {
       setError(describeError(failure, 'Could not save this record.'))
@@ -114,13 +137,18 @@ export default function AdminRecordDialog({ record, people, settings, onClose, o
         <div className="grid gap-4 sm:grid-cols-2">
           {!editing && (
             <div className="sm:col-span-2">
-              <label htmlFor="record-person" className={labelClass}>Person</label>
-              <select id="record-person" value={userId} onChange={(event) => setUserId(event.target.value)} required className={inputClass}>
-                <option value="">Select a person</option>
-                {people.map((person) => (
-                  <option key={person._id} value={person._id}>{person.name}{person.email ? ` (${person.email})` : ''}</option>
-                ))}
-              </select>
+              <span id={personLabelId} className={labelClass}>Person</span>
+              <PersonPicker
+                id="record-person"
+                labelId={personLabelId}
+                value={userId}
+                onChange={(person) => {
+                  setUserId(person?._id ?? '')
+                  setPersonName(person?.name ?? '')
+                }}
+                placeholder="Select a person"
+                required
+              />
             </div>
           )}
           <div>
@@ -156,14 +184,14 @@ export default function AdminRecordDialog({ record, people, settings, onClose, o
           )}
           <div>
             <label htmlFor="record-in" className={labelClass}>Check-in time</label>
-            <input id="record-in" type="datetime-local" value={checkIn} onChange={(event) => setCheckIn(event.target.value)} className={inputClass} />
+            <input id="record-in" type="datetime-local" value={checkIn} onChange={(event) => setCheckIn(event.target.value)} aria-describedby="record-zone" className={inputClass} />
           </div>
           <div>
             <label htmlFor="record-out" className={labelClass}>Check-out time</label>
-            <input id="record-out" type="datetime-local" value={checkOut} min={checkIn || undefined} onChange={(event) => setCheckOut(event.target.value)} className={inputClass} />
+            <input id="record-out" type="datetime-local" value={checkOut} min={checkIn || undefined} onChange={(event) => setCheckOut(event.target.value)} aria-describedby="record-zone" className={inputClass} />
           </div>
         </div>
-        <p className="-mt-2 text-xs text-neutral-600">Times are in your browser's time zone. Setting a check-out time settles a waiting correction.</p>
+        <p id="record-zone" className="-mt-2 text-xs text-neutral-600">Times are in {timeZone}. Setting a check-out time settles a waiting correction.</p>
 
         <div>
           <label htmlFor="record-remarks" className={labelClass}>Employee's note</label>

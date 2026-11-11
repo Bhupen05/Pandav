@@ -1,5 +1,6 @@
-import { expect, test, type Browser } from '@playwright/test'
-import { ADMIN, USER, signIn, type Account } from './support/app'
+import { expect, request as playwrightRequest, test, type APIRequestContext, type Browser } from '@playwright/test'
+import { ADMIN, USER, adminApi, registerAccount, signIn, type Account } from './support/app'
+import { FRONTEND_PORT } from './support/servers'
 
 const signedInPage = async (browser: Browser, account: Account) => {
   const page = await (await browser.newContext()).newPage()
@@ -144,4 +145,185 @@ test('the task list is paged by the server, and the page lives in the address', 
   await expect(admin.getByRole('article')).toHaveCount(2)
 
   await admin.context().close()
+})
+
+test('the assignee filter opened from a link names the person, not "Selected person"', async ({ browser, request }) => {
+  await adminApi(request)
+  const people = await (await request.get(`/api/v2/users?q=${encodeURIComponent(USER.email)}&isActive=true`)).json()
+  const userId: string = people.data[0]._id
+
+  const admin = await signedInPage(browser, ADMIN)
+  await admin.goto(`/tasks?assignedTo=${userId}`)
+  // The filter panel is open, and the picker's button reads the label and the person's name
+  await expect(admin.getByRole('button', { name: `Assigned to ${USER.name}` })).toBeVisible()
+  await expect(admin.getByText('Selected person')).toHaveCount(0)
+  await admin.context().close()
+})
+
+// A leader and a member in a team an admin made, then the team is frozen. The accounts, the
+// team and the second task are set up through the API (sign-ups and teams are not what this is
+// about); everything the people do on /tasks is done in the browser.
+test.describe.serial('a team leader and a member on /tasks, and a frozen team', () => {
+  const stamp = Date.now()
+  const title = `Leader task ${stamp}`
+  const frozenTitle = `Frozen task ${stamp}`
+  let leader: Account & { id: string }
+  let member: Account & { id: string }
+  let teamId = ''
+  let adminSession: APIRequestContext
+
+  const baseURL = `http://localhost:${FRONTEND_PORT}`
+  const apiAs = async (account: Account) => {
+    const api = await playwrightRequest.newContext({ baseURL })
+    expect((await api.post('/api/v2/auth/login', { data: { email: account.email, password: account.password } })).status(), `login ${account.email}`).toBe(200)
+    return api
+  }
+
+  test.beforeAll(async () => {
+    const api = await playwrightRequest.newContext({ baseURL })
+    leader = await registerAccount(api, 'Leader')
+    member = await registerAccount(api, 'Member')
+    await api.dispose()
+
+    adminSession = await apiAs(ADMIN)
+    const team = await adminSession.post('/api/v2/teams', { data: { name: `Crew ${stamp}`, leaderId: leader.id } })
+    expect(team.status(), 'create team').toBe(201)
+    teamId = (await team.json()).data._id
+    const invite = await adminSession.post(`/api/v2/teams/${teamId}/invite`, { data: { userId: member.id } })
+    expect(invite.status(), 'invite').toBe(201)
+
+    const memberApi = await apiAs(member)
+    expect((await memberApi.put(`/api/v2/teams/invites/${(await invite.json()).data._id}/accept`)).status(), 'accept').toBe(200)
+    await memberApi.dispose()
+  })
+
+  test.afterAll(async () => {
+    await adminSession?.dispose()
+  })
+
+  test('the leader sees "Team tasks" and gives the member a task', async ({ browser }) => {
+    const page = await signedInPage(browser, leader)
+    await page.goto('/tasks')
+    await expect(page.getByRole('heading', { name: 'Team tasks' })).toBeVisible()
+
+    await page.getByRole('button', { name: 'New Task' }).click()
+    const form = page.getByRole('dialog', { name: 'Create New Task' })
+    await form.getByLabel('Title').fill(title)
+    await form.getByLabel('Description').fill('Given by the team leader')
+    await form.getByLabel('Start Date').fill(dateInput())
+    await form.getByLabel('Due Date').fill(dateInput(3))
+    // A leader picks from the people in their team
+    await form.getByRole('button', { name: 'Select users to assign' }).click()
+    await form.getByLabel('Search people').fill(member.name)
+    await form.getByRole('checkbox', { name: new RegExp(member.name) }).check()
+    await form.getByRole('button', { name: '1 user selected' }).click()
+    await form.getByRole('button', { name: 'Create Task', exact: true }).click()
+    await expect(page.getByRole('status').filter({ hasText: 'Task created.' })).toBeVisible()
+
+    const card = page.getByRole('article').filter({ hasText: title })
+    await expect(card).toBeVisible()
+    // The leader manages it, but it isn't theirs to approve until the member asks
+    await expect(card.getByRole('button', { name: 'Edit' })).toBeVisible()
+    await expect(card.getByRole('button', { name: 'Approve' })).toHaveCount(0)
+
+    // The filter opened from a link names the member, from the leader's own team
+    await page.goto(`/tasks?assignedTo=${member.id}`)
+    await expect(page.getByRole('button', { name: `Assigned to ${member.name}` })).toBeVisible()
+    await expect(page.getByText('Selected person')).toHaveCount(0)
+    await page.context().close()
+  })
+
+  test('the member asks for completion, and the leader approves it from /tasks', async ({ browser }) => {
+    const memberPage = await signedInPage(browser, member)
+    await memberPage.goto('/tasks')
+    await expect(memberPage.getByRole('heading', { name: 'My Tasks' })).toBeVisible()
+    const mine = memberPage.getByRole('article').filter({ hasText: title })
+    await mine.getByRole('button', { name: 'Request completion' }).click()
+    await memberPage.getByRole('dialog', { name: 'Request completion' }).getByRole('button', { name: 'Send request' }).click()
+    await expect(mine.getByText('Waiting for review')).toBeVisible()
+    await expect(mine.getByRole('button', { name: 'Edit' })).toHaveCount(0)
+    await memberPage.context().close()
+
+    const leaderPage = await signedInPage(browser, leader)
+    await leaderPage.goto('/tasks')
+    const card = leaderPage.getByRole('article').filter({ hasText: title })
+    await card.getByRole('button', { name: 'Approve' }).click()
+    await expect(leaderPage.getByRole('status').filter({ hasText: 'Task completion approved' })).toBeVisible()
+    await expect(card.getByRole('button', { name: 'Approve' })).toHaveCount(0)
+    await expect(card.getByText('Completed', { exact: true }).first()).toBeVisible()
+    await leaderPage.context().close()
+  })
+
+  test('once an admin freezes the team the leader cannot edit or approve, and the member can only work', async ({ browser }) => {
+    // A second task, with a checklist, that the member has asked to have reviewed
+    const leaderApi = await apiAs(leader)
+    const created = await leaderApi.post('/api/v2/tasks', {
+      data: {
+        title: frozenTitle,
+        description: 'Waiting for review when the team is frozen',
+        startDate: dateInput(),
+        dueDate: dateInput(3),
+        assignedTo: [member.id],
+        checklist: [{ text: 'First step' }, { text: 'Second step' }],
+      },
+    })
+    expect(created.status(), 'create task').toBe(201)
+    const taskId: string = (await created.json()).data._id
+    await leaderApi.dispose()
+    const memberApi = await apiAs(member)
+    expect((await memberApi.post(`/api/v2/tasks/${taskId}/request-completion`, { data: {} })).status(), 'request completion').toBe(200)
+    await memberApi.dispose()
+
+    // Before the freeze the leader has Edit, Approve and a comment box
+    const leaderPage = await signedInPage(browser, leader)
+    await leaderPage.goto(`/tasks?task=${taskId}`)
+    const before = leaderPage.getByRole('dialog', { name: frozenTitle })
+    await expect(before.getByRole('button', { name: 'Approve' })).toBeVisible()
+    await expect(before.getByRole('button', { name: 'Edit' })).toBeVisible()
+    await expect(before.getByLabel('Attach a file')).toBeVisible()
+    await expect(before.getByLabel('Add a comment')).toBeVisible()
+
+    // The admin freezes the team
+    expect((await adminSession.put(`/api/v2/teams/${teamId}`, { data: { isActive: false } })).status(), 'freeze').toBe(200)
+
+    // The leader's panel says so and offers nothing the server would refuse
+    await leaderPage.reload()
+    const frozen = leaderPage.getByRole('dialog', { name: frozenTitle })
+    await expect(frozen.getByText('This team is frozen. Only an admin can change it.')).toBeVisible()
+    for (const name of ['Edit', 'Approve', 'Reject', 'Delete', 'Cancel task']) {
+      await expect(frozen.getByRole('button', { name, exact: true })).toHaveCount(0)
+    }
+    await expect(frozen.getByLabel('Attach a file')).toHaveCount(0)
+    await expect(frozen.getByLabel('Add a comment')).toHaveCount(0)
+    // The list agrees: no Edit or Approve on the card either
+    await frozen.getByRole('button', { name: 'Close task details' }).click()
+    const card = leaderPage.getByRole('article').filter({ hasText: frozenTitle })
+    await expect(card).toBeVisible()
+    await expect(card.getByRole('button', { name: 'Edit' })).toHaveCount(0)
+    await expect(card.getByRole('button', { name: 'Approve' })).toHaveCount(0)
+    // Nor can the leader give a frozen team new tasks
+    await expect(leaderPage.getByRole('button', { name: 'New Task' })).toHaveCount(0)
+    await leaderPage.context().close()
+
+    // The member can't attach or comment either, but can still tick the checklist
+    const memberPage = await signedInPage(browser, member)
+    await memberPage.goto(`/tasks?task=${taskId}`)
+    const panel = memberPage.getByRole('dialog', { name: frozenTitle })
+    await expect(panel.getByText('This team is frozen. Only an admin can change it.')).toBeVisible()
+    await expect(panel.getByLabel('Attach a file')).toHaveCount(0)
+    await expect(panel.getByLabel('Add a comment')).toHaveCount(0)
+    await panel.getByRole('checkbox', { name: 'First step' }).check()
+    await expect(panel.getByText('1 of 2 done')).toBeVisible()
+    await expect(panel.getByText(`Ticked by ${member.name}`)).toBeVisible()
+    await memberPage.context().close()
+
+    // An admin is not held back by the freeze
+    const admin = await signedInPage(browser, ADMIN)
+    await admin.goto(`/tasks?task=${taskId}`)
+    const adminPanel = admin.getByRole('dialog', { name: frozenTitle })
+    await expect(adminPanel.getByRole('button', { name: 'Approve' })).toBeVisible()
+    await expect(adminPanel.getByLabel('Add a comment')).toBeVisible()
+    await expect(adminPanel.getByText('This team is frozen. Only an admin can change it.')).toHaveCount(0)
+    await admin.context().close()
+  })
 })
