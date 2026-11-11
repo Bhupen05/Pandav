@@ -472,7 +472,8 @@ const reasonProblem = (reason) => {
 
 // Adds one report by the current user to a message (Chat or
 // TeamChatMessage), at most one per person. Returns false if they had
-// already reported it.
+// already reported it. A message whose reports an admin had marked as
+// handled is open again: there is something new to look at.
 const addReport = async (Model, message, req) => {
   const at = new Date();
   const { modifiedCount } = await Model.updateOne(
@@ -480,6 +481,7 @@ const addReport = async (Model, message, req) => {
     {
       $push: { reports: { by: req.user._id, reason: (req.body.reason || '').trim(), text: message.message, at } },
       $set: { lastReportedAt: at },
+      $unset: { reportResolution: 1 },
     },
   );
   return modifiedCount > 0;
@@ -886,50 +888,157 @@ export const getMyTeamChats = async (req, res) => {
   }
 };
 
+const REPORT_STATUSES = ['open', 'resolved', 'all'];
+const REPORT_STATUS_PROBLEM = `status must be one of: ${REPORT_STATUSES.join(', ')}`;
+const REPORT_ACTIONS = ['resolve', 'reopen'];
+
+// What to load for the admins' list: the reports, and who dealt with them
+const reporters = { path: 'reports.by', select: 'name' };
+const resolvers = { path: 'reportResolution.resolvedBy', select: 'name' };
+const REPORT_FIELDS = '+reports +lastReportedAt +reportResolution';
+const directReportPopulate = [...participants, reporters, resolvers];
+const teamReportPopulate = [{ path: 'sender', select: 'name' }, { path: 'team', select: 'name' }, reporters, resolvers];
+
+// One reported message as the admins' list shows it (a lean document loaded
+// with REPORT_FIELDS and the populates above)
+const reportRow = (m, kind) => ({
+  _id: m._id,
+  kind,
+  sender: m.sender || null,
+  receiver: kind === 'direct' ? m.receiver || null : null,
+  team: kind === 'team' ? m.team || null : null,
+  text: m.message,
+  sentAt: kind === 'direct' ? m.timestamp : m.createdAt,
+  isEdited: Boolean(m.isEdited),
+  deletedAt: m.deletedAt || null,
+  reportCount: m.reports.length,
+  lastReportedAt: m.lastReportedAt,
+  reports: [...m.reports].sort((a, b) => b.at - a.at),
+  status: m.reportResolution ? 'resolved' : 'open',
+  resolution: m.reportResolution
+    ? {
+      resolvedBy: m.reportResolution.resolvedBy || null,
+      resolvedAt: m.reportResolution.resolvedAt,
+      note: m.reportResolution.note || '',
+    }
+    : null,
+});
+
 // Reported direct and team messages for admins, the most recently reported
 // first, with who sent them, where, their text now and every report.
-// ?before=<lastReportedAt> and ?beforeId=<_id> of the last row shown load the
-// next page.
+// ?status=open (default), resolved or all picks by whether an admin has
+// marked the reports as handled. ?before=<lastReportedAt> and ?beforeId=<_id>
+// of the last row shown load the next page.
 export const getReportedMessages = async (req, res) => {
   try {
     const cursor = cursorFilter(req.query, 'lastReportedAt');
     if (cursor.error) {
       return res.status(400).json({ success: false, message: cursor.error });
     }
+    const status = req.query.status ?? 'open';
+    if (typeof status !== 'string' || !REPORT_STATUSES.includes(status)) {
+      return res.status(400).json({ success: false, message: REPORT_STATUS_PROBLEM });
+    }
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || MESSAGE_PAGE_SIZE));
-    const reported = { lastReportedAt: { $exists: true } };
+    const reported = {
+      lastReportedAt: { $exists: true },
+      ...(status === 'all' ? {} : { 'reportResolution.resolvedAt': { $exists: status === 'resolved' } }),
+    };
     const filter = cursor.filter ? { $and: [reported, cursor.filter] } : reported;
-    const reporters = { path: 'reports.by', select: 'name' };
     const newest = { lastReportedAt: -1, _id: -1 };
 
     const [direct, team] = await Promise.all([
-      Chat.find(filter).select('+reports +lastReportedAt').sort(newest).limit(limit + 1)
-        .populate([...participants, reporters]).lean(),
-      TeamChatMessage.find(filter).select('+reports +lastReportedAt').sort(newest).limit(limit + 1)
-        .populate([{ path: 'sender', select: 'name' }, { path: 'team', select: 'name' }, reporters]).lean(),
+      Chat.find(filter).select(REPORT_FIELDS).sort(newest).limit(limit + 1).populate(directReportPopulate).lean(),
+      TeamChatMessage.find(filter).select(REPORT_FIELDS).sort(newest).limit(limit + 1).populate(teamReportPopulate).lean(),
     ]);
 
     const rows = [
-      ...direct.map((m) => ({ ...m, kind: 'direct', sentAt: m.timestamp, team: null })),
-      ...team.map((m) => ({ ...m, kind: 'team', sentAt: m.createdAt, receiver: null })),
+      ...direct.map((m) => reportRow(m, 'direct')),
+      ...team.map((m) => reportRow(m, 'team')),
     ].sort((a, b) => b.lastReportedAt - a.lastReportedAt || String(b._id).localeCompare(String(a._id)));
 
-    const data = rows.slice(0, limit).map((m) => ({
-      _id: m._id,
-      kind: m.kind,
-      sender: m.sender || null,
-      receiver: m.receiver || null,
-      team: m.team || null,
-      text: m.message,
-      sentAt: m.sentAt,
-      isEdited: Boolean(m.isEdited),
-      deletedAt: m.deletedAt || null,
-      reportCount: m.reports.length,
-      lastReportedAt: m.lastReportedAt,
-      reports: [...m.reports].sort((a, b) => b.at - a.at),
-    }));
-
+    const data = rows.slice(0, limit);
     return res.json({ success: true, count: data.length, data, hasMore: rows.length > limit });
+  } catch (error) {
+    sendServerError(res, error);
+  }
+};
+
+// Why a note on a resolution can't be used, or null. It is optional.
+const noteProblem = (note) => {
+  if (note === undefined || note === null) return null;
+  if (typeof note !== 'string') return 'Invalid note';
+  if (note.trim().length > MAX_REPORT_REASON_LENGTH) {
+    return `Note cannot be longer than ${MAX_REPORT_REASON_LENGTH} characters`;
+  }
+  return null;
+};
+
+// An admin marks the reports on a message as handled, or opens them again.
+// The message stays as it is and the list keeps it: it moves between the
+// open and the resolved list. A direct or a team message, whichever the id is.
+export const resolveReportedMessage = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const { action, note } = req.body || {};
+    if (!isId(messageId)) {
+      return res.status(400).json({ success: false, message: 'Invalid message' });
+    }
+    if (!REPORT_ACTIONS.includes(action)) {
+      return res.status(400).json({ success: false, message: `action must be one of: ${REPORT_ACTIONS.join(', ')}` });
+    }
+    const invalid = noteProblem(note);
+    if (invalid) {
+      return res.status(400).json({ success: false, message: invalid });
+    }
+    const text = typeof note === 'string' ? note.trim() : '';
+
+    const resolving = action === 'resolve';
+    // Only from the state the action applies to, in one update, so two admins
+    // can't both decide
+    const from = { _id: messageId, lastReportedAt: { $exists: true }, 'reportResolution.resolvedAt': { $exists: !resolving } };
+    const change = resolving
+      ? { $set: { reportResolution: { resolvedBy: req.user._id, resolvedAt: new Date(), note: text } } }
+      : { $unset: { reportResolution: 1 } };
+
+    const targets = [
+      { Model: Chat, kind: 'direct', targetType: 'Chat', populate: directReportPopulate },
+      { Model: TeamChatMessage, kind: 'team', targetType: 'TeamChatMessage', populate: teamReportPopulate },
+    ];
+    let known = false;
+    for (const { Model, kind, targetType, populate } of targets) {
+      const changed = await Model.updateOne(from, change);
+      if (changed.modifiedCount === 0) {
+        known = known || Boolean(await Model.exists({ _id: messageId, lastReportedAt: { $exists: true } }));
+        continue;
+      }
+
+      const message = await Model.findById(messageId).select(REPORT_FIELDS).populate(populate).lean();
+      await logAuditEventV2(req, {
+        action: resolving ? 'chat_reports_resolved' : 'chat_reports_reopened',
+        targetType,
+        targetId: messageId,
+        details: {
+          senderId: String(message.sender?._id ?? message.sender),
+          ...(kind === 'team' ? { teamId: String(message.team?._id ?? message.team) } : {}),
+          reportCount: message.reports.length,
+          ...(text ? { note: text } : {}),
+        },
+      });
+      return res.json({
+        success: true,
+        message: resolving ? 'Reports marked as handled' : 'Reports reopened',
+        data: reportRow(message, kind),
+      });
+    }
+
+    if (!known) {
+      return res.status(404).json({ success: false, message: 'Reported message not found' });
+    }
+    return res.status(409).json({
+      success: false,
+      message: resolving ? 'These reports are already marked as handled' : 'These reports are already open',
+    });
   } catch (error) {
     sendServerError(res, error);
   }

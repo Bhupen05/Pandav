@@ -101,7 +101,7 @@ test('social hub', async (t) => {
   await check('so no other GitHub endpoint was called', providerCalls.every((c) => c.method !== 'POST'));
 
   const published = await call('POST', `/social/posts/${shipIt._id}/publish`, { token: lee.token, body: { targets: { github: true }, githubRepo: 'acme/.github' } });
-  await check('her leader publishes it', published.status === 200 && published.data.result.github.status === 'published', JSON.stringify(published.data).slice(0, 240));
+  await check('her leader publishes it', published.status === 200 && published.data.data.result.github.status === 'published', JSON.stringify(published.data).slice(0, 240));
   const lastIssue = issueCalls().at(-1);
   await check('to the requested repository', lastIssue?.path === '/repos/acme/.github/issues', lastIssue?.path);
   await check('with Mia\'s decrypted token', lastIssue?.auth === 'Bearer mia-secret-token', lastIssue?.auth);
@@ -285,7 +285,7 @@ test('social feed: who sees what, paging and likes', async (t) => {
   const liked = await db.collection('socialpostv2').findOne({ _id: new mongoose.Types.ObjectId(target._id) });
   await check('four likes at once are four likes', liked.likes.length === 4, `${liked.likes.length} likes`);
   const unlike = await call('POST', `/social/posts/${target._id}/like`, { token: hal.token });
-  await check('liking again takes the like back', unlike.data.liked === false && unlike.data.likesCount === 3, JSON.stringify(unlike.data));
+  await check('liking again takes the like back', unlike.data.data.liked === false && unlike.data.data.likesCount === 3, JSON.stringify(unlike.data));
 
   // ---------- Personal task input ----------
   const noNotes = await call('POST', '/social/personal-tasks', { token: jon.token, body: { title: 'No notes', description: null } });

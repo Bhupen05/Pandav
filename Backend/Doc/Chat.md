@@ -29,6 +29,7 @@ Every document also has `_id` and Mongoose's version key `__v`.
 | `deletedAt` | Date | When the sender deleted it. Default `null` |
 | `reports` | [Report](#report) | Reports by the receiver. Never sent to the people in the conversation; admins see them through [List reported messages](#list-reported-messages) |
 | `lastReportedAt` | Date | When it was last reported. Hidden like `reports` |
+| `reportResolution` | [Resolution](#resolution) | Set while an admin has marked the reports as handled; absent while they are open. Hidden like `reports` |
 
 Messages sent from the Social Hub (`POST /api/v2/social/messages`, see
 [SocialHub.md](SocialHub.md)) are stored in the same collection, so they appear in these
@@ -47,6 +48,7 @@ conversations, in the conversations list and in the unread counts.
 | `readBy` | [{ `user`: ObjectId → User, `readAt`: Date }] | Team leaders and members, other than the sender, who have read the message. Admins never appear here |
 | `reports` | [Report](#report) | Reports by people in the team. Hidden as for direct messages |
 | `lastReportedAt` | Date | Hidden like `reports` |
+| `reportResolution` | [Resolution](#resolution) | Hidden like `reports` |
 | `createdAt`, `updatedAt` | Date | Set automatically. Paging uses `createdAt`, with `_id` |
 
 ### Report
@@ -60,6 +62,18 @@ once.
 | `reason` | String | Optional, at most 500 characters, trimmed. Default `""` |
 | `text` | String | The message as it was when reported, so editing or deleting it afterwards doesn't hide what was reported |
 | `at` | Date | When it was reported |
+
+### Resolution
+
+An admin's decision that the reports on a message are dealt with. It belongs to the message, not to
+one report, and it is removed again by [reopening](#resolve-or-reopen-reported-messages) the
+reports or by a new report of the message.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `resolvedBy` | ObjectId → User | The admin who marked the reports as handled |
+| `resolvedAt` | Date | When |
+| `note` | String | Optional, at most 500 characters, trimmed. Default `""` |
 
 ### Block
 
@@ -223,6 +237,7 @@ The list lives in the server's memory, so it assumes a single backend instance.
 | `POST` | `/api/v2/chat/blocks` | Any signed-in user |
 | `DELETE` | `/api/v2/chat/blocks/:userId` | The user who made the block |
 | `GET` | `/api/v2/chat/reports` | Admins |
+| `PATCH` | `/api/v2/chat/reports/:messageId` | Admins |
 | `POST` | `/api/v2/chat/teams/:teamId/send` | Admins; the team's leaders and members. Not while the team is frozen |
 | `GET` | `/api/v2/chat/teams/:teamId/messages` | Admins; the team's leaders and members |
 | `PATCH` | `/api/v2/chat/teams/:teamId/messages/:messageId` | The message's sender, within 24 hours. Not while the team is frozen, except an admin |
@@ -503,7 +518,9 @@ A message that was already read changes nothing and sends no event. Returns the 
 
 Adds a [report](#report) to the message, with its text as it is now. Every active admin gets a
 `message_reported` notification (see [Notifications](#notifications)), and a
-`chat_message_reported` audit event is recorded. The sender is not told. Returns `201`:
+`chat_message_reported` audit event is recorded. The sender is not told. If an admin had marked the
+message's reports as handled, they are open again (see
+[Resolve or reopen reported messages](#resolve-or-reopen-reported-messages)). Returns `201`:
 
 ```json
 { "success": true, "message": "Thanks for telling us. An admin will look at this message." }
@@ -619,6 +636,10 @@ Every reported direct and team message, the most recently reported first. Pages 
 [Paging](#paging), with the last row's `lastReportedAt` and `_id` as the cursor; `?limit=` changes
 the page size (1 to 200, default 50).
 
+| Query | Notes |
+|-------|-------|
+| `status` | `open` (default): messages whose reports no admin has marked as handled. `resolved`: messages whose reports an admin has marked as handled. `all`: both |
+
 | Field | Notes |
 |-------|-------|
 | `_id` | The message's id |
@@ -632,6 +653,8 @@ the page size (1 to 200, default 50).
 | `reportCount` | How many people reported it |
 | `lastReportedAt` | When it was last reported |
 | `reports` | Every report, newest first: `by` (`{ _id, name }`), `reason`, `text` (the message when that report was made) and `at` |
+| `status` | `"open"` or `"resolved"` |
+| `resolution` | `null` while open. Once resolved: `resolvedBy` (`{ _id, name }`, or `null` if that account is gone), `resolvedAt` and `note` (`""` when none was given) |
 
 ```json
 {
@@ -657,22 +680,74 @@ the page size (1 to 200, default 50).
           "text": "the message as it was",
           "at": "2026-10-17T09:40:00.000Z"
         }
-      ]
+      ],
+      "status": "open",
+      "resolution": null
     }
   ],
   "hasMore": false
 }
 ```
 
-There is no "resolve" step yet: a reported message stays on the list. An admin can delete a
-reported team message with [Delete a team message](#delete-a-team-message); a direct message can
-only be deleted by its sender, so for those the admin's tools are the account itself (deactivating
-it, see [Users.md](Users.md)).
+Marking the reports as handled does not touch the message: see
+[Resolve or reopen reported messages](#resolve-or-reopen-reported-messages). An admin can also
+delete a reported team message with [Delete a team message](#delete-a-team-message); a direct message
+can only be deleted by its sender, so for those the admin's tools are the account itself
+(deactivating it, see [Users.md](Users.md)).
 
 | Status | Message |
 |--------|---------|
 | `403` | `User role <role> is not authorized to access this route` (not an admin) |
+| `400` | `status must be one of: open, resolved, all` |
 | `400` | One of the [paging](#paging) errors |
+
+### Resolve or reopen reported messages
+
+`PATCH /api/v2/chat/reports/:messageId`
+
+**Who:** admins. `:messageId` is the `_id` of a row of the list above, a direct or a team message.
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `action` | Yes | `resolve` marks the reports on the message as handled; `reopen` takes that back |
+| `note` | No | Text of at most 500 characters, trimmed. Kept with a resolution; with `reopen` it is only recorded in the audit event |
+
+A resolved message moves from the open list to the resolved one and stays there. The message
+itself, its reports and the people in the conversation are not touched, and nobody is told. The
+reports belong to the message as a whole: if someone [reports](#report-a-direct-message) it again, it
+is open again and its resolution is dropped. The change is made in one step, so two admins cannot
+both decide. A `chat_reports_resolved` or `chat_reports_reopened` audit event is recorded.
+
+Returns the message as a row of [the list](#list-reported-messages) (abbreviated here):
+
+```json
+{
+  "success": true,
+  "message": "Reports marked as handled",
+  "data": {
+    "_id": "6650a1f0c2b1a3d4e5f60600",
+    "kind": "team",
+    "status": "resolved",
+    "resolution": {
+      "resolvedBy": { "_id": "6650a1f0c2b1a3d4e5f60001", "name": "Admin User" },
+      "resolvedAt": "2026-10-17T10:00:00.000Z",
+      "note": "Spoke to the sender"
+    },
+    "reportCount": 1
+  }
+}
+```
+
+| Status | Message |
+|--------|---------|
+| `403` | `User role <role> is not authorized to access this route` (not an admin) |
+| `400` | `Invalid message` (`:messageId` is not an id) |
+| `400` | `action must be one of: resolve, reopen` |
+| `400` | `Invalid note` (not a string) |
+| `400` | `Note cannot be longer than 500 characters` |
+| `404` | `Reported message not found` (no such message, or nobody has reported it) |
+| `409` | `These reports are already marked as handled` |
+| `409` | `These reports are already open` |
 
 ### Send a team message
 
@@ -966,5 +1041,7 @@ reply, as is any payload that isn't an object.
 | `team_message_sent` | TeamChatMessage | A team message is sent. `details.teamId` |
 | `chat_message_deleted` | TeamChatMessage | A team leader or an admin deletes someone else's team message. `details.teamId`, `details.senderId` |
 | `chat_message_reported` | Chat or TeamChatMessage | A message is reported. `details.senderId`, and `details.teamId` for a team message |
+| `chat_reports_resolved` | Chat or TeamChatMessage | An admin marks the reports on a message as handled. `details.senderId`, `details.reportCount`, `details.note` (when given), and `details.teamId` for a team message |
+| `chat_reports_reopened` | Chat or TeamChatMessage | An admin opens the reports on a message again. The same `details` |
 | `chat_user_blocked` | User (the person blocked) | A new block. `details.connectionsRemoved` |
 | `chat_user_unblocked` | User (the person unblocked) | A block is lifted |

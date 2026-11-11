@@ -722,7 +722,7 @@ names only, and results have no `email`. Not even a whole address finds anyone
 matched against names and emails, and results include `email`.
 
 If `q` is missing or shorter than 2 characters after trimming, the response is
-`{ "success": true, "data": [] }`, without `count`.
+`{ "success": true, "count": 0, "data": [] }`.
 
 Rate limit: 60 per minute per user.
 
@@ -752,13 +752,14 @@ Returns the active accounts the caller may send a direct message to (see
 for anyone else, the people in their team (unless it is frozen), their accepted Social Hub
 connections, and anyone who has messaged them. Deleted accounts are never in it. Each has `_id`,
 `name`, `email` and `role`, and `department` and `profileImage` when set. Sorted by name. Not
-paged, and there is no `count`.
+paged; `count` is the number of people in `data`.
 
 `200 OK`:
 
 ```json
 {
   "success": true,
+  "count": 1,
   "data": [
     { "_id": "6ad388243ae17d6a41f662b9", "name": "Admin User", "email": "admin@example.com", "role": "admin", "department": "Management" }
   ]

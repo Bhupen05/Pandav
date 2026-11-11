@@ -342,6 +342,122 @@ test('reporting direct messages, and the admins list', async (t) => {
   await check('admins are told about direct reports too', note?.data.messageId === bad._id && /Spam/.test(note.body));
 });
 
+test('admins mark reported messages as handled, and open them again', async (t) => {
+  const check = checker(t);
+  const { call } = server.api;
+  const { amy, ben, cat, lea, mo, nat } = people;
+  const team = people.team;
+  const rows = async (query = '') => (await call('GET', `/chat/reports${query}`, { token: adminToken })).data;
+  const find = (list, id) => list.data.find((row) => row._id === id);
+
+  const direct = (await call('POST', '/chat/send', { token: amy.token, body: { receiverId: ben._id, message: 'resolve me' } })).data.data;
+  await call('POST', `/chat/messages/${direct._id}/report`, { token: ben.token, body: { reason: 'Rude' } });
+  const quiet = (await call('POST', '/chat/send', { token: amy.token, body: { receiverId: ben._id, message: 'never reported' } })).data.data;
+  const teamMessage = (await call('POST', `/chat/teams/${team._id}/send`, { token: mo.token, body: { message: 'a team message to resolve' } })).data.data;
+  await call('POST', `/chat/teams/${team._id}/messages/${teamMessage._id}/report`, { token: nat.token, body: { reason: 'Off topic' } });
+
+  // ---------- The list ----------
+  const open = await rows();
+  await check('the list holds the open reports by default, each with its status',
+    find(open, direct._id)?.status === 'open' && find(open, direct._id).resolution === null && find(open, teamMessage._id)?.status === 'open',
+    JSON.stringify(open).slice(0, 300));
+  await check('status=open is the same', JSON.stringify((await rows('?status=open')).data) === JSON.stringify(open.data));
+  await check('nothing is resolved yet', find(await rows('?status=resolved'), direct._id) === undefined);
+  await check('status must be open, resolved or all',
+    (await call('GET', '/chat/reports?status=done', { token: adminToken })).status === 400 &&
+    (await call('GET', '/chat/reports?status=open&status=all', { token: adminToken })).status === 400);
+
+  // ---------- Who and what ----------
+  await check('only admins resolve', (await call('PATCH', `/chat/reports/${direct._id}`, { token: ben.token, body: { action: 'resolve' } })).status === 403);
+  await check('a malformed id is a 400', (await call('PATCH', '/chat/reports/nope', { token: adminToken, body: { action: 'resolve' } })).status === 400);
+  await check('the action is resolve or reopen',
+    (await call('PATCH', `/chat/reports/${direct._id}`, { token: adminToken, body: {} })).status === 400 &&
+    (await call('PATCH', `/chat/reports/${direct._id}`, { token: adminToken, body: { action: 'delete' } })).status === 400);
+  await check('a note is text of at most 500 characters',
+    (await call('PATCH', `/chat/reports/${direct._id}`, { token: adminToken, body: { action: 'resolve', note: 42 } })).status === 400 &&
+    (await call('PATCH', `/chat/reports/${direct._id}`, { token: adminToken, body: { action: 'resolve', note: 'x'.repeat(501) } })).status === 400);
+  await check('a message nobody reported is not found',
+    (await call('PATCH', `/chat/reports/${quiet._id}`, { token: adminToken, body: { action: 'resolve' } })).status === 404 &&
+    (await call('PATCH', `/chat/reports/${oid(amy._id)}`, { token: adminToken, body: { action: 'resolve' } })).status === 404);
+  await check('nothing changed after those refusals', find(await rows(), direct._id)?.status === 'open');
+
+  // ---------- Resolving ----------
+  const resolved = await call('PATCH', `/chat/reports/${direct._id}`, { token: adminToken, body: { action: 'resolve', note: '  Spoke to the sender  ' } });
+  const row = resolved.data?.data;
+  await check('an admin marks a direct message as handled, with a note',
+    resolved.status === 200 && resolved.data.success === true && row?._id === direct._id && row.kind === 'direct' && row.status === 'resolved' &&
+    row.resolution?.resolvedBy?.name === 'Admin User' && row.resolution.resolvedBy._id === admin._id &&
+    row.resolution.note === 'Spoke to the sender' && row.resolution.resolvedAt && row.reportCount === 1 && row.reports[0].by.name === 'Ben Receiver',
+    JSON.stringify(resolved.data));
+  await check('the second time is a conflict',
+    (await call('PATCH', `/chat/reports/${direct._id}`, { token: adminToken, body: { action: 'resolve' } })).status === 409);
+  await check('it leaves the open list', find(await rows(), direct._id) === undefined);
+  const done = await rows('?status=resolved');
+  await check('and is in the resolved list, and in all',
+    find(done, direct._id)?.resolution.note === 'Spoke to the sender' && find(await rows('?status=all'), direct._id)?.status === 'resolved' &&
+    done.count === done.data.length, JSON.stringify(done).slice(0, 300));
+  await check('the other reports stay open', find(await rows(), teamMessage._id)?.status === 'open');
+  const audit = (await audits('chat_reports_resolved')).find((a) => a.targetId === direct._id);
+  await check('resolving is audited', audit?.targetType === 'Chat' && String(audit.actor) === admin._id && audit.details.note === 'Spoke to the sender' &&
+    audit.details.senderId === amy._id && audit.details.reportCount === 1, JSON.stringify(audit));
+  const conversation = (await call('GET', `/chat/messages/${ben._id}`, { token: amy.token })).data.data;
+  await check('the people in the chat never see the decision', !('reportResolution' in conversation.find((m) => m._id === direct._id)));
+
+  // ---------- Opening again ----------
+  const reopened = await call('PATCH', `/chat/reports/${direct._id}`, { token: adminToken, body: { action: 'reopen' } });
+  await check('an admin reopens it', reopened.status === 200 && reopened.data.data.status === 'open' && reopened.data.data.resolution === null, JSON.stringify(reopened.data));
+  await check('it is open again, and no longer resolved',
+    find(await rows(), direct._id)?.status === 'open' && find(await rows('?status=resolved'), direct._id) === undefined);
+  await check('opening it twice is a conflict',
+    (await call('PATCH', `/chat/reports/${direct._id}`, { token: adminToken, body: { action: 'reopen' } })).status === 409);
+  await check('reopening is audited', (await audits('chat_reports_reopened')).some((a) => a.targetId === direct._id && a.targetType === 'Chat'));
+  await check('it can be resolved again, without a note',
+    (await call('PATCH', `/chat/reports/${direct._id}`, { token: adminToken, body: { action: 'resolve' } })).data.data?.resolution?.note === '');
+
+  // ---------- Team messages ----------
+  const teamDone = await call('PATCH', `/chat/reports/${teamMessage._id}`, { token: adminToken, body: { action: 'resolve', note: 'Told the leader' } });
+  await check('a team message is handled the same way',
+    teamDone.status === 200 && teamDone.data.data.kind === 'team' && teamDone.data.data.team.name === 'Paging Team' && teamDone.data.data.receiver === null &&
+    teamDone.data.data.status === 'resolved', JSON.stringify(teamDone.data));
+  await check('in the resolved list', find(await rows('?status=resolved'), teamMessage._id)?.resolution.note === 'Told the leader');
+  const teamAudit = (await audits('chat_reports_resolved')).find((a) => a.targetId === teamMessage._id);
+  await check('audited with its team', teamAudit?.targetType === 'TeamChatMessage' && teamAudit.details.teamId === team._id && teamAudit.details.senderId === mo._id, JSON.stringify(teamAudit));
+
+  // ---------- A new report opens it again ----------
+  await call('POST', `/chat/teams/${team._id}/messages/${teamMessage._id}/report`, { token: lea.token, body: { reason: 'Still happening' } });
+  const again = find(await rows(), teamMessage._id);
+  await check('a new report opens a handled message again', again?.status === 'open' && again.resolution === null && again.reportCount === 2, JSON.stringify(again));
+  await check('and takes it out of the resolved list', find(await rows('?status=resolved'), teamMessage._id) === undefined);
+
+  // ---------- Paging the resolved list ----------
+  await call('PATCH', `/chat/reports/${teamMessage._id}`, { token: adminToken, body: { action: 'resolve' } });
+  const resolvedAll = await rows('?status=resolved');
+  const first = (await rows('?status=resolved&limit=1')).data;
+  const rest = (await rows(`?status=resolved&limit=10&before=${encodeURIComponent(first[0].lastReportedAt)}&beforeId=${first[0]._id}`)).data;
+  await check('the resolved list pages like the open one', first.length === 1 && rest.length === resolvedAll.count - 1 && rest.every((r) => r.status === 'resolved'),
+    `${first.length} ${rest.length} ${resolvedAll.count}`);
+  await check('a stranger cannot see them', (await call('GET', '/chat/reports?status=resolved', { token: cat.token })).status === 403);
+});
+
+test('the people lists have a count, like the other lists', async (t) => {
+  const check = checker(t);
+  const { call } = server.api;
+  const { amy, ben } = people;
+
+  const chatList = await call('GET', '/users/chat-list', { token: amy.token });
+  await check('the chat list counts the people in it',
+    chatList.status === 200 && chatList.data.count === chatList.data.data.length && chatList.data.count >= 1 && chatList.data.data.some((u) => u._id === ben._id),
+    JSON.stringify(chatList.data).slice(0, 300));
+  const search = await call('GET', '/users/search?q=Ben', { token: amy.token });
+  await check('a search counts its results', search.status === 200 && search.data.count === search.data.data.length && search.data.count >= 1, JSON.stringify(search.data));
+  for (const q of ['', 'b', ' b ']) {
+    const short = await call('GET', `/users/search?q=${encodeURIComponent(q)}`, { token: amy.token });
+    await check(`a short search (“${q}”) counts nothing`, short.status === 200 && short.data.count === 0 && short.data.data.length === 0, JSON.stringify(short.data));
+  }
+  const missing = await call('GET', '/users/search', { token: amy.token });
+  await check('and so does a search without text', missing.data.count === 0 && missing.data.data.length === 0);
+});
+
 test('conversations list', async (t) => {
   const check = checker(t);
   const { call, connect } = server.api;

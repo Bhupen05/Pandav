@@ -9,6 +9,7 @@ import { PostImages } from './ImageGrid'
 import LinkedInStatus from './LinkedInStatus'
 import PostComments from './PostComments'
 import PostEditDialog from './PostEditDialog'
+import PostLinks from './PostLinks'
 import PostMarkers from './PostMarkers'
 import { errorText, formatDateTime, idOf, roleLabel, tone, visibilityLabel } from './format'
 import { useBusy } from './hooks'
@@ -48,7 +49,7 @@ export default function PostCard({
       if (!user) return
       try {
         const response = await socialV2API.likePost(post._id)
-        const nowLiked = Boolean(response?.data?.liked ?? response?.liked)
+        const nowLiked = Boolean(response?.data?.liked)
         onChange(post._id, (old) => ({
           ...old,
           likes: nowLiked ? [...new Set([...old.likes, user._id])] : old.likes.filter((likeId) => likeId !== user._id),
@@ -107,6 +108,7 @@ export default function PostCard({
       {post.title ? <h4 className="mt-4 break-words text-lg font-extrabold text-slate-950">{post.title}</h4> : null}
       <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">{post.content}</p>
       <PostImages images={post.images} />
+      <PostLinks links={post.mediaUrls} />
 
       <div className="mt-4 flex flex-wrap gap-2">
         <Badge className={tone.info}>{visibilityLabel[post.visibility]}</Badge>

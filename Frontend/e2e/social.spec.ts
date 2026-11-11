@@ -1,9 +1,10 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
-import { ADMIN, USER, signIn, signOut } from './support/app'
+import { ADMIN, USER, registerAccount, signIn, signOut } from './support/app'
 
 // The Social Hub with the two seeded accounts: the user posts and the admin
-// comments, the author edits and deletes, a connection is asked for, accepted
-// and removed, a post for GitHub waits for approval, and the admin moderates.
+// comments, the author edits and deletes, a post carries links, a connection is
+// asked for, accepted and removed, a post for GitHub waits for approval, and the
+// admin moderates posts and handles reported chat messages.
 
 const stamp = Date.now()
 
@@ -14,6 +15,12 @@ const postCard = (page: Page, text: string) => page.locator('article', { hasText
 const choose = async (control: Locator) => {
   await control.locator('xpath=..').click()
   await expect(control).toBeChecked()
+}
+
+// The filter's radio buttons hide under their labels too
+const show = async (radio: Locator) => {
+  await radio.locator('xpath=..').click()
+  await expect(radio).toBeChecked()
 }
 
 async function writePost(page: Page, text: string, { github = false } = {}) {
@@ -157,4 +164,186 @@ test('an admin flags and unflags a post from Moderation, then hides it for the a
   const own = postCard(page, text)
   await expect(own).toContainText('Hidden by an admin')
   await expect(own).toContainText('Mentions a customer')
+})
+test('a post carries links that open safely, and a link can be removed again', async ({ page }) => {
+  const text = `With links ${stamp}`
+  await signIn(page, USER)
+  await page.goto('/social')
+  const form = composer(page)
+  await form.getByLabel('Post', { exact: true }).fill(text)
+
+  // Only full https addresses are taken, and the reason is said
+  const field = form.getByLabel(/^Links/)
+  const add = form.getByRole('button', { name: 'Add link' })
+  await field.fill('http://example.com/plain')
+  await add.click()
+  await expect(form.getByRole('alert').filter({ hasText: 'https://' })).toBeVisible()
+  await field.fill('example.com')
+  await add.click()
+  await expect(form.getByRole('alert')).toContainText('full web address')
+  await field.fill('javascript:alert(1)')
+  await add.click()
+  await expect(form.getByRole('alert')).toContainText('https://')
+  await expect(form.getByRole('list', { name: 'Added links' })).toHaveCount(0)
+
+  // Enter adds a link instead of posting; a link still in the box when the post is sent is kept too
+  await field.fill('https://example.com/docs/release-notes?v=2')
+  await field.press('Enter')
+  await expect(form.getByRole('list', { name: 'Added links' })).toContainText('example.com/docs/release-notes?v=2')
+  await expect(field).toHaveValue('')
+  await field.fill('https://example.com/docs/release-notes?v=2')
+  await add.click()
+  await expect(form.getByRole('alert')).toContainText('already added')
+  await field.fill('https://example.org/second')
+  await form.getByRole('button', { name: 'Create post' }).click()
+
+  const card = postCard(page, text)
+  await expect(card).toBeVisible()
+  const first = card.getByRole('link', { name: /example\.com\/docs\/release-notes\?v=2/ })
+  await expect(first).toHaveAttribute('href', 'https://example.com/docs/release-notes?v=2')
+  await expect(first).toHaveAttribute('target', '_blank')
+  await expect(first).toHaveAttribute('rel', 'noopener noreferrer')
+  const second = card.getByRole('link', { name: /example\.org\/second/ })
+  await expect(second).toHaveAttribute('href', 'https://example.org/second')
+  // The composer starts over
+  await expect(form.getByRole('list', { name: 'Added links' })).toHaveCount(0)
+
+  // The server kept both
+  await page.reload()
+  await expect(postCard(page, text).getByRole('link')).toHaveCount(2)
+
+  // Editing shows the links and removes one; the other stays
+  await postCard(page, text).getByRole('button', { name: 'Edit', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Edit your post' })
+  await expect(dialog.getByRole('list', { name: 'Added links' }).getByRole('listitem')).toHaveCount(2)
+  await dialog.getByRole('button', { name: /^Remove the link example\.com/ }).click()
+  await dialog.getByRole('button', { name: 'Save changes' }).click()
+  await expect(dialog).toBeHidden()
+  await expect(postCard(page, text).getByRole('link', { name: /example\.com/ })).toHaveCount(0)
+  await expect(postCard(page, text).getByRole('link', { name: /example\.org\/second/ })).toBeVisible()
+
+  // Removing the last one leaves a post without links
+  await postCard(page, text).getByRole('button', { name: 'Edit', exact: true }).click()
+  await dialog.getByRole('button', { name: /^Remove the link example\.org/ }).click()
+  await dialog.getByRole('button', { name: 'Save changes' }).click()
+  await expect(dialog).toBeHidden()
+  await expect(postCard(page, text).getByRole('list', { name: 'Links' })).toHaveCount(0)
+  await page.reload()
+  await expect(postCard(page, text)).toBeVisible()
+  await expect(postCard(page, text).getByRole('link')).toHaveCount(0)
+})
+
+test('a link that is not https is shown as text and never opened', async ({ page }) => {
+  const text = `Older link ${stamp}`
+  await signIn(page, USER)
+  // The server still takes http links (older posts have them); the page doesn't open them
+  const created = await page.request.post('/api/v2/social/posts', { data: { content: text, mediaUrls: ['http://insecure.example/page'] } })
+  expect(created.status()).toBe(201)
+  await page.goto('/social')
+  const card = postCard(page, text)
+  await expect(card.getByRole('list', { name: 'Links' })).toContainText('insecure.example/page')
+  await expect(card.getByRole('link')).toHaveCount(0)
+})
+
+test('the Moderation author filter finds a person by name and shows who it is set to', async ({ page, request }) => {
+  const author = await registerAccount(request, 'Filtered Writer')
+  const text = `Posted by the filtered author ${stamp}`
+  await signIn(page, author)
+  await writePost(page, text)
+  await signOut(page, author)
+  await signIn(page, USER)
+  await writePost(page, `Posted by someone else ${stamp}`)
+  await signOut(page, USER)
+
+  await signIn(page, ADMIN)
+  await page.goto('/admin/moderation')
+  const posts = page.locator('section', { has: page.getByRole('heading', { name: 'Posts', exact: true }) })
+  await expect(posts.locator('li', { hasText: `Posted by someone else ${stamp}` })).toBeVisible()
+
+  const search = posts.getByRole('combobox', { name: 'Author' })
+  await search.fill('F')
+  await expect(posts.getByText('Type at least 2 characters.')).toBeVisible()
+  await search.fill(author.name)
+  await posts.getByRole('option', { name: new RegExp(author.name) }).click()
+  // The chosen name shows, and only that person's posts are listed
+  const chosen = posts.getByRole('group', { name: 'Author' })
+  await expect(chosen).toContainText(author.name)
+  await expect(posts.locator('li', { hasText: text })).toBeVisible()
+  await expect(posts.locator('li', { hasText: `Posted by someone else ${stamp}` })).toHaveCount(0)
+  await expect(posts.locator('li[id^="moderate-"]')).toHaveCount(1)
+
+  // Taking the choice back lists everyone again
+  await chosen.getByRole('button', { name: /Show posts by everyone/ }).click()
+  await expect(search).toBeFocused()
+  await expect(posts.locator('li', { hasText: `Posted by someone else ${stamp}` })).toBeVisible()
+
+  // The search leaves the caller out, so admins are offered themselves when the text fits
+  await search.fill('Admin Us')
+  await posts.getByRole('option', { name: /Admin User \(you\)/ }).click()
+  await expect(posts.getByRole('group', { name: 'Author' })).toContainText('Admin User')
+  // The row buttons are named after their authors, so leave the list before the sign-out helper looks for a button with the admin's name
+  await page.goto('/notifications')
+  await signOut(page, ADMIN)
+})
+
+test('an admin marks a reported message as handled, and reopens it', async ({ browser }) => {
+  const text = `Please report this ${stamp}`
+  const admin = await (await browser.newContext()).newPage()
+  await signIn(admin, ADMIN)
+  const user = await (await browser.newContext()).newPage()
+  await signIn(user, USER)
+
+  // The admin writes to the user (an admin may message anyone); the user reports it
+  const me = await (await user.request.get('/api/v2/auth/me')).json()
+  expect((await admin.request.post('/api/v2/chat/send', { data: { receiverId: me.data._id, message: text } })).status()).toBe(201)
+  await user.goto('/chat')
+  await user.getByRole('button', { name: ADMIN.name }).click()
+  const bubble = user.getByRole('list', { name: 'Messages' }).getByRole('listitem').filter({ hasText: text })
+  await expect(bubble).toBeVisible()
+  await bubble.getByRole('button', { name: 'Message options' }).click()
+  await user.getByRole('menuitem', { name: 'Report' }).click()
+  const report = user.getByRole('dialog', { name: 'Report this message?' })
+  await report.getByLabel('What is wrong with it?').fill('Not for this chat')
+  await report.getByRole('button', { name: 'Report', exact: true }).click()
+  await expect(user.getByText('Thanks for telling us.')).toBeVisible()
+
+  // It is on the admin's Open list, with the reason
+  await admin.goto('/admin/moderation?tab=messages')
+  const section = admin.locator('section', { has: admin.getByRole('heading', { name: 'Reported messages' }) })
+  await expect(section.getByRole('radio', { name: 'Open' })).toBeChecked()
+  const row = section.locator('li', { hasText: text })
+  await expect(row).toBeVisible()
+  await row.getByText(/^Who reported it/).click()
+  await expect(row).toContainText('Not for this chat')
+
+  // Mark it as handled, with a note: it leaves Open
+  await row.getByRole('button', { name: 'Mark as handled' }).click()
+  const ask = admin.getByRole('dialog', { name: 'Mark as handled?' })
+  await ask.getByLabel('Note (optional)').fill('Spoke to the sender')
+  await ask.getByRole('button', { name: 'Mark as handled' }).click()
+  await expect(admin.getByText('Marked as handled.')).toBeVisible()
+  await expect(section.locator('li', { hasText: text })).toHaveCount(0)
+
+  // It shows under Resolved, with who handled it and the note
+  await show(section.getByRole('radio', { name: 'Resolved' }))
+  const resolved = section.locator('li', { hasText: text })
+  await expect(resolved).toBeVisible()
+  await expect(resolved).toContainText('Handled by Admin User')
+  await expect(resolved).toContainText('Spoke to the sender')
+  await expect(resolved.getByRole('button', { name: 'Mark as handled' })).toHaveCount(0)
+
+  // After a reload the server still has it there
+  await admin.reload()
+  await show(section.getByRole('radio', { name: 'Resolved' }))
+  await expect(section.locator('li', { hasText: text })).toBeVisible()
+
+  // Reopen it: back under Open, and gone from Resolved
+  await section.locator('li', { hasText: text }).getByRole('button', { name: 'Reopen' }).click()
+  await expect(admin.getByText('Reopened.')).toBeVisible()
+  await expect(section.locator('li', { hasText: text })).toHaveCount(0)
+  await show(section.getByRole('radio', { name: 'Open' }))
+  await expect(section.locator('li', { hasText: text })).toBeVisible()
+
+  await admin.context().close()
+  await user.context().close()
 })

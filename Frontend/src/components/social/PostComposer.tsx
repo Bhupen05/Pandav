@@ -4,7 +4,9 @@ import { socialV2API } from '../../api/socialV2API'
 import { useFeedback } from '../../context/useFeedback'
 import ImagePicker, { type PickedImage } from './ImagePicker'
 import LinkedInPreview from './LinkedInPreview'
+import LinksField from './LinksField'
 import { errorText, formatDateTime } from './format'
+import { linksToSend } from './links'
 import { LINKEDIN_TEXT_MAX, accountName, linkedInText, startConnect, usableAccount } from './linkedin'
 import { CONTENT_MAX, TAG_MAX, TAGS_MAX, TITLE_MAX, parseTags } from './postForm'
 import { BusyButton, SectionCard } from './ui'
@@ -60,6 +62,8 @@ export default function PostComposer({
   const id = useId()
   const [form, setForm] = useState(initialComposer)
   const [images, setImages] = useState<PickedImage[]>([])
+  const [links, setLinks] = useState<string[]>([])
+  const [linkDraft, setLinkDraft] = useState('')
   const [timing, setTiming] = useState<'now' | 'later'>('now')
   const [publishAt, setPublishAt] = useState('')
   const [showPreview, setShowPreview] = useState(false)
@@ -100,6 +104,8 @@ export default function PostComposer({
     if (liOver) return setError(`It is too long for LinkedIn: ${liText.length} of ${LINKEDIN_TEXT_MAX} characters, with the title and tags.`)
     if (images.some((image) => image.status === 'uploading')) return setError('Wait for the images to finish uploading.')
     if (images.some((image) => image.status === 'failed')) return setError('Remove the images that didn’t upload.')
+    const { links: mediaUrls, error: linkError } = linksToSend(links, linkDraft)
+    if (linkError) return setError(linkError)
     if (later) {
       const problem = scheduleProblem(publishAt)
       if (problem) return setError(problem)
@@ -114,12 +120,15 @@ export default function PostComposer({
         tags,
         targets: { pandav: form.pandav, linkedin: form.linkedin, github: form.github },
         images: images.map((image) => ({ id: image.id as string, altText: image.altText.trim() || undefined })),
+        ...(mediaUrls.length > 0 ? { mediaUrls } : {}),
         ...(form.linkedin ? { autoPublish: true, publishAt: later ? new Date(publishAt).toISOString() : null } : {}),
       })
       const post = response?.data as SocialPost | undefined
       if (post) onCreated(post)
       setForm(initialComposer)
       setImages([])
+      setLinks([])
+      setLinkDraft('')
       setTiming('now')
       setPublishAt('')
       setShowPreview(false)
@@ -209,6 +218,8 @@ export default function PostComposer({
           <span className={labelClass}>Images <span className="font-normal text-slate-500">(optional)</span></span>
           <ImagePicker images={images} setImages={setImages} disabled={submitting} />
         </div>
+
+        <LinksField links={links} onLinksChange={setLinks} draft={linkDraft} onDraftChange={setLinkDraft} disabled={submitting} />
 
         <div>
           <label htmlFor={`${id}-tags`} className={labelClass}>Tags <span className="font-normal text-slate-500">(optional)</span></label>

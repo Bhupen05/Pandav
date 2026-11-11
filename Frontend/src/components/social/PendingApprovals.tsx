@@ -1,5 +1,6 @@
 import ApprovalButtons from './ApprovalButtons'
 import { PostImages } from './ImageGrid'
+import PostLinks from './PostLinks'
 import { formatDateTime, roleLabel, tone } from './format'
 import { useShowMore } from './hooks'
 import { authorOf, type PatchPost } from './postState'
@@ -58,6 +59,7 @@ export default function PendingApprovals({
                 {post.title ? <h3 className="mt-3 break-words font-bold text-slate-950">{post.title}</h3> : null}
                 <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">{post.content}</p>
                 <PostImages images={post.images} />
+                <PostLinks links={post.mediaUrls} />
                 {post.autoPublish ? (
                   <p className="mt-2 text-xs text-slate-600">
                     {post.publishAt ? `Goes to LinkedIn on ${formatDateTime(post.publishAt)}, once approved.` : 'Goes to LinkedIn as soon as it is approved.'}

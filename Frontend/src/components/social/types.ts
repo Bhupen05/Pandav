@@ -78,6 +78,8 @@ export type SocialPost = {
   moderatedBy?: Person | string | null
   moderatedAt?: string | null
   approvalStatus: ApprovalStatus
+  // Who decided it (as tasks show their approver), and when
+  approvedBy?: { _id: string; name: string } | null
   approvedAt?: string | null
   editedAt?: string | null
   createdAt: string
@@ -189,4 +191,7 @@ export type ReportedMessage = {
   reportCount: number
   lastReportedAt: string
   reports: Array<{ by: { _id: string; name: string } | null; reason?: string; text?: string; at: string }>
+  // Open until an admin marks the reports as handled; a new report opens them again
+  status: 'open' | 'resolved'
+  resolution: { resolvedBy: { _id: string; name: string } | null; resolvedAt: string; note: string } | null
 }
