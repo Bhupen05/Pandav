@@ -19,7 +19,6 @@ import {
   ClipboardCheck,
   LayoutDashboard
 } from "lucide-react";
-import Footer from "../components/Footer";
 
 // The photo is loaded from another site: when it can't be, a plain panel in
 // the brand colours takes its place
@@ -288,7 +287,6 @@ export default function App() {
       <Features />
       <Personas />
       <CTA />
-      <Footer />
     </div>
   );
 }

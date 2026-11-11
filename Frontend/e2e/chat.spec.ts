@@ -1,5 +1,5 @@
 import { expect, test, type Browser, type Page } from '@playwright/test'
-import { ADMIN, USER, restartBackend, signIn, type Account } from './support/app'
+import { ADMIN, USER, registerAccount, restartBackend, signIn, type Account } from './support/app'
 
 // Signs in a separate browser and opens the conversation with `other`
 const openConversation = async (browser: Browser, account: Account, other: Account) => {
@@ -169,6 +169,65 @@ test('everyone starts in Direct, and a link opens its conversation', async ({ br
   await expect(page.getByRole('heading', { name: USER.name })).toBeVisible()
   await expect(page.getByPlaceholder(`Message ${USER.name}...`)).toBeVisible()
   await context.close()
+})
+
+test('/chat?user= for someone who is not a contact: no conversation means a plain refusal, an older one still opens', async ({ browser, request }) => {
+  const stranger = await registerAccount(request, 'Stranger')
+  const user = await (await browser.newContext()).newPage()
+  await signIn(user, USER)
+  const me = (await (await user.request.get('/api/v2/auth/me')).json()).data._id as string
+
+  // Nobody the user can message, and no conversation with them: the page says so and leads back
+  await user.goto(`/chat?user=${stranger.id}`)
+  await expect(user.getByRole('heading', { name: "You can't message this person" })).toBeVisible()
+  await expect(user.getByRole('heading', { name: "We couldn't find that person" })).toHaveCount(0)
+  await user.getByRole('button', { name: 'Back to messages' }).click()
+  await expect(user).toHaveURL(/\/chat$/)
+  // A link that isn't an id at all reads the same
+  await user.goto('/chat?user=not-an-id')
+  await expect(user.getByRole('heading', { name: "You can't message this person" })).toBeVisible()
+
+  // The user wrote to the stranger while they were connected; the stranger then blocked them. The
+  // person has left the contacts (the rule makes anyone who wrote to you a contact, so only
+  // someone you wrote to can drop out) but the conversation is still the user's to read.
+  const other = await (await browser.newContext()).newPage()
+  expect((await other.request.post('/api/v2/auth/login', { data: { email: stranger.email, password: stranger.password } })).status()).toBe(200)
+  expect((await other.request.post('/api/v2/social/connections/request', { data: { userId: me } })).status()).toBeLessThan(300)
+  expect((await user.request.post('/api/v2/social/connections/request', { data: { userId: stranger.id } })).status()).toBeLessThan(300)
+  const text = `Are you there? ${Date.now()}`
+  expect((await user.request.post('/api/v2/chat/send', { data: { receiverId: stranger.id, message: text } })).status()).toBe(201)
+  expect((await other.request.post('/api/v2/chat/blocks', { data: { userId: me } })).status()).toBeLessThan(300)
+  const contacts = await (await user.request.get('/api/v2/users/chat-list')).json()
+  expect(contacts.data.some((entry: { _id: string }) => entry._id === stranger.id)).toBe(false)
+
+  // The newest page of the list holds other people and says there are older ones, as for someone
+  // with more than 50 conversations; the page after it is the server's own
+  await user.route('**/api/v2/chat/conversations*', async (route) => {
+    if (new URL(route.request().url()).searchParams.has('before')) return route.continue()
+    const newest = new Date(Date.now() + 60_000).toISOString()
+    return route.fulfill({
+      json: {
+        success: true,
+        count: 1,
+        hasMore: true,
+        data: [{
+          user: { _id: 'a'.repeat(24), name: 'Newest Neighbour', role: 'user', department: null, profileImage: null, isActive: true, deleted: false },
+          lastMessage: { _id: 'b'.repeat(24), text: 'Hi', at: newest, fromMe: false, isRead: true, deleted: false },
+          unreadCount: 0,
+          canMessage: true,
+        }],
+      },
+    })
+  })
+  await user.goto(`/chat?user=${stranger.id}`)
+  await expect(user.getByRole('heading', { name: stranger.name })).toBeVisible()
+  await expect(thread(user).getByText(text)).toBeVisible()
+  // They are in the list now, and the message box says nobody can write
+  await expect(contact(user, stranger)).toBeVisible()
+  await expect(user.getByPlaceholder(`Message ${stranger.name}...`)).toBeHidden()
+
+  await user.context().close()
+  await other.context().close()
 })
 
 test('on a phone the list and the conversation take turns', async ({ browser }) => {

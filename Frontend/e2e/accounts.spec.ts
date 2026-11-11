@@ -74,8 +74,20 @@ test('a password set by an admin has to be replaced before anything else; then s
   const reset = await admin.put(`/api/v2/users/${account.id}/reset-password`, { data: { newPassword: 'AdminSet123' } })
   expect(reset.status()).toBe(200)
 
-  // Signing in with it goes straight to the change-password screen
+  // Signing in with it goes straight to the change-password screen. Until a new
+  // password is chosen the server refuses every chat request (403), so the app
+  // must not make any, nor open the chat socket.
   const page = await newPage(browser)
+  const chatAnswers: string[] = []
+  const isChatCall = (url: string) => /\/api\/v2\/(chat\/|auth\/socket-token)/.test(url)
+  page.on('response', (response) => {
+    if (isChatCall(response.url())) chatAnswers.push(`${response.status()} ${new URL(response.url()).pathname}`)
+  })
+  let socketsOpened = 0
+  page.on('websocket', (socket) => {
+    // (Vite's own socket for hot reloading is not the chat's)
+    if (socket.url().includes('/socket.io/')) socketsOpened += 1
+  })
   await signIn(page, { ...account, password: 'AdminSet123' })
   await expect(page).toHaveURL(/\/profile\?tab=security$/)
   await expect(page.getByText('Choose a new password to continue.')).toBeVisible()
@@ -84,6 +96,10 @@ test('a password set by an admin has to be replaced before anything else; then s
   // And keeps the user there
   await page.goto('/tasks')
   await expect(page).toHaveURL(/\/profile\?tab=security$/)
+  await expect(page.getByText('Choose a new password to continue.')).toBeVisible()
+  expect(chatAnswers.filter((answer) => answer.startsWith('403'))).toEqual([])
+  expect(chatAnswers).toEqual([])
+  expect(socketsOpened).toBe(0)
 
   // The admin's password can't be kept
   await page.getByLabel('Password from your admin').fill('AdminSet123')
@@ -95,8 +111,11 @@ test('a password set by an admin has to be replaced before anything else; then s
   const chosen = 'ChosenPass456!'
   await page.getByLabel('New password', { exact: true }).fill(chosen)
   await page.getByLabel('Confirm new password').fill(chosen)
+  // Once the new password is set, chat starts as usual
+  const unreadAnswered = page.waitForResponse((response) => response.url().includes('/api/v2/chat/unread'))
   await page.getByRole('button', { name: 'Change password', exact: true }).click()
   await expect(page).toHaveURL(/\/user$/)
+  expect((await unreadAnswered).status()).toBe(200)
   await page.goto('/tasks')
   await expect(page).toHaveURL(/\/tasks$/)
 

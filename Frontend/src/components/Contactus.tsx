@@ -1,6 +1,5 @@
 import { useSearchParams } from 'react-router-dom'
 import ContactForm from './public/ContactForm'
-import Footer from './Footer'
 
 // Contact channels are set per deployment (see .env.example); unset ones are hidden
 const CONTACT_EMAIL = import.meta.env.VITE_CONTACT_EMAIL as string | undefined
@@ -121,7 +120,6 @@ export default function Contactus() {
           </div>
         </div>
       </div>
-      <Footer />
     </div>
   )
 }

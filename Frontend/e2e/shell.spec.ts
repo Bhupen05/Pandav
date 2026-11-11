@@ -229,3 +229,61 @@ test('profile: edit details, change the email with the password, photo, tabs in 
   await expect(page.getByText('Error:')).toBeVisible()
   await page.context().close()
 })
+
+test('a toast that arrives while a dialog is open shows inside it, can be dismissed there, and moves out when the dialog closes', async ({ browser, request }) => {
+  const invitee = await registerAccount(request, 'Toastee')
+  const crews = [await registerAccount(request, 'Toasterone'), await registerAccount(request, 'Toastertwo')]
+
+  const page = await newPage(browser)
+  await signIn(page, invitee)
+  // Live delivery needs the socket to be open before the invite is sent
+  const socketOpened = page.waitForEvent('websocket')
+  await page.goto('/chat')
+  await socketOpened
+  await page.getByRole('tab', { name: /^Team Chat/ }).click()
+  await page.getByRole('button', { name: 'Create your team' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Create your team' })
+  const nameField = dialog.getByLabel('Team name')
+  await nameField.focus()
+
+  // Another person invites the invitee: the notification arrives as a toast
+  const inviteFrom = async (founder: (typeof crews)[number], team: string) => {
+    expect((await request.post('/api/v2/auth/login', { data: { email: founder.email, password: founder.password } })).status()).toBe(200)
+    const created = await request.post('/api/v2/teams', { data: { name: `${team} ${Date.now()}` } })
+    expect(created.status()).toBe(201)
+    const teamId = (await created.json()).data._id
+    expect((await request.post(`/api/v2/teams/${teamId}/invite`, { data: { email: invitee.email } })).status()).toBe(201)
+  }
+  // Where a toast sits: inside which dialog, and inside which live region
+  const where = (toast: ReturnType<Page['getByRole']>) =>
+    toast.evaluate((element) => ({
+      dialog: element.closest('dialog')?.getAttribute('aria-labelledby') ?? null,
+      live: element.closest('[aria-live]')?.getAttribute('aria-live') ?? null,
+    }))
+
+  await inviteFrom(crews[0], 'Toast crew')
+  const first = page.getByRole('status').filter({ hasText: 'invited you to join' })
+  await expect(first).toBeVisible()
+  expect(await where(first)).toEqual({ dialog: 'manage-team-title', live: 'polite' })
+  // It didn't take the cursor from the dialog's field
+  await expect(nameField).toBeFocused()
+
+  // The × works although the page behind the dialog is inert, and the dialog stays
+  await first.getByRole('button', { name: 'Dismiss' }).click()
+  await expect(first).toHaveCount(0)
+  await expect(dialog).toBeVisible()
+
+  // A toast that is still showing when the dialog closes goes back to the page
+  await inviteFrom(crews[1], 'Toast crew')
+  const second = page.getByRole('status').filter({ hasText: 'invited you to join' })
+  await expect(second).toBeVisible()
+  expect(await where(second)).toEqual({ dialog: 'manage-team-title', live: 'polite' })
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
+  await expect(second).toBeVisible()
+  expect(await where(second)).toEqual({ dialog: null, live: 'polite' })
+  await second.getByRole('button', { name: 'Dismiss' }).click()
+  await expect(second).toHaveCount(0)
+
+  await page.context().close()
+})
