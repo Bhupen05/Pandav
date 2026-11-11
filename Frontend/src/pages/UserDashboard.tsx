@@ -15,6 +15,10 @@ import { OPEN_STATUSES, TASK_STATUSES, type LeaderboardRow, type Task, type Task
 
 type Period = 'month' | 'all'
 
+// A leaderboard row. The server gives each a photoUrl (null without a photo)
+// instead of the picture itself, which the shared row type doesn't say yet.
+type BoardRow = LeaderboardRow & { photoUrl?: string | null }
+
 // The stat cards, one per status, so they add up to the total
 const STAT_STYLE: Record<TaskStatus, { box: string; number: string }> = {
   pending: { box: 'bg-amber-500', number: 'text-amber-700' },
@@ -38,9 +42,12 @@ const greeting = () => {
   return 'Good evening'
 }
 
-function Avatar({ name, image, className = 'h-8 w-8 text-xs' }: { name?: string; image?: string; className?: string }) {
-  return image ? (
-    <img src={image} alt="" className={`${className} shrink-0 rounded-full object-cover`} />
+// A picture, or the initials when there is none or it doesn't load
+function Avatar({ name, image, className = 'h-8 w-8 text-xs' }: { name?: string; image?: string | null; className?: string }) {
+  // The address that failed, so a new picture is tried again
+  const [failed, setFailed] = useState<string | null>(null)
+  return image && image !== failed ? (
+    <img src={image} alt="" onError={() => setFailed(image)} className={`${className} shrink-0 rounded-full object-cover`} />
   ) : (
     <div aria-hidden="true" className={`${className} flex shrink-0 items-center justify-center rounded-full bg-purple-100 font-bold text-purple-700`}>
       {initials(name)}
@@ -112,7 +119,7 @@ export default function UserDashboard() {
   const counts = summary.data
   const open = counts ? (counts.byStatus.pending ?? 0) + (counts.byStatus['in-progress'] ?? 0) + (counts.byStatus['completion-requested'] ?? 0) : null
   const myTodos = todos.data ?? []
-  const boardRows: LeaderboardRow[] = board.data?.period === period ? board.data.rows : []
+  const boardRows: BoardRow[] = board.data?.period === period ? board.data.rows : []
   const boardLoading = board.loading || (board.data !== null && board.data.period !== period && !board.error)
 
   const dueText = (task: Task) => {
@@ -393,11 +400,12 @@ export default function UserDashboard() {
                           <span className="sr-only">Rank </span>
                           {index + 1}
                         </div>
-                        <Avatar name={member.name} image={member.profileImage} className="h-10 w-10 text-sm" />
+                        <Avatar name={member.name} image={member.photoUrl} className="h-10 w-10 text-sm" />
                         <div className="min-w-0 flex-1">
-                          <p className={`truncate font-medium ${isCurrentUser ? 'text-emerald-800' : 'text-neutral-900'}`}>
-                            {member.name}
-                            {isCurrentUser && <span className="ml-2 text-xs text-emerald-700">(You)</span>}
+                          {/* A long name is cut short; "(You)" always stays */}
+                          <p className={`flex items-baseline gap-2 font-medium ${isCurrentUser ? 'text-emerald-800' : 'text-neutral-900'}`}>
+                            <span className="truncate">{member.name}</span>
+                            {isCurrentUser && <span className="shrink-0 text-xs text-emerald-700">(You)</span>}
                           </p>
                           <p className="text-xs text-neutral-600">{member.completedTasks} of {member.totalTasks} completed</p>
                         </div>

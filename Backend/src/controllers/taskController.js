@@ -1596,7 +1596,18 @@ export const getLeaderboard = async (req, res) => {
           from: 'users',
           localField: '_id',
           foreignField: '_id',
-          pipeline: [{ $match: { isActive: true, deletedAt: null } }, { $project: { name: 1, profileImage: 1 } }],
+          // The picture itself stays in the database: the row says whether
+          // there is one, and when the account last changed (the link's ?v=)
+          pipeline: [
+            { $match: { isActive: true, deletedAt: null } },
+            {
+              $project: {
+                name: 1,
+                updatedAt: 1,
+                hasPhoto: { $regexMatch: { input: { $ifNull: ['$profileImage', ''] }, regex: /^data:image\/(png|jpeg|webp|gif);base64,/ } },
+              },
+            },
+          ],
           as: 'user',
         },
       },
@@ -1604,7 +1615,8 @@ export const getLeaderboard = async (req, res) => {
       {
         $project: {
           name: '$user.name',
-          profileImage: '$user.profileImage',
+          hasPhoto: '$user.hasPhoto',
+          photoVersion: { $toLong: { $ifNull: ['$user.updatedAt', 0] } },
           totalTasks: 1,
           completedTasks: 1,
           completionRate: { $round: [{ $multiply: [{ $divide: ['$completedTasks', '$totalTasks'] }, 100] }, 0] },
@@ -1614,10 +1626,18 @@ export const getLeaderboard = async (req, res) => {
       { $limit: 20 },
     ]);
 
+    // Pictures are fetched on their own (GET /users/:id/photo), not carried
+    // in every row; a new picture changes `v`, so a browser fetches it again
+    const prefix = process.env.API_V2_PREFIX || '/api/v2';
+    const data = rows.map(({ hasPhoto, photoVersion, ...row }) => ({
+      ...row,
+      photoUrl: hasPhoto ? `${prefix}/users/${row._id}/photo?v=${photoVersion}` : null,
+    }));
+
     res.status(200).json({
       success: true,
-      count: rows.length,
-      data: rows,
+      count: data.length,
+      data,
     });
   } catch (error) {
     sendServerError(res, error);

@@ -36,10 +36,49 @@ export const browserStorage = (page: Page) =>
     session: { ...sessionStorage },
   }))
 
-// Restarts the API (the database is kept); resolves once it is back up
-export async function restartBackend() {
-  const response = await fetch(`${CONTROL_URL}/restart`, { method: 'POST' })
+// Restarts the API (the database is kept); resolves once it is back up. The
+// API starts without email: `mail` turns it on (the emails go to the fake
+// SMTP server of Backend/test/e2e-server.js, see capturedMail), and `verify`
+// also refuses sign-ins from addresses that aren't confirmed yet.
+export async function restartBackend({ mail = false, verify = false } = {}) {
+  const flags = new URLSearchParams()
+  if (mail) flags.set('mail', 'on')
+  if (verify) flags.set('verify', 'on')
+  const response = await fetch(`${CONTROL_URL}/restart${flags.toString() ? `?${flags}` : ''}`, { method: 'POST' })
   if (!response.ok) throw new Error(`Backend restart failed: ${await response.text()}`)
+}
+
+// An email the API sent while mail was on
+export type Mail = { to: string[]; from: string; subject: string; text: string; raw: string; at: string }
+
+export async function capturedMail(): Promise<Mail[]> {
+  const response = await fetch(`${CONTROL_URL}/mail`)
+  if (!response.ok) throw new Error(`Reading the captured email failed: ${response.status}`)
+  return response.json()
+}
+
+export async function clearMail() {
+  const response = await fetch(`${CONTROL_URL}/mail`, { method: 'DELETE' })
+  if (!response.ok) throw new Error(`Clearing the captured email failed: ${response.status}`)
+}
+
+// The emails to `to` whose subject contains `subject`, once there are at least
+// `count` of them (the API doesn't wait for the mail server before it answers
+// "forgot password" or "send the link again")
+export async function waitForMail(to: string, subject: string, count = 1): Promise<Mail[]> {
+  const matching = async () =>
+    (await capturedMail()).filter((mail) => mail.to.includes(to.toLowerCase()) && mail.subject.includes(subject))
+  await expect
+    .poll(async () => (await matching()).length, { message: `email to ${to} about "${subject}" (${count})`, timeout: 15_000 })
+    .toBeGreaterThanOrEqual(count)
+  return matching()
+}
+
+// The link in an email, as a path with its query (open it with page.goto)
+export function linkIn(mail: Mail, path: '/verify-email' | '/reset-password') {
+  const match = new RegExp(String.raw`https?://[^\s/]+(${path}\?token=[\w-]+)`).exec(mail.text)
+  if (!match) throw new Error(`No ${path} link in the email "${mail.subject}": ${mail.text}`)
+  return match[1]
 }
 
 // A fresh account made through the API (sign-ups are limited to 10 an hour, so

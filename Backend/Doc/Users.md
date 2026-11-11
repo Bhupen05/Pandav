@@ -91,6 +91,10 @@ What team leaders and members may do is described in [Teams.md](Teams.md).
 Anything else gives `400 Profile image must be a PNG, JPEG, WebP or GIF image under 200 KB`. The
 frontend resizes uploads to 256 px before sending them. `null` or `""` removes the image.
 
+Lists that show many people don't carry the image: they give a `photoUrl` and the app loads the
+picture from [`GET /users/:id/photo`](#get-a-photo). (Older endpoints, such as the people search,
+the chat list and Social Hub posts, still return `profileImage` itself.)
+
 Accounts saved before this rule may hold other values, such as image URLs. Those are still
 returned, and only checked when the image itself is changed, so they don't block password
 changes, resets, deactivation or team changes. The data migration script only clears images over
@@ -309,6 +313,7 @@ All of them send `Retry-After`. "Address" is the visitor's IP address (see
 | `DELETE` | `/api/v2/users/me` | Signed in |
 | `GET` | `/api/v2/users` | Admin |
 | `GET` | `/api/v2/users/:id` | The user themselves, or an admin |
+| `GET` | `/api/v2/users/:id/photo` | Signed in |
 | `PUT` | `/api/v2/users/:id` | The user themselves, or an admin |
 | `DELETE` | `/api/v2/users/:id` | Admin |
 | `PUT` | `/api/v2/users/:id/toggle-active` | Admin |
@@ -829,6 +834,35 @@ Errors:
 - `403 Not authorized to access this profile`: a non-admin asking for someone else. This is
   checked first, so a non-admin can't tell whether an id exists.
 - `404 User not found`
+
+### Get a photo
+
+`GET /api/v2/users/:id/photo`. Signed in.
+
+Answers with the user's profile image itself, decoded from the stored data URL: the bytes, with
+`Content-Type` set to `image/png`, `image/jpeg`, `image/webp` or `image/gif`. The app shows it with
+`<img src="/api/v2/users/<id>/photo?v=<version>">`; the browser sends the session cookie.
+
+Any signed-in user may ask for any account's photo. It is what the people search, the chat list,
+teams and Social Hub already show, so there is nothing more to hide, and it doesn't depend on
+teams or blocks. Deactivated accounts keep their photo here, as they do in old conversations.
+
+Headers: `Cache-Control: private, max-age=86400` (the browser keeps it for a day), a strong
+`ETag` (a hash of the image; asking again with `If-None-Match` gets `304 Not Modified`),
+`X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`, so
+it is never run as a page.
+
+The `v` query parameter is ignored by the server. Links the API gives out
+(`photoUrl` in the [leaderboard](Tasks.md#leaderboard)) carry one that changes whenever the account
+is saved, which includes a new or removed photo, so the browser fetches a changed photo at once
+instead of waiting out the day.
+
+Errors:
+
+- `401` not signed in.
+- `404 Photo not found`: the user has no photo, the id is unknown or not an id, the account is
+  [deleted](#deleted-accounts), or the stored value isn't an image data URL (accounts saved
+  before the [format was checked](#profile-image) may hold an image address instead).
 
 ### Update a user
 
