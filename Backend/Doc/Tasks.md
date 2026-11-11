@@ -851,7 +851,7 @@ then `name`.
 | --- | --- |
 | `_id` | User id |
 | `name` | User's name |
-| `profileImage` | User's profile image, omitted if none |
+| `photoUrl` | Where to load the user's profile photo from (`/api/v2/users/<id>/photo?v=<version>`, see [Users.md](Users.md#get-a-photo)), or `null` if there is none. The rows don't carry the image itself, and have no `profileImage` |
 | `totalTasks` | Counted tasks the user is assigned to |
 | `completedTasks` | Of those, tasks with `status: "completed"` |
 | `completionRate` | `completedTasks / totalTasks` as a whole-number percentage |
@@ -861,7 +861,7 @@ then `name`.
   "success": true,
   "count": 1,
   "data": [
-    { "_id": "6710a0f1e4b0f5a3c8d90b11", "name": "Asha Rao", "totalTasks": 8, "completedTasks": 6, "completionRate": 75 }
+    { "_id": "6710a0f1e4b0f5a3c8d90b11", "name": "Asha Rao", "totalTasks": 8, "completedTasks": 6, "completionRate": 75, "photoUrl": "/api/v2/users/6710a0f1e4b0f5a3c8d90b11/photo?v=1761300000000" }
   ]
 }
 ```

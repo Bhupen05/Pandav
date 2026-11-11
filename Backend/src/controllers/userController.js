@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
+import mongoose from 'mongoose';
 import User, { SECOND_FACTOR_FIELDS, TWO_FACTOR_OFF, acceptSecondFactor } from '../models/User.js';
 import Task from '../models/Task.js';
 import Attendance from '../models/Attendance.js';
@@ -236,6 +237,45 @@ export const getUser = async (req, res) => {
       success: true,
       data: user,
     });
+  } catch (error) {
+    sendServerError(res, error);
+  }
+};
+
+// The stored image as bytes plus its type, or null for a value that isn't a
+// data URL (accounts saved before the format was checked may hold other
+// things, such as an image address)
+const decodeProfileImage = (value) => {
+  const match = typeof value === 'string' ? /^data:(image\/(?:png|jpeg|webp|gif));base64,/.exec(value) : null;
+  return match ? { type: match[1], bytes: Buffer.from(value.slice(match[0].length), 'base64') } : null;
+};
+
+// @desc    A user's profile photo as an image, so lists can show it with an
+//          <img> instead of carrying it inline. Any signed-in user may ask:
+//          it is what the directory, chat and Social Hub show anyway.
+// @route   GET /api/v2/users/:id/photo
+// @access  Private
+export const getUserPhoto = async (req, res) => {
+  try {
+    const notFound = () => res.status(404).json({ success: false, message: 'Photo not found' });
+    if (!mongoose.isObjectIdOrHexString(req.params.id)) return notFound();
+
+    const user = await User.findOne({ _id: req.params.id, deletedAt: null }).select('profileImage');
+    const image = decodeProfileImage(user?.profileImage);
+    if (!image) return notFound();
+
+    // A new photo is a new URL (the ?v= in the links the API hands out), so
+    // the browser may keep this one for a day; the ETag lets it check cheaply
+    // after that. nosniff keeps the browser to the image type claimed here, and
+    // the policy means it is never run as a page.
+    res.set({
+      'Content-Type': image.type,
+      'Cache-Control': 'private, max-age=86400',
+      ETag: `"${crypto.createHash('sha1').update(image.bytes).digest('hex')}"`,
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+    });
+    res.send(image.bytes);
   } catch (error) {
     sendServerError(res, error);
   }

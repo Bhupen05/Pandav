@@ -3,6 +3,7 @@ import {
   searchUsers,
   getUsers,
   getUser,
+  getUserPhoto,
   updateUser,
   deleteUser,
   deleteOwnAccount,
@@ -31,6 +32,9 @@ router
   // Changing your own email is confirmed with currentPassword
   .put(protect, passwordCheckLimiter, updateUser)
   .delete(protect, authorize('admin'), deleteUser);
+
+// The image only: lists link to it instead of carrying the picture
+router.get('/:id/photo', protect, getUserPhoto);
 
 router
   .route('/:id/toggle-active')
